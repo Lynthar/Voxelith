@@ -159,6 +159,14 @@ impl App {
             self.editor.redo(&mut self.world);
         }
 
+        if self.ui.state.clear_all_requested {
+            self.world.clear();
+            self.editor.history.clear();
+            if let Some(renderer) = &mut self.renderer {
+                renderer.chunk_meshes.clear();
+            }
+        }
+
         if self.ui.state.generate_test_cube {
             self.world.clear();
             self.editor.history.clear();
@@ -173,7 +181,93 @@ impl App {
             self.rebuild_all_meshes();
         }
 
+        if self.ui.state.generate_sphere {
+            self.world.clear();
+            self.editor.history.clear();
+            self.create_sphere((0, 10, 0), 6);
+            self.rebuild_all_meshes();
+        }
+
+        if self.ui.state.generate_pyramid {
+            self.world.clear();
+            self.editor.history.clear();
+            self.create_pyramid((0, 0, 0), 10);
+            self.rebuild_all_meshes();
+        }
+
+        if self.ui.state.reset_camera_requested {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.camera.target = glam::Vec3::ZERO;
+                renderer.camera_controller.distance = 40.0;
+                renderer.camera_controller.yaw = 0.0;
+                renderer.camera_controller.pitch = 0.5;
+            }
+        }
+
+        if let Some(view) = self.ui.state.camera_view {
+            if let Some(renderer) = &mut self.renderer {
+                use voxelith::ui::CameraView;
+                match view {
+                    CameraView::Top => {
+                        renderer.camera_controller.pitch = 1.5;
+                        renderer.camera_controller.yaw = 0.0;
+                    }
+                    CameraView::Front => {
+                        renderer.camera_controller.pitch = 0.0;
+                        renderer.camera_controller.yaw = 0.0;
+                    }
+                    CameraView::Side => {
+                        renderer.camera_controller.pitch = 0.0;
+                        renderer.camera_controller.yaw = std::f32::consts::FRAC_PI_2;
+                    }
+                }
+            }
+        }
+
         self.ui.clear_flags();
+    }
+
+    /// Create a voxel sphere
+    fn create_sphere(&mut self, center: (i32, i32, i32), radius: i32) {
+        let radius_sq = (radius as f32).powi(2);
+        for z in -radius..=radius {
+            for y in -radius..=radius {
+                for x in -radius..=radius {
+                    let dist_sq = (x * x + y * y + z * z) as f32;
+                    if dist_sq <= radius_sq {
+                        // Color based on distance from center
+                        let t = (dist_sq.sqrt() / radius as f32 * 255.0) as u8;
+                        let voxel = voxelith::core::Voxel::from_rgb(255 - t, t, 128);
+                        self.world.set_voxel(
+                            center.0 + x,
+                            center.1 + y,
+                            center.2 + z,
+                            voxel,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Create a voxel pyramid
+    fn create_pyramid(&mut self, base_center: (i32, i32, i32), height: i32) {
+        for y in 0..height {
+            let size = height - y;
+            for z in -size..=size {
+                for x in -size..=size {
+                    // Color gradient based on height
+                    let t = (y as f32 / height as f32 * 255.0) as u8;
+                    let voxel = voxelith::core::Voxel::from_rgb(194 - t / 2, 178 - t / 2, 128 + t / 2);
+                    self.world.set_voxel(
+                        base_center.0 + x,
+                        base_center.1 + y,
+                        base_center.2 + z,
+                        voxel,
+                    );
+                }
+            }
+        }
     }
 
     /// Update raycast for hovered voxel
@@ -273,6 +367,10 @@ impl App {
         let egui_state = self.egui_state.as_mut().unwrap();
         egui_state.handle_platform_output(&window, full_output.platform_output);
 
+        // Get viewport settings before borrowing renderer
+        let show_grid = self.ui.viewport.show_grid;
+        let show_axes = self.ui.viewport.show_axes;
+
         // Now do the actual rendering
         let renderer = self.renderer.as_mut().unwrap();
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
@@ -336,6 +434,17 @@ impl App {
                 occlusion_query_set: None,
             });
 
+            // Draw grid first (behind everything)
+            if show_grid {
+                renderer.draw_grid(&mut render_pass);
+            }
+
+            // Draw axes
+            if show_axes {
+                renderer.draw_axes(&mut render_pass);
+            }
+
+            // Draw voxel meshes
             render_pass.set_pipeline(&renderer.pipeline.render_pipeline);
             render_pass.set_bind_group(0, &renderer.pipeline.camera_bind_group, &[]);
 

@@ -9,10 +9,12 @@
 mod camera;
 mod pipeline;
 mod gpu_mesh;
+mod grid;
 
 pub use camera::{Camera, CameraController, CameraUniform};
 pub use pipeline::RenderPipeline;
 pub use gpu_mesh::GpuMesh;
+pub use grid::{AxisMesh, GridMesh, LinePipeline, LineVertex};
 
 use crate::mesh::ChunkMesh;
 use crate::core::ChunkPos;
@@ -26,10 +28,13 @@ pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     pub pipeline: RenderPipeline,
+    pub line_pipeline: LinePipeline,
     pub camera: Camera,
     pub camera_controller: CameraController,
     pub chunk_meshes: HashMap<ChunkPos, GpuMesh>,
     pub depth_texture: wgpu::TextureView,
+    pub grid_mesh: GridMesh,
+    pub axis_mesh: AxisMesh,
 }
 
 impl Renderer {
@@ -98,6 +103,9 @@ impl Renderer {
         // Create render pipeline
         let pipeline = RenderPipeline::new(&device, surface_format);
 
+        // Create line pipeline (uses same camera bind group layout)
+        let line_pipeline = LinePipeline::new(&device, surface_format, &pipeline.camera_bind_group_layout);
+
         // Create camera
         let camera = Camera::new(
             glam::Vec3::new(0.0, 20.0, 40.0),
@@ -109,16 +117,23 @@ impl Renderer {
         // Create depth texture
         let depth_texture = Self::create_depth_texture(&device, &config);
 
+        // Create grid and axis meshes
+        let grid_mesh = GridMesh::new(&device, 20, 1.0);
+        let axis_mesh = AxisMesh::new(&device, 10.0);
+
         Ok(Self {
             device,
             queue,
             surface,
             config,
             pipeline,
+            line_pipeline,
             camera,
             camera_controller,
             chunk_meshes: HashMap::new(),
             depth_texture,
+            grid_mesh,
+            axis_mesh,
         })
     }
 
@@ -158,6 +173,11 @@ impl Renderer {
         }
     }
 
+    /// Update grid mesh with new settings
+    pub fn update_grid(&mut self, size: i32, spacing: f32) {
+        self.grid_mesh = GridMesh::new(&self.device, size, spacing);
+    }
+
     /// Upload a chunk mesh to the GPU
     pub fn upload_mesh(&mut self, mesh: &ChunkMesh) {
         if mesh.is_empty() {
@@ -172,6 +192,22 @@ impl Renderer {
     /// Remove a chunk mesh
     pub fn remove_mesh(&mut self, chunk_pos: ChunkPos) {
         self.chunk_meshes.remove(&chunk_pos);
+    }
+
+    /// Draw grid in render pass
+    pub fn draw_grid<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        render_pass.set_pipeline(&self.line_pipeline.render_pipeline);
+        render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.grid_mesh.vertex_buffer.slice(..));
+        render_pass.draw(0..self.grid_mesh.vertex_count, 0..1);
+    }
+
+    /// Draw axes in render pass
+    pub fn draw_axes<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        render_pass.set_pipeline(&self.line_pipeline.render_pipeline);
+        render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.axis_mesh.vertex_buffer.slice(..));
+        render_pass.draw(0..self.axis_mesh.vertex_count, 0..1);
     }
 
     /// Render a frame
