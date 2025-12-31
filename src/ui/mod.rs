@@ -101,6 +101,19 @@ impl Ui {
                         ui.close_menu();
                     }
                     ui.separator();
+                    ui.menu_button("Import", |ui| {
+                        if ui.button("MagicaVoxel (.vox)...").clicked() {
+                            self.state.import_vox_requested = true;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Export", |ui| {
+                        if ui.button("MagicaVoxel (.vox)...").clicked() {
+                            self.state.export_vox_requested = true;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
                     if ui.button("Exit").clicked() {
                         self.state.exit_requested = true;
                     }
@@ -512,6 +525,26 @@ impl Ui {
                         ui.end_row();
 
                         ui.end_row();
+                        ui.heading("File");
+                        ui.end_row();
+
+                        ui.label("Ctrl+N");
+                        ui.label("New project");
+                        ui.end_row();
+
+                        ui.label("Ctrl+O");
+                        ui.label("Open project");
+                        ui.end_row();
+
+                        ui.label("Ctrl+S");
+                        ui.label("Save project");
+                        ui.end_row();
+
+                        ui.label("Ctrl+Shift+S");
+                        ui.label("Save as...");
+                        ui.end_row();
+
+                        ui.end_row();
                         ui.heading("Actions");
                         ui.end_row();
 
@@ -522,9 +555,19 @@ impl Ui {
             });
     }
 
-    fn show_status_bar(&self, ctx: &Context, editor: &Editor) {
+    fn show_status_bar(&mut self, ctx: &Context, editor: &Editor) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Show status message if recent (within 5 seconds)
+                if let Some((msg, time)) = &self.state.status_message {
+                    if time.elapsed().as_secs() < 5 {
+                        ui.label(egui::RichText::new(msg).color(egui::Color32::YELLOW));
+                        ui.separator();
+                    } else {
+                        self.state.status_message = None;
+                    }
+                }
+
                 ui.label("Voxelith v0.1.0");
                 ui.separator();
                 ui.label(format!("Tool: {}", editor.current_tool.name()));
@@ -559,12 +602,19 @@ impl Ui {
         });
     }
 
+    /// Set a status message to display
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.state.status_message = Some((message.into(), std::time::Instant::now()));
+    }
+
     /// Clear one-shot flags
     pub fn clear_flags(&mut self) {
         self.state.new_project_requested = false;
         self.state.open_project_requested = false;
         self.state.save_project_requested = false;
         self.state.save_as_requested = false;
+        self.state.import_vox_requested = false;
+        self.state.export_vox_requested = false;
         self.state.exit_requested = false;
         self.state.undo_requested = false;
         self.state.redo_requested = false;

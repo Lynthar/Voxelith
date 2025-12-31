@@ -18,6 +18,8 @@ pub struct UiState {
     pub open_project_requested: bool,
     pub save_project_requested: bool,
     pub save_as_requested: bool,
+    pub import_vox_requested: bool,
+    pub export_vox_requested: bool,
     pub exit_requested: bool,
     pub undo_requested: bool,
     pub redo_requested: bool,
@@ -28,6 +30,9 @@ pub struct UiState {
     pub generate_pyramid: bool,
     pub reset_camera_requested: bool,
     pub camera_view: Option<CameraView>,
+
+    // Status message for user feedback
+    pub status_message: Option<(String, std::time::Instant)>,
 }
 
 impl UiState {

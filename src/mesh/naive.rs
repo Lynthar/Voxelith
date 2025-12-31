@@ -169,6 +169,7 @@ impl Mesher for NaiveMesher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Voxel;
 
     #[test]
     fn test_empty_chunk_mesh() {

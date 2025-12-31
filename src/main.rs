@@ -2,6 +2,7 @@
 //!
 //! Main application entry point.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -17,6 +18,7 @@ use voxelith::{
     editor::{
         eyedrop, flood_fill, BrushTool, Editor, EditorTool, Ray, Tool, ToolContext, VoxelRaycast,
     },
+    io,
     mesh::{Mesher, NaiveMesher},
     render::Renderer,
     ui::{RenderStats, Ui},
@@ -40,6 +42,9 @@ struct App {
     cursor_captured: bool,
     cursor_pos: (f32, f32),
     modifiers: ModifiersState,
+
+    /// Current project file path (None = unsaved)
+    project_path: Option<PathBuf>,
 }
 
 impl App {
@@ -58,6 +63,7 @@ impl App {
             cursor_captured: false,
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
+            project_path: None,
         }
     }
 
@@ -224,7 +230,176 @@ impl App {
             }
         }
 
+        // File operations
+        if self.ui.state.new_project_requested {
+            self.new_project();
+        }
+
+        if self.ui.state.save_project_requested {
+            self.save_project();
+        }
+
+        if self.ui.state.save_as_requested {
+            self.save_project_as();
+        }
+
+        if self.ui.state.open_project_requested {
+            self.open_project();
+        }
+
+        if self.ui.state.import_vox_requested {
+            self.import_vox();
+        }
+
+        if self.ui.state.export_vox_requested {
+            self.export_vox();
+        }
+
         self.ui.clear_flags();
+    }
+
+    /// Create a new empty project
+    fn new_project(&mut self) {
+        self.world.clear();
+        self.editor.history.clear();
+        self.project_path = None;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.chunk_meshes.clear();
+        }
+        self.ui.set_status("New project created");
+    }
+
+    /// Save the current project
+    fn save_project(&mut self) {
+        if let Some(path) = &self.project_path.clone() {
+            self.do_save_project(path.clone());
+        } else {
+            self.save_project_as();
+        }
+    }
+
+    /// Save the project to a new file
+    fn save_project_as(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Voxelith Project", &["vxlt"])
+            .set_title("Save Project As");
+
+        if let Some(path) = dialog.save_file() {
+            self.do_save_project(path);
+        }
+    }
+
+    /// Actually save the project to a path
+    fn do_save_project(&mut self, path: PathBuf) {
+        match io::save_world(&self.world, &path) {
+            Ok(_) => {
+                self.project_path = Some(path.clone());
+                let filename = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("project");
+                self.ui.set_status(format!("Saved: {}", filename));
+            }
+            Err(e) => {
+                log::error!("Failed to save project: {}", e);
+                self.ui.set_status(format!("Save failed: {}", e));
+            }
+        }
+    }
+
+    /// Open a project file
+    fn open_project(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Voxelith Project", &["vxlt"])
+            .add_filter("All Files", &["*"])
+            .set_title("Open Project");
+
+        if let Some(path) = dialog.pick_file() {
+            match io::load_world(&path) {
+                Ok(world) => {
+                    self.world = world;
+                    self.editor.history.clear();
+                    self.project_path = Some(path.clone());
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.chunk_meshes.clear();
+                    }
+                    self.rebuild_all_meshes();
+                    let filename = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("project");
+                    self.ui.set_status(format!("Opened: {}", filename));
+                }
+                Err(e) => {
+                    log::error!("Failed to open project: {}", e);
+                    self.ui.set_status(format!("Open failed: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Import a VOX file
+    fn import_vox(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("MagicaVoxel", &["vox"])
+            .set_title("Import MagicaVoxel File");
+
+        if let Some(path) = dialog.pick_file() {
+            match std::fs::File::open(&path) {
+                Ok(mut file) => {
+                    match io::import_vox(&mut file) {
+                        Ok(world) => {
+                            self.world = world;
+                            self.editor.history.clear();
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.chunk_meshes.clear();
+                            }
+                            self.rebuild_all_meshes();
+                            let filename = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("file");
+                            self.ui.set_status(format!("Imported: {}", filename));
+                        }
+                        Err(e) => {
+                            log::error!("Failed to import VOX: {}", e);
+                            self.ui.set_status(format!("Import failed: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to open file: {}", e);
+                    self.ui.set_status(format!("Open failed: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Export to VOX format
+    fn export_vox(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("MagicaVoxel", &["vox"])
+            .set_title("Export as MagicaVoxel");
+
+        if let Some(path) = dialog.save_file() {
+            match std::fs::File::create(&path) {
+                Ok(mut file) => {
+                    match io::export_vox(&self.world, &mut file) {
+                        Ok(_) => {
+                            let filename = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("file");
+                            self.ui.set_status(format!("Exported: {}", filename));
+                        }
+                        Err(e) => {
+                            log::error!("Failed to export VOX: {}", e);
+                            self.ui.set_status(format!("Export failed: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to create file: {}", e);
+                    self.ui.set_status(format!("Create file failed: {}", e));
+                }
+            }
+        }
     }
 
     /// Create a voxel sphere
@@ -338,6 +513,19 @@ impl App {
             }
             KeyCode::KeyY if self.modifiers.control_key() => {
                 self.editor.redo(&mut self.world);
+            }
+            KeyCode::KeyS if self.modifiers.control_key() => {
+                if self.modifiers.shift_key() {
+                    self.save_project_as();
+                } else {
+                    self.save_project();
+                }
+            }
+            KeyCode::KeyO if self.modifiers.control_key() => {
+                self.open_project();
+            }
+            KeyCode::KeyN if self.modifiers.control_key() => {
+                self.new_project();
             }
             _ => {}
         }
