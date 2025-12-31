@@ -4,6 +4,7 @@ mod panels;
 
 pub use panels::UiState;
 
+use crate::editor::{Editor, Tool};
 use egui::Context;
 
 /// Main UI manager
@@ -19,7 +20,7 @@ impl Ui {
     }
 
     /// Render the UI
-    pub fn show(&mut self, ctx: &Context, stats: &RenderStats) {
+    pub fn show(&mut self, ctx: &Context, stats: &RenderStats, editor: &mut Editor) {
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -42,11 +43,13 @@ impl Ui {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    if ui.button("Undo").clicked() {
+                    let undo_text = if editor.can_undo() { "Undo (Ctrl+Z)" } else { "Undo" };
+                    if ui.add_enabled(editor.can_undo(), egui::Button::new(undo_text)).clicked() {
                         self.state.undo_requested = true;
                         ui.close_menu();
                     }
-                    if ui.button("Redo").clicked() {
+                    let redo_text = if editor.can_redo() { "Redo (Ctrl+Y)" } else { "Redo" };
+                    if ui.add_enabled(editor.can_redo(), egui::Button::new(redo_text)).clicked() {
                         self.state.redo_requested = true;
                         ui.close_menu();
                     }
@@ -54,6 +57,7 @@ impl Ui {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.state.show_stats, "Show Stats");
                     ui.checkbox(&mut self.state.show_tools, "Show Tools");
+                    ui.checkbox(&mut self.state.show_palette, "Show Palette");
                 });
                 ui.menu_button("Generate", |ui| {
                     if ui.button("Test Cube").clicked() {
@@ -83,6 +87,12 @@ impl Ui {
                         "Camera: ({:.1}, {:.1}, {:.1})",
                         stats.camera_pos.0, stats.camera_pos.1, stats.camera_pos.2
                     ));
+                    ui.separator();
+                    ui.label(format!(
+                        "History: {} undo, {} redo",
+                        editor.history.undo_count(),
+                        editor.history.redo_count()
+                    ));
                 });
         }
 
@@ -92,31 +102,99 @@ impl Ui {
                 .default_pos([10.0, 200.0])
                 .resizable(true)
                 .show(ctx, |ui| {
-                    ui.heading("Brush");
+                    ui.heading("Tool");
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.state.tool, Tool::Place, "Place");
-                        ui.selectable_value(&mut self.state.tool, Tool::Remove, "Remove");
-                        ui.selectable_value(&mut self.state.tool, Tool::Paint, "Paint");
+                        if ui.selectable_label(editor.current_tool == Tool::Place, "Place (1)").clicked() {
+                            editor.current_tool = Tool::Place;
+                        }
+                        if ui.selectable_label(editor.current_tool == Tool::Remove, "Remove (2)").clicked() {
+                            editor.current_tool = Tool::Remove;
+                        }
                     });
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(editor.current_tool == Tool::Paint, "Paint (3)").clicked() {
+                            editor.current_tool = Tool::Paint;
+                        }
+                        if ui.selectable_label(editor.current_tool == Tool::Eyedropper, "Pick (4)").clicked() {
+                            editor.current_tool = Tool::Eyedropper;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(editor.current_tool == Tool::Fill, "Fill (5)").clicked() {
+                            editor.current_tool = Tool::Fill;
+                        }
+                    });
+
+                    ui.separator();
+                    ui.heading("Brush Size");
+                    let mut size = editor.brush_size as u32;
+                    if ui.add(egui::Slider::new(&mut size, 1..=10)).changed() {
+                        editor.brush_size = size as u8;
+                    }
 
                     ui.separator();
                     ui.heading("Color");
                     let mut color = [
-                        self.state.brush_color[0] as f32 / 255.0,
-                        self.state.brush_color[1] as f32 / 255.0,
-                        self.state.brush_color[2] as f32 / 255.0,
+                        editor.brush_color.r as f32 / 255.0,
+                        editor.brush_color.g as f32 / 255.0,
+                        editor.brush_color.b as f32 / 255.0,
                     ];
                     if ui.color_edit_button_rgb(&mut color).changed() {
-                        self.state.brush_color = [
+                        editor.brush_color = crate::core::Voxel::from_rgb(
                             (color[0] * 255.0) as u8,
                             (color[1] * 255.0) as u8,
                             (color[2] * 255.0) as u8,
-                        ];
+                        );
                     }
 
-                    ui.separator();
-                    ui.heading("Brush Size");
-                    ui.add(egui::Slider::new(&mut self.state.brush_size, 1..=10));
+                    // Show hovered voxel info
+                    if let Some(hit) = &editor.hovered_voxel {
+                        ui.separator();
+                        ui.heading("Hovered Voxel");
+                        ui.label(format!("Pos: ({}, {}, {})", hit.voxel_pos.0, hit.voxel_pos.1, hit.voxel_pos.2));
+                        ui.label(format!("Normal: ({}, {}, {})", hit.normal.0, hit.normal.1, hit.normal.2));
+                    }
+                });
+        }
+
+        // Color palette panel
+        if self.state.show_palette {
+            egui::Window::new("Palette")
+                .default_pos([10.0, 450.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let palette = &editor.palette;
+                    let cols = 5;
+
+                    egui::Grid::new("palette_grid")
+                        .spacing([4.0, 4.0])
+                        .show(ui, |ui| {
+                            for (i, voxel) in palette.iter().enumerate() {
+                                let color = egui::Color32::from_rgb(voxel.r, voxel.g, voxel.b);
+                                let is_selected = editor.brush_color.r == voxel.r
+                                    && editor.brush_color.g == voxel.g
+                                    && editor.brush_color.b == voxel.b;
+
+                                let size = if is_selected { 24.0 } else { 20.0 };
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(size, size),
+                                    egui::Sense::click(),
+                                );
+
+                                if response.clicked() {
+                                    editor.brush_color = *voxel;
+                                }
+
+                                ui.painter().rect_filled(rect, 2.0, color);
+                                if is_selected {
+                                    ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                                }
+
+                                if (i + 1) % cols == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
                 });
         }
 
@@ -125,7 +203,13 @@ impl Ui {
             ui.horizontal(|ui| {
                 ui.label("Voxelith v0.1.0");
                 ui.separator();
-                ui.label(format!("Tool: {:?}", self.state.tool));
+                ui.label(format!("Tool: {}", editor.current_tool.name()));
+                ui.separator();
+                ui.label(format!("Brush: {}px", editor.brush_size));
+                if let Some(hit) = &editor.hovered_voxel {
+                    ui.separator();
+                    ui.label(format!("Voxel: ({}, {}, {})", hit.voxel_pos.0, hit.voxel_pos.1, hit.voxel_pos.2));
+                }
             });
         });
     }
@@ -157,13 +241,4 @@ pub struct RenderStats {
     pub triangles: usize,
     pub chunks: usize,
     pub camera_pos: (f32, f32, f32),
-}
-
-/// Available tools
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Tool {
-    #[default]
-    Place,
-    Remove,
-    Paint,
 }

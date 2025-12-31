@@ -34,3 +34,4 @@ pub use core::{Voxel, Chunk, ChunkPos, World};
 pub use mesh::{ChunkMesh, NaiveMesher, Mesher};
 pub use render::Renderer;
 pub use ui::Ui;
+pub use editor::Editor;

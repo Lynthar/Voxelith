@@ -6,14 +6,17 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
 
 use voxelith::{
     core::{ChunkPos, World},
+    editor::{
+        eyedrop, flood_fill, BrushTool, Editor, EditorTool, Ray, Tool, ToolContext, VoxelRaycast,
+    },
     mesh::{Mesher, NaiveMesher},
     render::Renderer,
     ui::{RenderStats, Ui},
@@ -28,12 +31,15 @@ struct App {
 
     world: World,
     mesher: NaiveMesher,
+    editor: Editor,
     ui: Ui,
 
     last_frame: Instant,
     frame_times: Vec<f32>,
 
     cursor_captured: bool,
+    cursor_pos: (f32, f32),
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -45,10 +51,13 @@ impl App {
             egui_renderer: None,
             world: World::new(),
             mesher: NaiveMesher::new(),
+            editor: Editor::new(),
             ui: Ui::new(),
             last_frame: Instant::now(),
             frame_times: Vec::with_capacity(60),
             cursor_captured: false,
+            cursor_pos: (0.0, 0.0),
+            modifiers: ModifiersState::empty(),
         }
     }
 
@@ -142,19 +151,102 @@ impl App {
             std::process::exit(0);
         }
 
+        if self.ui.state.undo_requested {
+            self.editor.undo(&mut self.world);
+        }
+
+        if self.ui.state.redo_requested {
+            self.editor.redo(&mut self.world);
+        }
+
         if self.ui.state.generate_test_cube {
             self.world.clear();
+            self.editor.history.clear();
             self.world.create_test_cube((0, 8, 0), 4);
             self.rebuild_all_meshes();
         }
 
         if self.ui.state.generate_ground {
             self.world.clear();
+            self.editor.history.clear();
             self.world.create_test_ground(20, 2);
             self.rebuild_all_meshes();
         }
 
         self.ui.clear_flags();
+    }
+
+    /// Update raycast for hovered voxel
+    fn update_raycast(&mut self) {
+        if let Some(renderer) = &self.renderer {
+            let window = self.window.as_ref().unwrap();
+            let size = window.inner_size();
+
+            let view_proj = renderer.camera.view_projection_matrix();
+            let view_proj_inv = view_proj.inverse();
+
+            let ray = Ray::from_screen(
+                self.cursor_pos,
+                (size.width as f32, size.height as f32),
+                view_proj_inv,
+            );
+
+            self.editor.hovered_voxel = VoxelRaycast::cast(&ray, &self.world, 100.0);
+        }
+    }
+
+    /// Apply the current tool at the hovered location
+    fn apply_tool(&mut self) {
+        if let Some(hit) = self.editor.hovered_voxel {
+            match self.editor.current_tool {
+                Tool::Place | Tool::Remove | Tool::Paint => {
+                    let brush = BrushTool::new(self.editor.current_tool);
+                    let mut ctx = ToolContext {
+                        world: &mut self.world,
+                        history: &mut self.editor.history,
+                        brush_color: self.editor.brush_color,
+                        brush_size: self.editor.brush_size,
+                    };
+                    brush.apply(&mut ctx, &hit);
+                }
+                Tool::Eyedropper => {
+                    if let Some(color) = eyedrop(&self.world, &hit) {
+                        self.editor.brush_color = color;
+                    }
+                }
+                Tool::Fill => {
+                    flood_fill(
+                        &mut self.world,
+                        &mut self.editor.history,
+                        hit.voxel_pos,
+                        self.editor.brush_color,
+                        10000, // Max voxels to fill
+                    );
+                }
+            }
+        }
+    }
+
+    /// Handle keyboard shortcuts for tools
+    fn handle_tool_shortcut(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Digit1 => self.editor.current_tool = Tool::Place,
+            KeyCode::Digit2 => self.editor.current_tool = Tool::Remove,
+            KeyCode::Digit3 => self.editor.current_tool = Tool::Paint,
+            KeyCode::Digit4 => self.editor.current_tool = Tool::Eyedropper,
+            KeyCode::Digit5 => self.editor.current_tool = Tool::Fill,
+            KeyCode::KeyZ if self.modifiers.control_key() => {
+                if self.modifiers.shift_key() {
+                    self.editor.redo(&mut self.world);
+                } else {
+                    self.editor.undo(&mut self.world);
+                }
+            }
+            KeyCode::KeyY if self.modifiers.control_key() => {
+                self.editor.redo(&mut self.world);
+            }
+            _ => {}
+        }
     }
 
     /// Render a frame
@@ -169,7 +261,7 @@ impl App {
 
         // Render UI
         let stats = self.calculate_stats();
-        self.ui.show(&egui_ctx, &stats);
+        self.ui.show(&egui_ctx, &stats, &mut self.editor);
 
         // End egui frame
         let full_output = egui_ctx.end_pass();
@@ -342,11 +434,20 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                self.modifiers = new_modifiers.state();
+            }
+
             WindowEvent::KeyboardInput { event, .. } => {
                 if !egui_consumed {
                     if let PhysicalKey::Code(key) = event.physical_key {
                         if let Some(renderer) = &mut self.renderer {
                             renderer.camera_controller.process_keyboard(key, event.state);
+                        }
+
+                        // Tool shortcuts (only on press)
+                        if event.state.is_pressed() {
+                            self.handle_tool_shortcut(key);
                         }
 
                         // Escape to release cursor
@@ -366,7 +467,12 @@ impl ApplicationHandler for App {
                         renderer.camera_controller.process_mouse_button(button, state);
                     }
 
-                    // Click to capture cursor for camera control
+                    // Left click to apply tool
+                    if button == winit::event::MouseButton::Left && state == ElementState::Pressed {
+                        self.apply_tool();
+                    }
+
+                    // Middle click to capture cursor for camera control
                     if button == winit::event::MouseButton::Middle && state.is_pressed() {
                         self.cursor_captured = true;
                         if let Some(window) = &self.window {
@@ -385,13 +491,20 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                if !egui_consumed && self.cursor_captured {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.camera_controller.process_mouse_motion(
-                            position.x as f32,
-                            position.y as f32,
-                            &mut renderer.camera,
-                        );
+                self.cursor_pos = (position.x as f32, position.y as f32);
+
+                if !egui_consumed {
+                    // Update raycast for hovered voxel
+                    self.update_raycast();
+
+                    if self.cursor_captured {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.camera_controller.process_mouse_motion(
+                                position.x as f32,
+                                position.y as f32,
+                                &mut renderer.camera,
+                            );
+                        }
                     }
                 }
             }
