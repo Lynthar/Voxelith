@@ -9,33 +9,33 @@
 
 <div align="center">
 
-**Procedural-first Voxel Asset Creation Tool**
+**程序化优先的体素资产创作工具**
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-22.0-blue.svg)](https://wgpu.rs/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[中文文档](README_CN.md)
+[English](README.md)
 
 </div>
 
 ---
 
-## Overview
+## 概述
 
-**Voxelith** is a modern voxel editor built with Rust, featuring GPU-accelerated rendering via wgpu and a clean egui interface. Designed as a procedural-first tool for both manual editing and programmatic generation.
+**Voxelith** 是一款使用 Rust 构建的现代体素编辑器，采用 wgpu 实现 GPU 加速渲染，配合简洁的 egui 界面。专为手动编辑和程序化生成设计。
 
-## Features
+## 功能特性
 
-| Feature | Description |
-|---------|-------------|
-| 🎨 **Multi-tool Editing** | Place, Remove, Paint, Eyedropper, Fill |
-| ↩️ **Undo/Redo** | Full command history |
-| 📁 **File I/O** | Native `.vxlt` and MagicaVoxel `.vox` |
-| 🎲 **Generators** | Cube, Sphere, Pyramid, Ground |
-| 🖥️ **Viewport** | Grid, axes, wireframe mode |
+| 功能 | 说明 |
+|------|------|
+| 🎨 **多工具编辑** | 放置、删除、绘制、取色、填充 |
+| ↩️ **撤销/重做** | 完整的命令历史 |
+| 📁 **文件支持** | 原生 `.vxlt` 和 MagicaVoxel `.vox` |
+| 🎲 **形状生成** | 立方体、球体、金字塔、地面 |
+| 🖥️ **视口控制** | 网格、坐标轴、线框模式 |
 
-## Quick Start
+## 快速开始
 
 ```bash
 git clone https://github.com/Lynthar/Voxelith.git
@@ -43,35 +43,35 @@ cd Voxelith
 cargo run --release
 ```
 
-## Keyboard Shortcuts
+## 快捷键
 
-| Key | Action | Key | Action |
-|-----|--------|-----|--------|
-| `1-5` | Select tool | `Ctrl+Z` | Undo |
-| `WASD` | Move camera | `Ctrl+Y` | Redo |
-| `Scroll` | Zoom | `Ctrl+S` | Save |
-| `Middle Mouse` | Orbit | `Ctrl+O` | Open |
+| 按键 | 功能 | 按键 | 功能 |
+|------|------|------|------|
+| `1-5` | 选择工具 | `Ctrl+Z` | 撤销 |
+| `WASD` | 移动相机 | `Ctrl+Y` | 重做 |
+| `滚轮` | 缩放 | `Ctrl+S` | 保存 |
+| `鼠标中键` | 轨道旋转 | `Ctrl+O` | 打开 |
 
-## Tech Stack
+## 技术栈
 
-- 🦀 **Rust** - Systems language
-- 🎮 **wgpu** - GPU rendering
-- 🖼️ **egui** - Immediate mode UI
-- 🗜️ **flate2** - Compression
+- 🦀 **Rust** - 系统级语言
+- 🎮 **wgpu** - GPU 渲染
+- 🖼️ **egui** - 即时模式 UI
+- 🗜️ **flate2** - 压缩算法
 
-## Architecture
+## 架构设计
 
 ```
 ┌─────────────────────────────────┐
-│        UI (egui)                │
+│        用户界面 (egui)           │
 ├─────────────────────────────────┤
-│   Editor (tools, commands)      │
+│    编辑器 (工具, 命令)           │
 ├─────────────────────────────────┤
-│  Core (voxel, chunk, world)     │
-│  Render (wgpu) │ IO (vox, vxlt) │
+│   核心 (体素, 区块, 世界)        │
+│   渲染 (wgpu) │ 文件 (vox, vxlt) │
 └─────────────────────────────────┘
 ```
 
-## License
+## 许可证
 
 MIT License © 2024
