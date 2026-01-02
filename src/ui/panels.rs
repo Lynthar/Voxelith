@@ -2,10 +2,38 @@
 
 use super::CameraView;
 
+/// One-shot UI actions that need to be processed by the application
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UiAction {
+    // File operations
+    NewProject,
+    OpenProject,
+    SaveProject,
+    SaveAs,
+    ImportVox,
+    ExportVox,
+    Exit,
+
+    // Edit operations
+    Undo,
+    Redo,
+    ClearAll,
+
+    // Generate operations
+    GenerateTestCube,
+    GenerateGround,
+    GenerateSphere,
+    GeneratePyramid,
+
+    // Camera operations
+    ResetCamera,
+    SetCameraView(CameraView),
+}
+
 /// UI state
 #[derive(Default)]
 pub struct UiState {
-    // Panel visibility
+    // Panel visibility (toggles, not one-shot actions)
     pub show_stats: bool,
     pub show_tools: bool,
     pub show_palette: bool,
@@ -13,23 +41,8 @@ pub struct UiState {
     pub show_help: bool,
     pub show_about: bool,
 
-    // One-shot action flags
-    pub new_project_requested: bool,
-    pub open_project_requested: bool,
-    pub save_project_requested: bool,
-    pub save_as_requested: bool,
-    pub import_vox_requested: bool,
-    pub export_vox_requested: bool,
-    pub exit_requested: bool,
-    pub undo_requested: bool,
-    pub redo_requested: bool,
-    pub clear_all_requested: bool,
-    pub generate_test_cube: bool,
-    pub generate_ground: bool,
-    pub generate_sphere: bool,
-    pub generate_pyramid: bool,
-    pub reset_camera_requested: bool,
-    pub camera_view: Option<CameraView>,
+    // One-shot action queue
+    pending_actions: Vec<UiAction>,
 
     // Status message for user feedback
     pub status_message: Option<(String, std::time::Instant)>,
@@ -44,7 +57,25 @@ impl UiState {
             show_viewport_settings: false,
             show_help: false,
             show_about: false,
-            ..Default::default()
+            pending_actions: Vec::new(),
+            status_message: None,
         }
+    }
+
+    /// Queue an action to be processed
+    pub fn request(&mut self, action: UiAction) {
+        if !self.pending_actions.contains(&action) {
+            self.pending_actions.push(action);
+        }
+    }
+
+    /// Take all pending actions (clears the queue)
+    pub fn take_actions(&mut self) -> Vec<UiAction> {
+        std::mem::take(&mut self.pending_actions)
+    }
+
+    /// Clear all pending actions
+    pub fn clear_actions(&mut self) {
+        self.pending_actions.clear();
     }
 }

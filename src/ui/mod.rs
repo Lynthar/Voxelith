@@ -2,7 +2,7 @@
 
 mod panels;
 
-pub use panels::UiState;
+pub use panels::{UiAction, UiState};
 
 use crate::editor::{Editor, Tool};
 use egui::Context;
@@ -85,54 +85,54 @@ impl Ui {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Project").clicked() {
-                        self.state.new_project_requested = true;
+                        self.state.request(UiAction::NewProject);
                         ui.close_menu();
                     }
                     if ui.button("Open...").clicked() {
-                        self.state.open_project_requested = true;
+                        self.state.request(UiAction::OpenProject);
                         ui.close_menu();
                     }
                     if ui.button("Save").clicked() {
-                        self.state.save_project_requested = true;
+                        self.state.request(UiAction::SaveProject);
                         ui.close_menu();
                     }
                     if ui.button("Save As...").clicked() {
-                        self.state.save_as_requested = true;
+                        self.state.request(UiAction::SaveAs);
                         ui.close_menu();
                     }
                     ui.separator();
                     ui.menu_button("Import", |ui| {
                         if ui.button("MagicaVoxel (.vox)...").clicked() {
-                            self.state.import_vox_requested = true;
+                            self.state.request(UiAction::ImportVox);
                             ui.close_menu();
                         }
                     });
                     ui.menu_button("Export", |ui| {
                         if ui.button("MagicaVoxel (.vox)...").clicked() {
-                            self.state.export_vox_requested = true;
+                            self.state.request(UiAction::ExportVox);
                             ui.close_menu();
                         }
                     });
                     ui.separator();
                     if ui.button("Exit").clicked() {
-                        self.state.exit_requested = true;
+                        self.state.request(UiAction::Exit);
                     }
                 });
 
                 ui.menu_button("Edit", |ui| {
                     let undo_text = if editor.can_undo() { "Undo  Ctrl+Z" } else { "Undo" };
                     if ui.add_enabled(editor.can_undo(), egui::Button::new(undo_text)).clicked() {
-                        self.state.undo_requested = true;
+                        self.state.request(UiAction::Undo);
                         ui.close_menu();
                     }
                     let redo_text = if editor.can_redo() { "Redo  Ctrl+Y" } else { "Redo" };
                     if ui.add_enabled(editor.can_redo(), egui::Button::new(redo_text)).clicked() {
-                        self.state.redo_requested = true;
+                        self.state.request(UiAction::Redo);
                         ui.close_menu();
                     }
                     ui.separator();
                     if ui.button("Clear All").clicked() {
-                        self.state.clear_all_requested = true;
+                        self.state.request(UiAction::ClearAll);
                         ui.close_menu();
                     }
                 });
@@ -150,20 +150,20 @@ impl Ui {
 
                 ui.menu_button("Generate", |ui| {
                     if ui.button("Test Cube").clicked() {
-                        self.state.generate_test_cube = true;
+                        self.state.request(UiAction::GenerateTestCube);
                         ui.close_menu();
                     }
                     if ui.button("Ground Plane").clicked() {
-                        self.state.generate_ground = true;
+                        self.state.request(UiAction::GenerateGround);
                         ui.close_menu();
                     }
                     ui.separator();
                     if ui.button("Sphere").clicked() {
-                        self.state.generate_sphere = true;
+                        self.state.request(UiAction::GenerateSphere);
                         ui.close_menu();
                     }
                     if ui.button("Pyramid").clicked() {
-                        self.state.generate_pyramid = true;
+                        self.state.request(UiAction::GeneratePyramid);
                         ui.close_menu();
                     }
                 });
@@ -425,18 +425,18 @@ impl Ui {
 
                 ui.heading("Camera");
                 if ui.button("Reset Camera").clicked() {
-                    self.state.reset_camera_requested = true;
+                    self.state.request(UiAction::ResetCamera);
                 }
 
                 ui.horizontal(|ui| {
                     if ui.button("Top").clicked() {
-                        self.state.camera_view = Some(CameraView::Top);
+                        self.state.request(UiAction::SetCameraView(CameraView::Top));
                     }
                     if ui.button("Front").clicked() {
-                        self.state.camera_view = Some(CameraView::Front);
+                        self.state.request(UiAction::SetCameraView(CameraView::Front));
                     }
                     if ui.button("Side").clicked() {
-                        self.state.camera_view = Some(CameraView::Side);
+                        self.state.request(UiAction::SetCameraView(CameraView::Side));
                     }
                 });
             });
@@ -607,24 +607,9 @@ impl Ui {
         self.state.status_message = Some((message.into(), std::time::Instant::now()));
     }
 
-    /// Clear one-shot flags
+    /// Clear one-shot action flags
     pub fn clear_flags(&mut self) {
-        self.state.new_project_requested = false;
-        self.state.open_project_requested = false;
-        self.state.save_project_requested = false;
-        self.state.save_as_requested = false;
-        self.state.import_vox_requested = false;
-        self.state.export_vox_requested = false;
-        self.state.exit_requested = false;
-        self.state.undo_requested = false;
-        self.state.redo_requested = false;
-        self.state.clear_all_requested = false;
-        self.state.generate_test_cube = false;
-        self.state.generate_ground = false;
-        self.state.generate_sphere = false;
-        self.state.generate_pyramid = false;
-        self.state.reset_camera_requested = false;
-        self.state.camera_view = None;
+        self.state.clear_actions();
     }
 }
 
@@ -645,7 +630,7 @@ pub struct RenderStats {
 }
 
 /// Preset camera views
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CameraView {
     Top,
     Front,

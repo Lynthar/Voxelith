@@ -99,7 +99,9 @@ impl World {
     /// Create a world with a single chunk at origin
     pub fn single_chunk() -> Self {
         let mut world = Self::bounded(WorldBounds::single_chunk());
-        world.get_or_create_chunk(ChunkPos::ZERO);
+        // ZERO is always within single_chunk bounds, so this should never fail
+        world.get_or_create_chunk(ChunkPos::ZERO)
+            .expect("ChunkPos::ZERO should be within single_chunk bounds");
         world
     }
 
@@ -118,20 +120,20 @@ impl World {
         self.chunks.get(&pos).cloned()
     }
 
-    /// Get or create chunk at position
-    pub fn get_or_create_chunk(&mut self, pos: ChunkPos) -> Arc<RwLock<Chunk>> {
+    /// Get or create chunk at position.
+    /// Returns None if the world is bounded and the position is outside the bounds.
+    pub fn get_or_create_chunk(&mut self, pos: ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
         // Check bounds if set
         if let Some(bounds) = &self.bounds {
             if !bounds.contains(pos) {
-                // Return empty chunk for out-of-bounds access
-                return Arc::new(RwLock::new(Chunk::new()));
+                return None;
             }
         }
 
-        self.chunks
+        Some(self.chunks
             .entry(pos)
             .or_insert_with(|| Arc::new(RwLock::new(Chunk::new())))
-            .clone()
+            .clone())
     }
 
     /// Get voxel at world position
@@ -147,10 +149,13 @@ impl World {
         }
     }
 
-    /// Set voxel at world position
+    /// Set voxel at world position.
+    /// Silently ignores if the position is outside a bounded world.
     pub fn set_voxel(&mut self, x: i32, y: i32, z: i32, voxel: Voxel) {
         let chunk_pos = ChunkPos::from_world_pos(x, y, z);
-        let chunk = self.get_or_create_chunk(chunk_pos);
+        let Some(chunk) = self.get_or_create_chunk(chunk_pos) else {
+            return; // Out of bounds for bounded world
+        };
 
         let lx = x.rem_euclid(CHUNK_SIZE_I32) as usize;
         let ly = y.rem_euclid(CHUNK_SIZE_I32) as usize;

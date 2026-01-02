@@ -5,7 +5,7 @@
 
 use super::Voxel;
 use serde::{Deserialize, Serialize};
-use std::ops::{Index, IndexMut};
+use std::ops::Index;
 
 // Note: Chunk does not derive Serialize/Deserialize because of the large voxel array.
 // Custom serialization will be implemented in the io module.
@@ -288,13 +288,9 @@ impl Index<LocalPos> for Chunk {
     }
 }
 
-impl IndexMut<LocalPos> for Chunk {
-    #[inline]
-    fn index_mut(&mut self, pos: LocalPos) -> &mut Self::Output {
-        self.dirty = true;
-        &mut self.voxels[pos.to_index()]
-    }
-}
+// Note: IndexMut is intentionally NOT implemented for Chunk.
+// Using `chunk[pos] = voxel` would bypass the solid_count tracking.
+// Always use `chunk.set(x, y, z, voxel)` to modify voxels.
 
 impl Index<(usize, usize, usize)> for Chunk {
     type Output = Voxel;
