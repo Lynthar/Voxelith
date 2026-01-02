@@ -2,6 +2,7 @@
 //!
 //! Main application entry point.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -37,7 +38,7 @@ struct App {
     ui: Ui,
 
     last_frame: Instant,
-    frame_times: Vec<f32>,
+    frame_times: VecDeque<f32>,
 
     cursor_captured: bool,
     cursor_pos: (f32, f32),
@@ -59,7 +60,7 @@ impl App {
             editor: Editor::new(),
             ui: Ui::new(),
             last_frame: Instant::now(),
-            frame_times: Vec::with_capacity(60),
+            frame_times: VecDeque::with_capacity(60),
             cursor_captured: false,
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
@@ -153,109 +154,82 @@ impl App {
 
     /// Handle UI actions
     fn handle_ui_actions(&mut self) {
-        if self.ui.state.exit_requested {
-            std::process::exit(0);
-        }
+        use voxelith::ui::{CameraView, UiAction};
 
-        if self.ui.state.undo_requested {
-            self.editor.undo(&mut self.world);
-        }
-
-        if self.ui.state.redo_requested {
-            self.editor.redo(&mut self.world);
-        }
-
-        if self.ui.state.clear_all_requested {
-            self.world.clear();
-            self.editor.history.clear();
-            if let Some(renderer) = &mut self.renderer {
-                renderer.chunk_meshes.clear();
-            }
-        }
-
-        if self.ui.state.generate_test_cube {
-            self.world.clear();
-            self.editor.history.clear();
-            self.world.create_test_cube((0, 8, 0), 4);
-            self.rebuild_all_meshes();
-        }
-
-        if self.ui.state.generate_ground {
-            self.world.clear();
-            self.editor.history.clear();
-            self.world.create_test_ground(20, 2);
-            self.rebuild_all_meshes();
-        }
-
-        if self.ui.state.generate_sphere {
-            self.world.clear();
-            self.editor.history.clear();
-            self.create_sphere((0, 10, 0), 6);
-            self.rebuild_all_meshes();
-        }
-
-        if self.ui.state.generate_pyramid {
-            self.world.clear();
-            self.editor.history.clear();
-            self.create_pyramid((0, 0, 0), 10);
-            self.rebuild_all_meshes();
-        }
-
-        if self.ui.state.reset_camera_requested {
-            if let Some(renderer) = &mut self.renderer {
-                renderer.camera.target = glam::Vec3::ZERO;
-                renderer.camera_controller.distance = 40.0;
-                renderer.camera_controller.yaw = 0.0;
-                renderer.camera_controller.pitch = 0.5;
-            }
-        }
-
-        if let Some(view) = self.ui.state.camera_view {
-            if let Some(renderer) = &mut self.renderer {
-                use voxelith::ui::CameraView;
-                match view {
-                    CameraView::Top => {
-                        renderer.camera_controller.pitch = 1.5;
-                        renderer.camera_controller.yaw = 0.0;
-                    }
-                    CameraView::Front => {
-                        renderer.camera_controller.pitch = 0.0;
-                        renderer.camera_controller.yaw = 0.0;
-                    }
-                    CameraView::Side => {
-                        renderer.camera_controller.pitch = 0.0;
-                        renderer.camera_controller.yaw = std::f32::consts::FRAC_PI_2;
+        for action in self.ui.state.take_actions() {
+            match action {
+                UiAction::Exit => std::process::exit(0),
+                UiAction::Undo => {
+                    self.editor.undo(&mut self.world);
+                }
+                UiAction::Redo => {
+                    self.editor.redo(&mut self.world);
+                }
+                UiAction::ClearAll => {
+                    self.world.clear();
+                    self.editor.history.clear();
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.chunk_meshes.clear();
                     }
                 }
+                UiAction::GenerateTestCube => {
+                    self.world.clear();
+                    self.editor.history.clear();
+                    self.world.create_test_cube((0, 8, 0), 4);
+                    self.rebuild_all_meshes();
+                }
+                UiAction::GenerateGround => {
+                    self.world.clear();
+                    self.editor.history.clear();
+                    self.world.create_test_ground(20, 2);
+                    self.rebuild_all_meshes();
+                }
+                UiAction::GenerateSphere => {
+                    self.world.clear();
+                    self.editor.history.clear();
+                    self.create_sphere((0, 10, 0), 6);
+                    self.rebuild_all_meshes();
+                }
+                UiAction::GeneratePyramid => {
+                    self.world.clear();
+                    self.editor.history.clear();
+                    self.create_pyramid((0, 0, 0), 10);
+                    self.rebuild_all_meshes();
+                }
+                UiAction::ResetCamera => {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.camera.target = glam::Vec3::ZERO;
+                        renderer.camera_controller.distance = 40.0;
+                        renderer.camera_controller.yaw = 0.0;
+                        renderer.camera_controller.pitch = 0.5;
+                    }
+                }
+                UiAction::SetCameraView(view) => {
+                    if let Some(renderer) = &mut self.renderer {
+                        match view {
+                            CameraView::Top => {
+                                renderer.camera_controller.pitch = 1.5;
+                                renderer.camera_controller.yaw = 0.0;
+                            }
+                            CameraView::Front => {
+                                renderer.camera_controller.pitch = 0.0;
+                                renderer.camera_controller.yaw = 0.0;
+                            }
+                            CameraView::Side => {
+                                renderer.camera_controller.pitch = 0.0;
+                                renderer.camera_controller.yaw = std::f32::consts::FRAC_PI_2;
+                            }
+                        }
+                    }
+                }
+                UiAction::NewProject => self.new_project(),
+                UiAction::OpenProject => self.open_project(),
+                UiAction::SaveProject => self.save_project(),
+                UiAction::SaveAs => self.save_project_as(),
+                UiAction::ImportVox => self.import_vox(),
+                UiAction::ExportVox => self.export_vox(),
             }
         }
-
-        // File operations
-        if self.ui.state.new_project_requested {
-            self.new_project();
-        }
-
-        if self.ui.state.save_project_requested {
-            self.save_project();
-        }
-
-        if self.ui.state.save_as_requested {
-            self.save_project_as();
-        }
-
-        if self.ui.state.open_project_requested {
-            self.open_project();
-        }
-
-        if self.ui.state.import_vox_requested {
-            self.import_vox();
-        }
-
-        if self.ui.state.export_vox_requested {
-            self.export_vox();
-        }
-
-        self.ui.clear_flags();
     }
 
     /// Create a new empty project
@@ -663,7 +637,7 @@ impl App {
 
         // Egui render pass
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Egui Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -678,11 +652,7 @@ impl App {
                 occlusion_query_set: None,
             });
 
-            // SAFETY: The render_pass reference is valid for the duration of this block.
-            // egui-wgpu 0.29 requires 'static but we ensure the pass lives long enough.
-            let render_pass_static: &mut wgpu::RenderPass<'static> =
-                unsafe { std::mem::transmute(&mut render_pass) };
-            egui_renderer.render(render_pass_static, &paint_jobs, &screen_descriptor);
+            egui_renderer.render(&mut render_pass.forget_lifetime(), &paint_jobs, &screen_descriptor);
         }
 
         // Free textures
@@ -813,9 +783,9 @@ impl ApplicationHandler for App {
                 self.last_frame = now;
 
                 // Track frame times for FPS display
-                self.frame_times.push(dt * 1000.0);
+                self.frame_times.push_back(dt * 1000.0);
                 if self.frame_times.len() > 60 {
-                    self.frame_times.remove(0);
+                    self.frame_times.pop_front();
                 }
 
                 // Rebuild any dirty meshes

@@ -4,6 +4,7 @@
 //! execute and reverse itself.
 
 use crate::core::{Voxel, World};
+use std::collections::VecDeque;
 
 /// A reversible edit command
 #[derive(Debug, Clone)]
@@ -123,9 +124,9 @@ impl Command {
 /// Command history for undo/redo
 pub struct CommandHistory {
     /// Stack of executed commands (for undo)
-    undo_stack: Vec<Command>,
+    undo_stack: VecDeque<Command>,
     /// Stack of undone commands (for redo)
-    redo_stack: Vec<Command>,
+    redo_stack: VecDeque<Command>,
     /// Maximum history size
     max_size: usize,
 }
@@ -134,8 +135,8 @@ impl CommandHistory {
     /// Create a new command history
     pub fn new(max_size: usize) -> Self {
         Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
             max_size,
         }
     }
@@ -151,14 +152,14 @@ impl CommandHistory {
         command.execute(world);
 
         // Add to undo stack
-        self.undo_stack.push(command);
+        self.undo_stack.push_back(command);
 
         // Clear redo stack (new action invalidates redo history)
         self.redo_stack.clear();
 
-        // Trim history if too large
+        // Trim history if too large (O(1) with VecDeque)
         while self.undo_stack.len() > self.max_size {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
     }
 
@@ -172,9 +173,9 @@ impl CommandHistory {
 
     /// Undo the last command
     pub fn undo(&mut self, world: &mut World) -> bool {
-        if let Some(command) = self.undo_stack.pop() {
+        if let Some(command) = self.undo_stack.pop_back() {
             command.undo(world);
-            self.redo_stack.push(command);
+            self.redo_stack.push_back(command);
             true
         } else {
             false
@@ -183,9 +184,9 @@ impl CommandHistory {
 
     /// Redo the last undone command
     pub fn redo(&mut self, world: &mut World) -> bool {
-        if let Some(command) = self.redo_stack.pop() {
+        if let Some(command) = self.redo_stack.pop_back() {
             command.execute(world);
-            self.undo_stack.push(command);
+            self.undo_stack.push_back(command);
             true
         } else {
             false
