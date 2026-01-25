@@ -11,7 +11,7 @@ mod vox;
 
 pub use project::{
     EditorState, Project, ProjectError, ProjectMetadata,
-    load_world, save_world,
+    load_world, load_world_with_state, save_world, save_world_with_state,
 };
 pub use vox::{
     VoxError, VoxModel, default_palette,

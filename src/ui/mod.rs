@@ -76,6 +76,11 @@ impl Ui {
             self.show_help_panel(ctx);
         }
 
+        // About dialog
+        if self.state.show_about {
+            self.show_about_dialog(ctx);
+        }
+
         // Status bar
         self.show_status_bar(ctx, editor);
     }
@@ -398,7 +403,14 @@ impl Ui {
                 // Quick color buttons
                 ui.horizontal(|ui| {
                     if ui.button("Add").clicked() {
-                        // Add current color to palette (would need mutable palette)
+                        // Check if color already exists in palette
+                        let color = editor.brush_color;
+                        let exists = editor.palette.iter().any(|v| {
+                            v.r == color.r && v.g == color.g && v.b == color.b
+                        });
+                        if !exists && editor.palette.len() < 32 {
+                            editor.palette.push(color);
+                        }
                     }
                 });
             });
@@ -552,6 +564,29 @@ impl Ui {
                         ui.label("Apply tool");
                         ui.end_row();
                     });
+            });
+    }
+
+    fn show_about_dialog(&mut self, ctx: &Context) {
+        egui::Window::new("About Voxelith")
+            .default_pos([ctx.screen_rect().width() / 2.0 - 150.0, ctx.screen_rect().height() / 2.0 - 100.0])
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut self.state.show_about)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("Voxelith");
+                    ui.add_space(8.0);
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.add_space(16.0);
+                    ui.label("Procedural-first voxel asset creation tool");
+                    ui.add_space(8.0);
+                    ui.label("Built with Rust, wgpu, and egui");
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.label("MIT License");
+                });
             });
     }
 

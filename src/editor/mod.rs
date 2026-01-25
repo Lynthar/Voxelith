@@ -30,6 +30,8 @@ pub struct Editor {
     pub hovered_voxel: Option<RaycastHit>,
     /// Color palette
     pub palette: Vec<Voxel>,
+    /// Tool saved before Alt key was pressed (for temporary eyedropper)
+    pub tool_before_alt: Option<Tool>,
 }
 
 impl Default for Editor {
@@ -47,6 +49,7 @@ impl Editor {
             brush_size: 1,
             hovered_voxel: None,
             palette: Self::default_palette(),
+            tool_before_alt: None,
         }
     }
 

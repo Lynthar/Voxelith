@@ -46,6 +46,10 @@ struct App {
 
     /// Current project file path (None = unsaved)
     project_path: Option<PathBuf>,
+
+    /// Last grid settings (for detecting changes)
+    last_grid_size: i32,
+    last_grid_spacing: f32,
 }
 
 impl App {
@@ -65,6 +69,8 @@ impl App {
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             project_path: None,
+            last_grid_size: 20,
+            last_grid_spacing: 1.0,
         }
     }
 
@@ -265,7 +271,33 @@ impl App {
 
     /// Actually save the project to a path
     fn do_save_project(&mut self, path: PathBuf) {
-        match io::save_world(&self.world, &path) {
+        // Build editor state from current state
+        let editor_state = if let Some(renderer) = &self.renderer {
+            io::EditorState {
+                camera_position: [
+                    renderer.camera.position.x,
+                    renderer.camera.position.y,
+                    renderer.camera.position.z,
+                ],
+                camera_target: [
+                    renderer.camera.target.x,
+                    renderer.camera.target.y,
+                    renderer.camera.target.z,
+                ],
+                brush_color: [
+                    self.editor.brush_color.r,
+                    self.editor.brush_color.g,
+                    self.editor.brush_color.b,
+                    self.editor.brush_color.a,
+                ],
+                palette: self.editor.palette.iter().map(|v| [v.r, v.g, v.b, v.a]).collect(),
+                selected_tool: self.editor.current_tool as usize,
+            }
+        } else {
+            io::EditorState::default()
+        };
+
+        match io::save_world_with_state(&self.world, editor_state, &path) {
             Ok(_) => {
                 self.project_path = Some(path.clone());
                 let filename = path.file_name()
@@ -288,14 +320,49 @@ impl App {
             .set_title("Open Project");
 
         if let Some(path) = dialog.pick_file() {
-            match io::load_world(&path) {
-                Ok(world) => {
+            match io::load_world_with_state(&path) {
+                Ok((world, editor_state)) => {
                     self.world = world;
                     self.editor.history.clear();
                     self.project_path = Some(path.clone());
+
+                    // Restore editor state
+                    self.editor.brush_color = voxelith::core::Voxel::from_rgba(
+                        editor_state.brush_color[0],
+                        editor_state.brush_color[1],
+                        editor_state.brush_color[2],
+                        editor_state.brush_color[3],
+                    );
+                    self.editor.palette = editor_state.palette.iter().map(|c| {
+                        voxelith::core::Voxel::from_rgba(c[0], c[1], c[2], c[3])
+                    }).collect();
+                    self.editor.current_tool = match editor_state.selected_tool {
+                        0 => Tool::Place,
+                        1 => Tool::Remove,
+                        2 => Tool::Paint,
+                        3 => Tool::Eyedropper,
+                        4 => Tool::Fill,
+                        _ => Tool::Place,
+                    };
+
+                    // Restore camera
                     if let Some(renderer) = &mut self.renderer {
                         renderer.chunk_meshes.clear();
+                        renderer.camera.position = glam::Vec3::new(
+                            editor_state.camera_position[0],
+                            editor_state.camera_position[1],
+                            editor_state.camera_position[2],
+                        );
+                        renderer.camera.target = glam::Vec3::new(
+                            editor_state.camera_target[0],
+                            editor_state.camera_target[1],
+                            editor_state.camera_target[2],
+                        );
+                        // Update camera controller distance based on restored position
+                        renderer.camera_controller.distance =
+                            (renderer.camera.position - renderer.camera.target).length();
                     }
+
                     self.rebuild_all_meshes();
                     let filename = path.file_name()
                         .and_then(|n| n.to_str())
@@ -532,9 +599,19 @@ impl App {
         // Get viewport settings before borrowing renderer
         let show_grid = self.ui.viewport.show_grid;
         let show_axes = self.ui.viewport.show_axes;
+        let grid_size = self.ui.viewport.grid_size;
+        let grid_spacing = self.ui.viewport.grid_spacing;
+        let wireframe_mode = self.ui.viewport.wireframe_mode;
 
         // Now do the actual rendering
         let renderer = self.renderer.as_mut().unwrap();
+
+        // Update grid if settings changed
+        if grid_size != self.last_grid_size || (grid_spacing - self.last_grid_spacing).abs() > 0.01 {
+            renderer.update_grid(grid_size, grid_spacing);
+            self.last_grid_size = grid_size;
+            self.last_grid_spacing = grid_spacing;
+        }
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
 
         // Update camera
@@ -606,8 +683,13 @@ impl App {
                 renderer.draw_axes(&mut render_pass);
             }
 
-            // Draw voxel meshes
-            render_pass.set_pipeline(&renderer.pipeline.render_pipeline);
+            // Draw voxel meshes (use wireframe pipeline if enabled and supported)
+            let use_wireframe = wireframe_mode && renderer.pipeline.wireframe_pipeline.is_some();
+            if use_wireframe {
+                render_pass.set_pipeline(renderer.pipeline.wireframe_pipeline.as_ref().unwrap());
+            } else {
+                render_pass.set_pipeline(&renderer.pipeline.render_pipeline);
+            }
             render_pass.set_bind_group(0, &renderer.pipeline.camera_bind_group, &[]);
 
             for mesh in renderer.chunk_meshes.values() {
@@ -702,7 +784,23 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::ModifiersChanged(new_modifiers) => {
+                let old_alt = self.modifiers.alt_key();
+                let new_alt = new_modifiers.state().alt_key();
                 self.modifiers = new_modifiers.state();
+
+                // Alt key handling for temporary eyedropper
+                if new_alt && !old_alt {
+                    // Alt pressed: save current tool and switch to eyedropper
+                    if self.editor.current_tool != Tool::Eyedropper {
+                        self.editor.tool_before_alt = Some(self.editor.current_tool);
+                        self.editor.current_tool = Tool::Eyedropper;
+                    }
+                } else if !new_alt && old_alt {
+                    // Alt released: restore previous tool
+                    if let Some(tool) = self.editor.tool_before_alt.take() {
+                        self.editor.current_tool = tool;
+                    }
+                }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -764,14 +862,13 @@ impl ApplicationHandler for App {
                     // Update raycast for hovered voxel
                     self.update_raycast();
 
-                    if self.cursor_captured {
-                        if let Some(renderer) = &mut self.renderer {
-                            renderer.camera_controller.process_mouse_motion(
-                                position.x as f32,
-                                position.y as f32,
-                                &mut renderer.camera,
-                            );
-                        }
+                    // Process mouse motion for camera control (orbit with middle, pan with right)
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.camera_controller.process_mouse_motion(
+                            position.x as f32,
+                            position.y as f32,
+                            &mut renderer.camera,
+                        );
                     }
                 }
             }

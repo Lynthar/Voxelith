@@ -35,6 +35,8 @@ pub struct Renderer {
     pub depth_texture: wgpu::TextureView,
     pub grid_mesh: GridMesh,
     pub axis_mesh: AxisMesh,
+    /// Whether wireframe mode is supported
+    pub wireframe_supported: bool,
 }
 
 impl Renderer {
@@ -63,18 +65,34 @@ impl Renderer {
 
         log::info!("Using GPU: {}", adapter.get_info().name);
 
-        // Request device
+        // Check if wireframe mode is supported
+        let adapter_features = adapter.features();
+        let wireframe_supported = adapter_features.contains(wgpu::Features::POLYGON_MODE_LINE);
+
+        // Request device with optional wireframe support
+        let required_features = if wireframe_supported {
+            wgpu::Features::POLYGON_MODE_LINE
+        } else {
+            wgpu::Features::empty()
+        };
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Voxelith Device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
             )
             .await?;
+
+        if wireframe_supported {
+            log::info!("Wireframe mode supported");
+        } else {
+            log::info!("Wireframe mode not supported on this GPU");
+        }
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -100,8 +118,8 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        // Create render pipeline
-        let pipeline = RenderPipeline::new(&device, surface_format);
+        // Create render pipeline with optional wireframe support
+        let pipeline = RenderPipeline::new_with_features(&device, surface_format, required_features);
 
         // Create line pipeline (uses same camera bind group layout)
         let line_pipeline = LinePipeline::new(&device, surface_format, &pipeline.camera_bind_group_layout);
@@ -134,6 +152,7 @@ impl Renderer {
             depth_texture,
             grid_mesh,
             axis_mesh,
+            wireframe_supported,
         })
     }
 

@@ -7,6 +7,7 @@ use wgpu::util::DeviceExt;
 /// Main render pipeline for voxel rendering
 pub struct RenderPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
+    pub wireframe_pipeline: Option<wgpu::RenderPipeline>,
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
@@ -15,6 +16,11 @@ pub struct RenderPipeline {
 impl RenderPipeline {
     /// Create a new render pipeline
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_features(device, surface_format, wgpu::Features::empty())
+    }
+
+    /// Create a new render pipeline with optional features
+    pub fn new_with_features(device: &wgpu::Device, surface_format: wgpu::TextureFormat, features: wgpu::Features) -> Self {
         // Create shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Voxel Shader"),
@@ -62,7 +68,7 @@ impl RenderPipeline {
             push_constant_ranges: &[],
         });
 
-        // Create render pipeline
+        // Create render pipeline (fill mode)
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Voxel Render Pipeline"),
             layout: Some(&pipeline_layout),
@@ -107,8 +113,58 @@ impl RenderPipeline {
             cache: None,
         });
 
+        // Create wireframe pipeline if the feature is available
+        let wireframe_pipeline = if features.contains(wgpu::Features::POLYGON_MODE_LINE) {
+            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Voxel Wireframe Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[Vertex::layout()],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None, // No culling in wireframe mode
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            }))
+        } else {
+            None
+        };
+
         Self {
             render_pipeline,
+            wireframe_pipeline,
             camera_buffer,
             camera_bind_group,
             camera_bind_group_layout,
