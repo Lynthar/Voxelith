@@ -118,7 +118,13 @@ impl Project {
 
     /// Create project from world
     pub fn from_world(world: &World) -> Self {
+        Self::from_world_with_state(world, EditorState::default())
+    }
+
+    /// Create project from world with editor state
+    pub fn from_world_with_state(world: &World, editor_state: EditorState) -> Self {
         let mut project = Self::new();
+        project.editor_state = editor_state;
 
         for (pos, chunk_lock) in world.chunks() {
             let chunk = chunk_lock.read();
@@ -352,12 +358,28 @@ pub fn save_world(world: &World, path: &std::path::Path) -> Result<(), ProjectEr
     project.save(&mut writer)
 }
 
+/// Save world with editor state to file path
+pub fn save_world_with_state(world: &World, editor_state: EditorState, path: &std::path::Path) -> Result<(), ProjectError> {
+    let project = Project::from_world_with_state(world, editor_state);
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    project.save(&mut writer)
+}
+
 /// Quick load world from file path
 pub fn load_world(path: &std::path::Path) -> Result<World, ProjectError> {
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
     let project = Project::load(&mut reader)?;
     Ok(project.to_world())
+}
+
+/// Load world with editor state from file path
+pub fn load_world_with_state(path: &std::path::Path) -> Result<(World, EditorState), ProjectError> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let project = Project::load(&mut reader)?;
+    Ok((project.to_world(), project.editor_state))
 }
 
 #[cfg(test)]
