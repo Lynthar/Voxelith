@@ -35,6 +35,15 @@ pub struct Renderer {
     pub depth_texture: wgpu::TextureView,
     pub grid_mesh: GridMesh,
     pub axis_mesh: AxisMesh,
+    /// Translucent overlay mesh from the procgen preview, drawn with
+    /// `pipeline.transparent_pipeline` after opaque chunks. `None`
+    /// when preview is disabled or the generator output is empty.
+    pub preview_mesh: Option<GpuMesh>,
+    /// Translucent overlay showing the brush's hovered target cells
+    /// (Place: adjacent face cell; Remove/Paint: the hovered cell;
+    /// Eyedropper/Fill: just the hovered cell). Updated as the
+    /// cursor moves so the user can see where a click would land.
+    pub brush_preview_mesh: Option<GpuMesh>,
     /// Whether wireframe mode is supported
     pub wireframe_supported: bool,
 }
@@ -152,6 +161,8 @@ impl Renderer {
             depth_texture,
             grid_mesh,
             axis_mesh,
+            preview_mesh: None,
+            brush_preview_mesh: None,
             wireframe_supported,
         })
     }
@@ -211,6 +222,55 @@ impl Renderer {
     /// Remove a chunk mesh
     pub fn remove_mesh(&mut self, chunk_pos: ChunkPos) {
         self.chunk_meshes.remove(&chunk_pos);
+    }
+
+    /// Replace the procgen preview overlay. Empty mesh -> clear.
+    pub fn set_preview_mesh(&mut self, mesh: &ChunkMesh) {
+        if mesh.is_empty() {
+            self.preview_mesh = None;
+        } else {
+            self.preview_mesh = Some(GpuMesh::new(&self.device, mesh));
+        }
+    }
+
+    /// Clear the procgen preview overlay.
+    pub fn clear_preview(&mut self) {
+        self.preview_mesh = None;
+    }
+
+    /// Draw the preview overlay (if any) using the transparent pipeline.
+    /// Must be invoked after opaque geometry in the same render pass so
+    /// the depth buffer it reads is already populated.
+    pub fn draw_preview<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        if let Some(preview) = &self.preview_mesh {
+            render_pass.set_pipeline(&self.pipeline.transparent_pipeline);
+            render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+            preview.draw(render_pass);
+        }
+    }
+
+    /// Replace the brush hover overlay. Empty mesh -> clear.
+    pub fn set_brush_preview_mesh(&mut self, mesh: &ChunkMesh) {
+        if mesh.is_empty() {
+            self.brush_preview_mesh = None;
+        } else {
+            self.brush_preview_mesh = Some(GpuMesh::new(&self.device, mesh));
+        }
+    }
+
+    /// Clear the brush hover overlay.
+    pub fn clear_brush_preview(&mut self) {
+        self.brush_preview_mesh = None;
+    }
+
+    /// Draw the brush hover overlay. Same depth/blend rules as
+    /// `draw_preview` — call after opaque geometry.
+    pub fn draw_brush_preview<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        if let Some(preview) = &self.brush_preview_mesh {
+            render_pass.set_pipeline(&self.pipeline.transparent_pipeline);
+            render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+            preview.draw(render_pass);
+        }
     }
 
     /// Draw grid in render pass

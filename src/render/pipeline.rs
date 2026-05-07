@@ -4,10 +4,20 @@ use super::{Camera, CameraUniform};
 use crate::mesh::Vertex;
 use wgpu::util::DeviceExt;
 
-/// Main render pipeline for voxel rendering
+/// Main render pipeline for voxel rendering.
+///
+/// Three voxel pipelines share the same shader, vertex layout, and
+/// camera bind group:
+/// - `render_pipeline`: opaque, depth-write enabled, back-face culled.
+/// - `wireframe_pipeline`: same as opaque but `PolygonMode::Line`,
+///   only present when the GPU exposes `POLYGON_MODE_LINE`.
+/// - `transparent_pipeline`: alpha-blended with depth-write disabled,
+///   used for the procgen preview overlay so opaque geometry behind
+///   it remains visible.
 pub struct RenderPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
     pub wireframe_pipeline: Option<wgpu::RenderPipeline>,
+    pub transparent_pipeline: wgpu::RenderPipeline,
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
@@ -162,9 +172,58 @@ impl RenderPipeline {
             None
         };
 
+        // Transparent pipeline: same shader/layout, alpha blending,
+        // depth-write disabled so the preview doesn't occlude later
+        // transparent geometry. Drawn after opaque chunks so the
+        // already-written opaque depth still gates it correctly.
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Voxel Transparent Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             render_pipeline,
             wireframe_pipeline,
+            transparent_pipeline,
             camera_buffer,
             camera_bind_group,
             camera_bind_group_layout,

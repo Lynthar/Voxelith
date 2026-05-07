@@ -163,6 +163,41 @@ impl World {
 
         chunk.write().set(lx, ly, lz, voxel);
         self.any_dirty = true;
+
+        // If the write touched a chunk-boundary cell, the affected
+        // boundary face on the neighbor chunk's mesh may flip
+        // visibility. Mark loaded neighbors dirty so they re-mesh.
+        // Missing neighbors aren't created — there's nothing to
+        // re-mesh and we don't want to spawn empty chunks.
+        self.mark_boundary_neighbors_dirty(chunk_pos, lx, ly, lz);
+    }
+
+    /// Mark the (up to three) face-neighbors of a boundary write dirty.
+    fn mark_boundary_neighbors_dirty(
+        &self,
+        chunk_pos: ChunkPos,
+        lx: usize,
+        ly: usize,
+        lz: usize,
+    ) {
+        let last = CHUNK_SIZE - 1;
+        let candidates: [(bool, i32, i32, i32); 6] = [
+            (lx == 0, -1, 0, 0),
+            (lx == last, 1, 0, 0),
+            (ly == 0, 0, -1, 0),
+            (ly == last, 0, 1, 0),
+            (lz == 0, 0, 0, -1),
+            (lz == last, 0, 0, 1),
+        ];
+        for (active, dx, dy, dz) in candidates {
+            if !active {
+                continue;
+            }
+            let neighbor_pos = chunk_pos.neighbor(dx, dy, dz);
+            if let Some(neighbor) = self.chunks.get(&neighbor_pos) {
+                neighbor.write().mark_dirty();
+            }
+        }
     }
 
     /// Fill a region with a voxel
@@ -303,6 +338,25 @@ mod tests {
         world.set_voxel(32, 0, 0, Voxel::from_rgb(0, 0, 255));
 
         assert_eq!(world.chunk_count(), 3);
+    }
+
+    #[test]
+    fn test_set_voxel_marks_neighbor_dirty() {
+        let mut world = World::new();
+
+        // Pre-create the neighbor chunk by writing into it, then clear
+        // dirty flags so we can observe the next write's effect.
+        world.set_voxel(32, 0, 0, Voxel::from_rgb(0, 255, 0));
+        world.clear_dirty_flags();
+        assert!(world.dirty_chunks().is_empty());
+
+        // Write at the +X boundary of chunk (0,0,0). The neighbor (1,0,0)
+        // must be marked dirty so its mesh re-culls boundary faces.
+        world.set_voxel(31, 0, 0, Voxel::from_rgb(255, 0, 0));
+
+        let dirty: std::collections::HashSet<_> = world.dirty_chunks().into_iter().collect();
+        assert!(dirty.contains(&ChunkPos::new(0, 0, 0)));
+        assert!(dirty.contains(&ChunkPos::new(1, 0, 0)));
     }
 
     #[test]

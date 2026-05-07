@@ -1,13 +1,20 @@
 //! UI state and panel definitions.
 
+use std::path::PathBuf;
+
 use super::CameraView;
 
-/// One-shot UI actions that need to be processed by the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// One-shot UI actions that need to be processed by the application.
+///
+/// Not `Copy` because `OpenRecent` carries a `PathBuf`. Actions are
+/// taken by value via `UiState::take_actions`, so this is fine.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UiAction {
     // File operations
     NewProject,
     OpenProject,
+    /// Open a specific path from the recent-files MRU.
+    OpenRecent(PathBuf),
     SaveProject,
     SaveAs,
     ImportVox,
@@ -24,6 +31,11 @@ pub enum UiAction {
     GenerateGround,
     GenerateSphere,
     GeneratePyramid,
+    /// Run the procgen panel's currently-selected generator (terrain
+    /// / tree / ...) and apply the result via CommandHistory (undo-able).
+    GenerateProcedural,
+    /// Run the pipeline graph and apply its output via CommandHistory.
+    RunGraph,
 
     // Camera operations
     ResetCamera,
@@ -38,6 +50,8 @@ pub struct UiState {
     pub show_tools: bool,
     pub show_palette: bool,
     pub show_viewport_settings: bool,
+    pub show_procgen: bool,
+    pub show_graph: bool,
     pub show_help: bool,
     pub show_about: bool,
 
@@ -55,6 +69,8 @@ impl UiState {
             show_tools: true,
             show_palette: true,
             show_viewport_settings: false,
+            show_procgen: false,
+            show_graph: false,
             show_help: false,
             show_about: false,
             pending_actions: Vec::new(),

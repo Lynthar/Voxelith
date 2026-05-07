@@ -5,10 +5,14 @@ mod panels;
 pub use panels::{UiAction, UiState};
 
 use crate::editor::{Editor, Tool};
+use crate::procgen::{
+    CombineOp, LSystemTree, NodeId, NodeKind, PerlinTerrain, PipelineGraph,
+    WfcGenerator,
+};
 use egui::Context;
 
 /// Viewport display settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ViewportSettings {
     pub show_grid: bool,
     pub show_axes: bool,
@@ -29,10 +33,71 @@ impl Default for ViewportSettings {
     }
 }
 
+/// Which generator the procgen panel is currently editing.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum GeneratorChoice {
+    Terrain,
+    Tree,
+    Wfc,
+}
+
+impl GeneratorChoice {
+    /// Display label used by the panel's combo box and status messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Terrain => "Perlin Terrain",
+            Self::Tree => "L-System Tree",
+            Self::Wfc => "WFC Tile Layout",
+        }
+    }
+}
+
+impl Default for GeneratorChoice {
+    fn default() -> Self {
+        Self::Terrain
+    }
+}
+
+/// Live state for the procedural-generation panel.
+///
+/// Each generator's instance doubles as its parameter state — UI
+/// sliders mutate the fields in place, then `UiAction::GenerateProcedural`
+/// triggers `selected`'s `generate()` in the application layer.
+///
+/// `preview_enabled` drives a translucent overlay of the selected
+/// generator's output, refreshed by the app's preview ticker after a
+/// short debounce when params change.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProcgenSettings {
+    pub selected: GeneratorChoice,
+    pub terrain: PerlinTerrain,
+    pub tree: LSystemTree,
+    pub wfc: WfcGenerator,
+    pub preview_enabled: bool,
+}
+
 /// Main UI manager
 pub struct Ui {
     pub state: UiState,
     pub viewport: ViewportSettings,
+    pub procgen: ProcgenSettings,
+    /// Pipeline graph edited in the Graph panel. Persisted in prefs.
+    pub graph: PipelineGraph,
+    /// Currently-selected node in the visual graph editor. Drives
+    /// the sidebar parameter editor. Cleared automatically when the
+    /// node is removed.
+    pub selected_node: Option<NodeId>,
+    /// Active wire-creation drag: source node whose output socket was
+    /// pressed. While set, the editor renders a live wire from that
+    /// socket to the cursor; on release a hit-test against input
+    /// sockets either snaps the wire to a target or discards it.
+    pub dragging_wire: Option<NodeId>,
+    /// Recent-files MRU mirrored from `prefs::Prefs::recent_files`.
+    /// App syncs this whenever the prefs version changes (touch_recent
+    /// + initial load).
+    pub recent_files: Vec<std::path::PathBuf>,
 }
 
 impl Ui {
@@ -40,6 +105,11 @@ impl Ui {
         Self {
             state: UiState::default(),
             viewport: ViewportSettings::default(),
+            procgen: ProcgenSettings::default(),
+            graph: PipelineGraph::default(),
+            selected_node: None,
+            dragging_wire: None,
+            recent_files: Vec::new(),
         }
     }
 
@@ -71,6 +141,16 @@ impl Ui {
             self.show_viewport_panel(ctx);
         }
 
+        // Procedural generation panel
+        if self.state.show_procgen {
+            self.show_procgen_panel(ctx);
+        }
+
+        // Pipeline graph panel
+        if self.state.show_graph {
+            self.show_graph_panel(ctx);
+        }
+
         // Help panel
         if self.state.show_help {
             self.show_help_panel(ctx);
@@ -97,6 +177,26 @@ impl Ui {
                         self.state.request(UiAction::OpenProject);
                         ui.close_menu();
                     }
+                    ui.menu_button("Open Recent", |ui| {
+                        if self.recent_files.is_empty() {
+                            ui.add_enabled(false, egui::Button::new("(empty)"));
+                        } else {
+                            for path in &self.recent_files {
+                                let label = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| path.display().to_string());
+                                let resp = ui
+                                    .button(label)
+                                    .on_hover_text(path.display().to_string());
+                                if resp.clicked() {
+                                    self.state.request(UiAction::OpenRecent(path.clone()));
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                    });
                     if ui.button("Save").clicked() {
                         self.state.request(UiAction::SaveProject);
                         ui.close_menu();
@@ -147,6 +247,8 @@ impl Ui {
                     ui.checkbox(&mut self.state.show_tools, "Tools Panel");
                     ui.checkbox(&mut self.state.show_palette, "Color Palette");
                     ui.checkbox(&mut self.state.show_viewport_settings, "Viewport Settings");
+                    ui.checkbox(&mut self.state.show_procgen, "Procedural Generation");
+                    ui.checkbox(&mut self.state.show_graph, "Pipeline Graph");
                     ui.separator();
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
@@ -169,6 +271,11 @@ impl Ui {
                     }
                     if ui.button("Pyramid").clicked() {
                         self.state.request(UiAction::GeneratePyramid);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Procedural Terrain...").clicked() {
+                        self.state.show_procgen = true;
                         ui.close_menu();
                     }
                 });
@@ -454,6 +561,195 @@ impl Ui {
             });
     }
 
+    fn show_procgen_panel(&mut self, ctx: &Context) {
+        // Deferred-action pattern: `.open(...)` borrows self.state.show_procgen
+        // and the closure borrows self.procgen, so we can't dispatch a UiAction
+        // (which mutates self.state) until both are released.
+        let mut generate = false;
+        let procgen = &mut self.procgen;
+
+        egui::Window::new("Procedural Generation")
+            .default_pos([ctx.screen_rect().width() - 240.0, 200.0])
+            .default_width(240.0)
+            .resizable(true)
+            .collapsible(true)
+            .open(&mut self.state.show_procgen)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Generator");
+                    egui::ComboBox::from_id_salt("procgen_selected")
+                        .selected_text(procgen.selected.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut procgen.selected,
+                                GeneratorChoice::Terrain,
+                                GeneratorChoice::Terrain.label(),
+                            );
+                            ui.selectable_value(
+                                &mut procgen.selected,
+                                GeneratorChoice::Tree,
+                                GeneratorChoice::Tree.label(),
+                            );
+                            ui.selectable_value(
+                                &mut procgen.selected,
+                                GeneratorChoice::Wfc,
+                                GeneratorChoice::Wfc.label(),
+                            );
+                        });
+                });
+
+                ui.separator();
+
+                match procgen.selected {
+                    GeneratorChoice::Terrain => {
+                        terrain_params_ui(ui, &mut procgen.terrain)
+                    }
+                    GeneratorChoice::Tree => {
+                        tree_params_ui(ui, &mut procgen.tree)
+                    }
+                    GeneratorChoice::Wfc => {
+                        wfc_params_ui(ui, &mut procgen.wfc)
+                    }
+                }
+
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut procgen.preview_enabled, "Preview")
+                        .on_hover_text(
+                            "Show a translucent overlay of the generator's \
+                             current output (debounced ~150ms)",
+                        );
+                    if ui
+                        .button("Generate")
+                        .on_hover_text("Apply generated voxels (undo-able)")
+                        .clicked()
+                    {
+                        generate = true;
+                    }
+                });
+            });
+
+        if generate {
+            self.state.request(UiAction::GenerateProcedural);
+        }
+    }
+
+    fn show_graph_panel(&mut self, ctx: &Context) {
+        // Deferred actions: collected during the immediate-mode pass,
+        // applied after the window closure releases its borrows on
+        // `self.graph` and `self.state`.
+        let mut run = false;
+        let mut delete_id: Option<NodeId> = None;
+        let mut add_kind: Option<NodeKind> = None;
+        let mut auto_layout = false;
+        let mut wire_action: Option<(NodeId, usize, Option<NodeId>)> = None;
+        let mut wire_error: Option<String> = None;
+
+        let graph = &mut self.graph;
+        let selected = &mut self.selected_node;
+        let drag_wire = &mut self.dragging_wire;
+
+        egui::Window::new("Pipeline Graph")
+            .default_pos([240.0, 80.0])
+            .default_size([960.0, 600.0])
+            .min_size([520.0, 340.0])
+            .resizable(true)
+            .collapsible(true)
+            .open(&mut self.state.show_graph)
+            .show(ctx, |ui| {
+                // ===== Top toolbar =====
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("▶ Run Pipeline")
+                        .on_hover_text("Evaluate the graph and apply (undo-able)")
+                        .clicked()
+                    {
+                        run = true;
+                    }
+                    ui.separator();
+                    ui.menu_button("+ Add Node", |ui| {
+                        for k in node_menu_options() {
+                            if ui.button(k.0).clicked() {
+                                add_kind = Some((k.1)());
+                                ui.close_menu();
+                            }
+                            if k.2 {
+                                ui.separator();
+                            }
+                        }
+                    });
+                    if ui.button("Auto Layout").on_hover_text("Re-grid all nodes").clicked()
+                    {
+                        auto_layout = true;
+                    }
+                    ui.separator();
+                    ui.label(format!("Nodes: {}", graph.nodes.len()));
+                });
+                ui.separator();
+
+                // ===== Split: canvas (left) + sidebar (right) =====
+                let avail = ui.available_size();
+                let sidebar_w = 280.0_f32.min(avail.x * 0.4).max(220.0);
+                let canvas_w = (avail.x - sidebar_w - 12.0).max(200.0);
+
+                ui.horizontal_top(|ui| {
+                    // ---- Canvas ----
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(canvas_w, avail.y),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            graph_canvas(
+                                ui,
+                                graph,
+                                selected,
+                                drag_wire,
+                                &mut delete_id,
+                                &mut wire_action,
+                                &mut wire_error,
+                            );
+                        },
+                    );
+                    ui.separator();
+
+                    // ---- Sidebar ----
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(sidebar_w, avail.y),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            graph_sidebar(ui, graph, *selected);
+                        },
+                    );
+                });
+            });
+
+        // ===== Apply deferred actions =====
+        if let Some(id) = delete_id {
+            graph.remove(id);
+            if *selected == Some(id) {
+                *selected = None;
+            }
+        }
+        if let Some(kind) = add_kind {
+            let id = graph.add(kind);
+            *selected = Some(id);
+        }
+        if auto_layout {
+            graph.relayout();
+        }
+        if let Some((target, slot, source)) = wire_action {
+            if let Err(e) = graph.set_input(target, slot, source) {
+                wire_error = Some(format!("{}", e));
+            }
+        }
+        if let Some(msg) = wire_error {
+            self.set_status(format!("Graph: {}", msg));
+        }
+        if run {
+            self.state.request(UiAction::RunGraph);
+        }
+    }
+
     fn show_help_panel(&mut self, ctx: &Context) {
         egui::Window::new("Keyboard Shortcuts")
             .default_pos([ctx.screen_rect().width() / 2.0 - 150.0, 100.0])
@@ -605,7 +901,18 @@ impl Ui {
 
                 ui.label("Voxelith v0.1.0");
                 ui.separator();
-                ui.label(format!("Tool: {}", editor.current_tool.name()));
+                // Tool name highlighted: easy to miss in the previous flat
+                // style — users have ended up confused about which tool is
+                // active (especially Fill / Eyedropper, which behave
+                // very differently from the brush tools).
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Tool: {}",
+                        editor.current_tool.name()
+                    ))
+                    .strong()
+                    .color(egui::Color32::LIGHT_BLUE),
+                );
                 ui.separator();
                 ui.label(format!("Brush: {}px", editor.brush_size));
                 ui.separator();
@@ -621,7 +928,7 @@ impl Ui {
                     ));
                 }
 
-                // Right-aligned viewport info
+                // Right-aligned viewport / preview info.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.viewport.wireframe_mode {
                         ui.label("[Wireframe]");
@@ -631,6 +938,12 @@ impl Ui {
                     }
                     if self.viewport.show_axes {
                         ui.label("[Axes]");
+                    }
+                    if self.procgen.preview_enabled {
+                        ui.label(
+                            egui::RichText::new("● Preview")
+                                .color(egui::Color32::LIGHT_GREEN),
+                        );
                     }
                 });
             });
@@ -670,4 +983,707 @@ pub enum CameraView {
     Top,
     Front,
     Side,
+}
+
+// ---- Procgen panel parameter editors ---------------------------------
+//
+// Free functions so the procgen panel's borrow on `self.procgen` can
+// dispatch to the right editor without involving `&mut self`. They take
+// only the generator's parameter struct.
+
+fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
+    ui.heading(GeneratorChoice::Terrain.label());
+    ui.add_space(4.0);
+
+    egui::Grid::new("terrain_params")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Seed");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
+                if ui
+                    .button("Rand")
+                    .on_hover_text("Randomize seed")
+                    .clicked()
+                {
+                    t.seed = rand::random();
+                }
+            });
+            ui.end_row();
+
+            ui.label("Width");
+            ui.add(egui::Slider::new(&mut t.width, 8..=256));
+            ui.end_row();
+
+            ui.label("Depth");
+            ui.add(egui::Slider::new(&mut t.depth, 8..=256));
+            ui.end_row();
+
+            ui.label("Min Y");
+            ui.add(egui::Slider::new(&mut t.min_height, -64..=64));
+            ui.end_row();
+
+            ui.label("Max Y");
+            ui.add(egui::Slider::new(&mut t.max_height, -64..=128));
+            ui.end_row();
+
+            ui.label("Frequency");
+            ui.add(
+                egui::Slider::new(&mut t.frequency, 0.005..=0.5)
+                    .logarithmic(true),
+            );
+            ui.end_row();
+
+            ui.label("Octaves");
+            ui.add(egui::Slider::new(&mut t.octaves, 1..=8));
+            ui.end_row();
+        });
+
+    ui.label(format!(
+        "{} × {} × {}",
+        t.width,
+        t.depth,
+        (t.max_height - t.min_height).max(0)
+    ));
+}
+
+fn tree_params_ui(ui: &mut egui::Ui, t: &mut LSystemTree) {
+    ui.heading(GeneratorChoice::Tree.label());
+    ui.add_space(4.0);
+
+    egui::Grid::new("tree_params")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Seed");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
+                if ui
+                    .button("Rand")
+                    .on_hover_text("Randomize seed")
+                    .clicked()
+                {
+                    t.seed = rand::random();
+                }
+            });
+            ui.end_row();
+
+            ui.label("Iterations");
+            ui.add(egui::Slider::new(&mut t.iterations, 1..=6));
+            ui.end_row();
+
+            ui.label("Angle (°)");
+            ui.add(egui::Slider::new(&mut t.angle_deg, 5.0..=60.0));
+            ui.end_row();
+
+            ui.label("Init length");
+            ui.add(egui::Slider::new(&mut t.initial_length, 1.0..=12.0));
+            ui.end_row();
+
+            ui.label("Length scale");
+            ui.add(egui::Slider::new(&mut t.length_scale, 0.4..=1.0));
+            ui.end_row();
+
+            ui.label("Origin");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.origin.0).prefix("x:"));
+                ui.add(egui::DragValue::new(&mut t.origin.1).prefix("y:"));
+                ui.add(egui::DragValue::new(&mut t.origin.2).prefix("z:"));
+            });
+            ui.end_row();
+
+            ui.label("Trunk");
+            color_button_u8(ui, &mut t.trunk_color);
+            ui.end_row();
+
+            ui.label("Leaves");
+            color_button_u8(ui, &mut t.leaf_color);
+            ui.end_row();
+        });
+}
+
+fn wfc_params_ui(ui: &mut egui::Ui, t: &mut WfcGenerator) {
+    ui.heading(GeneratorChoice::Wfc.label());
+    ui.add_space(4.0);
+
+    egui::Grid::new("wfc_params")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Seed");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
+                if ui
+                    .button("Rand")
+                    .on_hover_text("Randomize seed")
+                    .clicked()
+                {
+                    t.seed = rand::random();
+                }
+            });
+            ui.end_row();
+
+            ui.label("Width (tiles)");
+            ui.add(egui::Slider::new(&mut t.width, 2..=24));
+            ui.end_row();
+
+            ui.label("Depth (tiles)");
+            ui.add(egui::Slider::new(&mut t.depth, 2..=24));
+            ui.end_row();
+
+            ui.label("Origin");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut t.origin.0).prefix("x:"));
+                ui.add(egui::DragValue::new(&mut t.origin.1).prefix("y:"));
+                ui.add(egui::DragValue::new(&mut t.origin.2).prefix("z:"));
+            });
+            ui.end_row();
+        });
+
+    let s = crate::procgen::WFC_TILE_SIZE as i32;
+    ui.label(format!(
+        "≈ {} × {} × {} voxels",
+        t.width as i32 * s,
+        s,
+        t.depth as i32 * s
+    ));
+}
+
+// =============================================================
+// Visual graph editor: layout constants + helpers
+// =============================================================
+
+const NODE_W: f32 = 168.0;
+const NODE_H: f32 = 84.0;
+const NODE_HEADER_H: f32 = 22.0;
+const SOCKET_R: f32 = 6.0;
+const SOCKET_HIT_R: f32 = SOCKET_R + 4.0;
+
+/// Available node kinds in the "+ Add Node" menu.
+/// Tuple is (label, factory, separator_after).
+fn node_menu_options() -> Vec<(&'static str, fn() -> NodeKind, bool)> {
+    vec![
+        ("Source: Terrain", || NodeKind::Terrain(PerlinTerrain::default()), false),
+        ("Source: Tree", || NodeKind::Tree(LSystemTree::default()), false),
+        ("Source: WFC", || NodeKind::Wfc(WfcGenerator::default()), true),
+        (
+            "Translate",
+            || NodeKind::Translate { input: None, dx: 0, dy: 0, dz: 0 },
+            false,
+        ),
+        (
+            "Combine",
+            || NodeKind::Combine {
+                a: None,
+                b: None,
+                op: CombineOp::Union,
+            },
+            true,
+        ),
+        ("Output", || NodeKind::Output { input: None }, false),
+    ]
+}
+
+/// Header tint per node kind — gives a quick visual key for source vs.
+/// transform vs. sink.
+fn node_header_color(kind: &NodeKind) -> egui::Color32 {
+    match kind {
+        NodeKind::Terrain(_) => egui::Color32::from_rgb(70, 110, 60),
+        NodeKind::Tree(_) => egui::Color32::from_rgb(60, 100, 60),
+        NodeKind::Wfc(_) => egui::Color32::from_rgb(100, 90, 50),
+        NodeKind::Translate { .. } => egui::Color32::from_rgb(70, 80, 110),
+        NodeKind::Combine { .. } => egui::Color32::from_rgb(110, 70, 110),
+        NodeKind::Output { .. } => egui::Color32::from_rgb(120, 80, 60),
+    }
+}
+
+/// One- or two-line summary shown under the header inside the node box.
+fn node_summary(kind: &NodeKind) -> String {
+    match kind {
+        NodeKind::Terrain(t) => {
+            format!("seed {} • {}×{}", t.seed, t.width, t.depth)
+        }
+        NodeKind::Tree(t) => {
+            format!("seed {} • iter {}", t.seed, t.iterations)
+        }
+        NodeKind::Wfc(t) => {
+            format!("seed {} • {}×{}", t.seed, t.width, t.depth)
+        }
+        NodeKind::Translate { dx, dy, dz, .. } => {
+            format!("offset ({}, {}, {})", dx, dy, dz)
+        }
+        NodeKind::Combine { op, .. } => op.label().to_string(),
+        NodeKind::Output { .. } => "pipeline result".to_string(),
+    }
+}
+
+/// Screen-space bounding box of a node body.
+fn node_screen_rect(canvas_min: egui::Pos2, node: &crate::procgen::GraphNode) -> egui::Rect {
+    egui::Rect::from_min_size(
+        canvas_min + egui::vec2(node.position[0], node.position[1]),
+        egui::vec2(NODE_W, NODE_H),
+    )
+}
+
+/// Center of an input socket in screen space. Combine nodes have
+/// two inputs stacked vertically; everyone else has one centered.
+fn input_socket_screen(
+    canvas_min: egui::Pos2,
+    node: &crate::procgen::GraphNode,
+    slot: usize,
+) -> egui::Pos2 {
+    let body = node_screen_rect(canvas_min, node);
+    match &node.kind {
+        NodeKind::Combine { .. } => {
+            let body_inner_top = body.min.y + NODE_HEADER_H + 14.0;
+            let y = body_inner_top + slot as f32 * 22.0;
+            egui::pos2(body.min.x, y)
+        }
+        _ => egui::pos2(body.min.x, body.center().y + 6.0),
+    }
+}
+
+/// Center of a node's output socket (right edge).
+fn output_socket_screen(
+    canvas_min: egui::Pos2,
+    node: &crate::procgen::GraphNode,
+) -> egui::Pos2 {
+    let body = node_screen_rect(canvas_min, node);
+    egui::pos2(body.max.x, body.center().y + 6.0)
+}
+
+/// Sample a cubic Bezier at parameter `t ∈ [0, 1]`.
+fn cubic_bezier_point(
+    p0: egui::Pos2,
+    p1: egui::Pos2,
+    p2: egui::Pos2,
+    p3: egui::Pos2,
+    t: f32,
+) -> egui::Pos2 {
+    let omt = 1.0 - t;
+    let omt2 = omt * omt;
+    let omt3 = omt2 * omt;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    egui::pos2(
+        omt3 * p0.x + 3.0 * omt2 * t * p1.x + 3.0 * omt * t2 * p2.x + t3 * p3.x,
+        omt3 * p0.y + 3.0 * omt2 * t * p1.y + 3.0 * omt * t2 * p2.y + t3 * p3.y,
+    )
+}
+
+/// Draw a wire from `from` (output socket) to `to` (input socket) as a
+/// horizontally-bowed cubic Bezier — the standard look for node-graph
+/// editors. Tessellated to a polyline so we don't depend on egui's
+/// CubicBezierShape API across versions.
+fn paint_wire(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    color: egui::Color32,
+) {
+    let dx = (to.x - from.x).abs().max(40.0);
+    let c1 = egui::pos2(from.x + dx * 0.5, from.y);
+    let c2 = egui::pos2(to.x - dx * 0.5, to.y);
+
+    const SEGMENTS: usize = 24;
+    let mut pts = Vec::with_capacity(SEGMENTS + 1);
+    for i in 0..=SEGMENTS {
+        let t = i as f32 / SEGMENTS as f32;
+        pts.push(cubic_bezier_point(from, c1, c2, to, t));
+    }
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, color)));
+}
+
+/// Visual graph editor canvas. Renders nodes + wires, handles
+/// click-select, body-drag, and socket-drag wire creation. Mutations
+/// to the graph (input slot changes, deletion) are deferred via the
+/// out-params so the caller can apply them outside of the borrow.
+fn graph_canvas(
+    ui: &mut egui::Ui,
+    graph: &mut PipelineGraph,
+    selected: &mut Option<NodeId>,
+    drag_wire: &mut Option<NodeId>,
+    delete_id: &mut Option<NodeId>,
+    wire_action: &mut Option<(NodeId, usize, Option<NodeId>)>,
+    wire_error: &mut Option<String>,
+) {
+    let avail = ui.available_size();
+    let (canvas_rect, _bg) =
+        ui.allocate_exact_size(avail, egui::Sense::hover());
+    let painter = ui.painter_at(canvas_rect);
+
+    // Background.
+    painter.rect_filled(
+        canvas_rect,
+        0.0,
+        egui::Color32::from_rgb(28, 28, 36),
+    );
+
+    // ===== Wires (drawn before nodes so they pass under boxes) =====
+    for node in &graph.nodes {
+        let in_count = PipelineGraph::input_count(&node.kind);
+        for slot in 0..in_count {
+            let input_id = match (slot, &node.kind) {
+                (
+                    0,
+                    NodeKind::Translate { input, .. } | NodeKind::Output { input },
+                ) => *input,
+                (0, NodeKind::Combine { a, .. }) => *a,
+                (1, NodeKind::Combine { b, .. }) => *b,
+                _ => None,
+            };
+            let Some(src_id) = input_id else { continue };
+            let Some(src) = graph.get(src_id) else { continue };
+            let from = output_socket_screen(canvas_rect.min, src);
+            let to = input_socket_screen(canvas_rect.min, node, slot);
+            let highlighted = *selected == Some(node.id) || *selected == Some(src_id);
+            let color = if highlighted {
+                egui::Color32::from_rgb(180, 200, 255)
+            } else {
+                egui::Color32::from_rgb(140, 140, 160)
+            };
+            paint_wire(&painter, from, to, color);
+        }
+    }
+
+    // ===== Live wire (while a socket-drag is active) =====
+    if let Some(src_id) = *drag_wire {
+        if let Some(src) = graph.get(src_id) {
+            let from = output_socket_screen(canvas_rect.min, src);
+            let to = ui
+                .ctx()
+                .input(|i| i.pointer.interact_pos())
+                .unwrap_or(from);
+            paint_wire(&painter, from, to, egui::Color32::YELLOW);
+        }
+    }
+
+    // ===== Nodes =====
+    // Two passes: first allocate all node body widgets so their drag
+    // responses are registered, then draw + handle sockets. Splitting
+    // keeps z-order predictable (sockets sit on top of body).
+    //
+    // First pass: register a click-and-drag interaction over each
+    // node body so egui can route hover / click / drag events. We
+    // capture the per-body response so the second pass can apply the
+    // delta to the node's position without re-allocating.
+    struct NodeFrame {
+        body_resp: egui::Response,
+        delta: egui::Vec2,
+    }
+    let mut frames: Vec<(NodeId, NodeFrame)> = Vec::with_capacity(graph.nodes.len());
+
+    for node in &graph.nodes {
+        let body = node_screen_rect(canvas_rect.min, node);
+        let body_id = ui.id().with(("graph_node_body", node.id));
+        let body_resp = ui.interact(body, body_id, egui::Sense::click_and_drag());
+        let delta = if body_resp.dragged() {
+            body_resp.drag_delta()
+        } else {
+            egui::Vec2::ZERO
+        };
+        frames.push((node.id, NodeFrame { body_resp, delta }));
+    }
+
+    // Apply body drags + clicks (mutates graph.position / selected).
+    for (id, frame) in &frames {
+        if frame.body_resp.clicked() {
+            *selected = Some(*id);
+        }
+        if frame.body_resp.dragged() {
+            *selected = Some(*id);
+            if let Some(node) = graph.get_mut(*id) {
+                node.position[0] += frame.delta.x;
+                node.position[1] += frame.delta.y;
+            }
+        }
+    }
+
+    // Re-borrow `&graph.nodes` for visual + socket drawing. We use
+    // the cached frames for body rects so mid-drag positions update
+    // smoothly.
+    let nodes_snapshot: Vec<crate::procgen::GraphNode> = graph.nodes.clone();
+    for node in &nodes_snapshot {
+        let body = node_screen_rect(canvas_rect.min, node);
+        let is_selected = *selected == Some(node.id);
+
+        // Body fill + outline.
+        painter.rect_filled(body, 4.0, egui::Color32::from_rgb(50, 50, 60));
+        let outline = if is_selected {
+            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE)
+        } else {
+            egui::Stroke::new(1.0, egui::Color32::from_gray(80))
+        };
+        painter.rect_stroke(body, 4.0, outline);
+
+        // Header.
+        let header = egui::Rect::from_min_max(
+            body.min,
+            egui::pos2(body.max.x, body.min.y + NODE_HEADER_H),
+        );
+        painter.rect_filled(header, 4.0, node_header_color(&node.kind));
+        painter.text(
+            header.min + egui::vec2(8.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("#{}  {}", node.id, node.kind.label()),
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
+
+        // Delete × button (top-right corner of header).
+        let close_size = 16.0;
+        let close_rect = egui::Rect::from_min_size(
+            egui::pos2(header.max.x - close_size - 2.0, header.min.y + 3.0),
+            egui::vec2(close_size, close_size),
+        );
+        let close_id = ui.id().with(("graph_node_close", node.id));
+        let close_resp =
+            ui.interact(close_rect, close_id, egui::Sense::click());
+        let close_color = if close_resp.hovered() {
+            egui::Color32::from_rgb(255, 120, 120)
+        } else {
+            egui::Color32::from_gray(220)
+        };
+        painter.text(
+            close_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(14.0),
+            close_color,
+        );
+        if close_resp.clicked() {
+            *delete_id = Some(node.id);
+        }
+
+        // Summary text.
+        painter.text(
+            body.min + egui::vec2(8.0, NODE_HEADER_H + 6.0),
+            egui::Align2::LEFT_TOP,
+            node_summary(&node.kind),
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_gray(200),
+        );
+
+        // Input sockets.
+        for slot in 0..PipelineGraph::input_count(&node.kind) {
+            let center = input_socket_screen(canvas_rect.min, node, slot);
+            let hit_rect = egui::Rect::from_center_size(
+                center,
+                egui::vec2(SOCKET_HIT_R * 2.0, SOCKET_HIT_R * 2.0),
+            );
+            let in_id =
+                ui.id().with(("graph_in_sock", node.id, slot));
+            let in_resp = ui.interact(hit_rect, in_id, egui::Sense::hover());
+            let hot = drag_wire.is_some() && in_resp.hovered();
+            let color = if hot {
+                egui::Color32::from_rgb(255, 230, 100)
+            } else {
+                egui::Color32::from_rgb(180, 180, 200)
+            };
+            painter.circle_filled(center, SOCKET_R, color);
+            painter.circle_stroke(
+                center,
+                SOCKET_R,
+                egui::Stroke::new(1.0, egui::Color32::BLACK),
+            );
+        }
+
+        // Output socket.
+        if PipelineGraph::has_output(&node.kind) {
+            let center = output_socket_screen(canvas_rect.min, node);
+            let hit_rect = egui::Rect::from_center_size(
+                center,
+                egui::vec2(SOCKET_HIT_R * 2.0, SOCKET_HIT_R * 2.0),
+            );
+            let out_id = ui.id().with(("graph_out_sock", node.id));
+            let out_resp =
+                ui.interact(hit_rect, out_id, egui::Sense::drag());
+            painter.circle_filled(
+                center,
+                SOCKET_R,
+                egui::Color32::from_rgb(220, 200, 100),
+            );
+            painter.circle_stroke(
+                center,
+                SOCKET_R,
+                egui::Stroke::new(1.0, egui::Color32::BLACK),
+            );
+            if out_resp.drag_started() {
+                *drag_wire = Some(node.id);
+            }
+            if out_resp.drag_stopped() && *drag_wire == Some(node.id) {
+                // Hit-test cursor against every input socket.
+                let p = ui.ctx().input(|i| i.pointer.interact_pos());
+                let mut hit: Option<(NodeId, usize)> = None;
+                if let Some(p) = p {
+                    'outer: for target in &nodes_snapshot {
+                        if target.id == node.id {
+                            continue;
+                        }
+                        for slot in 0..PipelineGraph::input_count(&target.kind) {
+                            let s = input_socket_screen(
+                                canvas_rect.min,
+                                target,
+                                slot,
+                            );
+                            if (s - p).length() <= SOCKET_HIT_R {
+                                hit = Some((target.id, slot));
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                if let Some((target_id, slot)) = hit {
+                    *wire_action = Some((target_id, slot, Some(node.id)));
+                } else {
+                    // Released into empty space → no-op (intentional cancel).
+                    let _ = wire_error;
+                }
+                *drag_wire = None;
+            }
+        }
+    }
+
+    // If the user dragged and the cursor was released anywhere outside
+    // the canvas (or pointer became unavailable), still cancel the
+    // pending wire so we don't leave a stuck live wire on next frame.
+    if drag_wire.is_some() && ui.ctx().input(|i| !i.pointer.any_down()) {
+        *drag_wire = None;
+    }
+
+    // Empty-graph hint.
+    if graph.nodes.is_empty() {
+        painter.text(
+            canvas_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Empty pipeline.\nUse \"+ Add Node\" above.",
+            egui::FontId::proportional(13.0),
+            egui::Color32::from_gray(120),
+        );
+    }
+}
+
+/// Right-side parameter editor. Shows the selected node's params,
+/// plus connection ComboBoxes (kept as a fallback to visual wiring,
+/// useful for disconnecting / reading the current state).
+fn graph_sidebar(
+    ui: &mut egui::Ui,
+    graph: &mut PipelineGraph,
+    selected: Option<NodeId>,
+) {
+    ui.heading("Inspector");
+    ui.add_space(4.0);
+
+    let Some(id) = selected else {
+        ui.label("Click a node in the canvas to edit its parameters.");
+        return;
+    };
+
+    // Snapshot of node ids for input ComboBoxes (avoids holding an
+    // immutable borrow on graph.nodes while we mutate one node below).
+    let candidates: Vec<(NodeId, String)> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id, format!("#{}: {}", n.id, n.kind.label())))
+        .collect();
+
+    let Some(node) = graph.get_mut(id) else {
+        ui.label("(node not found)");
+        return;
+    };
+
+    ui.label(
+        egui::RichText::new(format!("#{}  {}", node.id, node.kind.label()))
+            .strong(),
+    );
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| match &mut node.kind {
+            NodeKind::Terrain(t) => terrain_params_ui(ui, t),
+            NodeKind::Tree(t) => tree_params_ui(ui, t),
+            NodeKind::Wfc(t) => wfc_params_ui(ui, t),
+            NodeKind::Translate { input, dx, dy, dz } => {
+                input_slot(ui, "Input", input, &candidates, id);
+                ui.horizontal(|ui| {
+                    ui.label("Offset");
+                    ui.add(egui::DragValue::new(dx).prefix("x:"));
+                    ui.add(egui::DragValue::new(dy).prefix("y:"));
+                    ui.add(egui::DragValue::new(dz).prefix("z:"));
+                });
+            }
+            NodeKind::Combine { a, b, op } => {
+                input_slot(ui, "Input A", a, &candidates, id);
+                input_slot(ui, "Input B", b, &candidates, id);
+                ui.horizontal(|ui| {
+                    ui.label("Operation");
+                    egui::ComboBox::from_id_salt(("combine_op_sb", id))
+                        .selected_text(op.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(op, CombineOp::Union, "Union");
+                            ui.selectable_value(
+                                op,
+                                CombineOp::Difference,
+                                "Difference",
+                            );
+                            ui.selectable_value(
+                                op,
+                                CombineOp::Intersect,
+                                "Intersect",
+                            );
+                        });
+                });
+            }
+            NodeKind::Output { input } => {
+                input_slot(ui, "Input", input, &candidates, id);
+            }
+        });
+}
+
+/// ComboBox for picking one of the graph's existing nodes as an input.
+/// `self_id` is excluded from the list (a node can't connect to itself).
+/// "(none)" is always an option for clearing the slot.
+fn input_slot(
+    ui: &mut egui::Ui,
+    label: &str,
+    input: &mut Option<NodeId>,
+    candidates: &[(NodeId, String)],
+    self_id: NodeId,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let current = match input {
+            Some(id) => candidates
+                .iter()
+                .find(|(c, _)| *c == *id)
+                .map(|(_, l)| l.as_str())
+                .unwrap_or("(missing)"),
+            None => "(none)",
+        };
+        egui::ComboBox::from_id_salt(("input_slot", label, self_id))
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(input, None, "(none)");
+                for (cid, clabel) in candidates {
+                    if *cid == self_id {
+                        continue;
+                    }
+                    ui.selectable_value(input, Some(*cid), clabel);
+                }
+            });
+    });
+}
+
+fn color_button_u8(ui: &mut egui::Ui, color: &mut [u8; 3]) {
+    let mut f = [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+    ];
+    if ui.color_edit_button_rgb(&mut f).changed() {
+        color[0] = (f[0] * 255.0).round() as u8;
+        color[1] = (f[1] * 255.0).round() as u8;
+        color[2] = (f[2] * 255.0).round() as u8;
+    }
 }

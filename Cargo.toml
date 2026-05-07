@@ -40,6 +40,7 @@ thiserror = "2.0"
 parking_lot = "0.12"  # Better mutexes
 flate2 = "1.0"  # Compression for project files
 rfd = "0.15"  # Native file dialogs
+dirs = "5.0"  # Cross-platform user config / cache / data directories
 
 # Parallelism
 rayon = "1.10"

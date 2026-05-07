@@ -5,19 +5,30 @@
 //! - Naive: Simple but generates many triangles
 //! - Greedy: Optimized mesh with merged faces (TODO)
 //! - Marching Cubes: Smooth surfaces (TODO)
+//!
+//! `patch_to_mesh` reuses the same face emission helpers to render
+//! a procgen `VoxelPatch` (or any sparse voxel list) directly to a
+//! mesh, with internal face culling — used for the procgen preview
+//! overlay.
 
-mod vertex;
 mod naive;
+mod patch;
+mod vertex;
 
-pub use vertex::{Vertex, ChunkMesh};
 pub use naive::NaiveMesher;
+pub use patch::patch_to_mesh;
+pub use vertex::{ChunkMesh, Vertex};
 
-use crate::core::{Chunk, ChunkPos};
+use crate::core::{ChunkPos, World};
 
-/// Trait for mesh generation strategies
+/// Trait for mesh generation strategies.
+///
+/// Implementations receive the world plus a chunk position so they can
+/// look up neighbor chunks for boundary face culling.
 pub trait Mesher {
-    /// Generate mesh for a chunk
-    fn generate(&self, chunk: &Chunk, chunk_pos: ChunkPos) -> ChunkMesh;
+    /// Generate the mesh for the chunk at `chunk_pos`. Returns an empty
+    /// mesh if the chunk doesn't exist or contains only air.
+    fn generate(&self, world: &World, chunk_pos: ChunkPos) -> ChunkMesh;
 }
 
 /// Face direction for voxel faces
@@ -72,4 +83,67 @@ impl Face {
         Face::PosZ,
         Face::NegZ,
     ];
+}
+
+/// Build the 4 vertices of a unit-cube face at integer voxel position
+/// `(x, y, z)`. Vertices are CCW-wound when viewed from outside.
+pub(crate) fn face_quad_vertices(
+    x: f32,
+    y: f32,
+    z: f32,
+    face: Face,
+    color: [f32; 4],
+) -> [Vertex; 4] {
+    let normal = face.normal();
+
+    match face {
+        Face::PosX => [
+            Vertex::new([x + 1.0, y, z], normal, color),
+            Vertex::new([x + 1.0, y, z + 1.0], normal, color),
+            Vertex::new([x + 1.0, y + 1.0, z + 1.0], normal, color),
+            Vertex::new([x + 1.0, y + 1.0, z], normal, color),
+        ],
+        Face::NegX => [
+            Vertex::new([x, y, z + 1.0], normal, color),
+            Vertex::new([x, y, z], normal, color),
+            Vertex::new([x, y + 1.0, z], normal, color),
+            Vertex::new([x, y + 1.0, z + 1.0], normal, color),
+        ],
+        Face::PosY => [
+            Vertex::new([x, y + 1.0, z], normal, color),
+            Vertex::new([x + 1.0, y + 1.0, z], normal, color),
+            Vertex::new([x + 1.0, y + 1.0, z + 1.0], normal, color),
+            Vertex::new([x, y + 1.0, z + 1.0], normal, color),
+        ],
+        Face::NegY => [
+            Vertex::new([x, y, z + 1.0], normal, color),
+            Vertex::new([x + 1.0, y, z + 1.0], normal, color),
+            Vertex::new([x + 1.0, y, z], normal, color),
+            Vertex::new([x, y, z], normal, color),
+        ],
+        Face::PosZ => [
+            Vertex::new([x + 1.0, y, z + 1.0], normal, color),
+            Vertex::new([x, y, z + 1.0], normal, color),
+            Vertex::new([x, y + 1.0, z + 1.0], normal, color),
+            Vertex::new([x + 1.0, y + 1.0, z + 1.0], normal, color),
+        ],
+        Face::NegZ => [
+            Vertex::new([x, y, z], normal, color),
+            Vertex::new([x + 1.0, y, z], normal, color),
+            Vertex::new([x + 1.0, y + 1.0, z], normal, color),
+            Vertex::new([x, y + 1.0, z], normal, color),
+        ],
+    }
+}
+
+/// Cheap directional shading: top brightest, bottom darkest, sides in
+/// between. Alpha passes through unchanged.
+pub(crate) fn apply_face_shading(color: [f32; 4], face: Face) -> [f32; 4] {
+    let shade = match face {
+        Face::PosY => 1.0,
+        Face::PosX | Face::NegZ => 0.85,
+        Face::NegX | Face::PosZ => 0.75,
+        Face::NegY => 0.6,
+    };
+    [color[0] * shade, color[1] * shade, color[2] * shade, color[3]]
 }
