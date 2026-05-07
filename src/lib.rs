@@ -27,6 +27,7 @@ pub mod render;
 pub mod ui;
 pub mod editor;
 pub mod io;
+pub mod prefs;
 pub mod procgen;
 
 // Re-export commonly used types

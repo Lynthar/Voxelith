@@ -2,8 +2,22 @@
 //!
 //! Provides different brush types and editing modes.
 
+use std::time::Duration;
+
 use super::{Command, CommandHistory, RaycastHit, VoxelChange};
 use crate::core::{Voxel, World};
+
+/// Time window within which consecutive brush writes coalesce into a
+/// single undo entry. Picked to match a reasonable drag/click cadence
+/// (≈5 actions/sec) so paint strokes feel like one operation while
+/// distinct user gestures stay separate.
+pub const STROKE_MERGE_WINDOW: Duration = Duration::from_millis(200);
+
+/// Maximum chebyshev distance (in voxels) that `flood_fill` will
+/// expand from its start cell. Without this cap a fill in an unbounded
+/// world could traverse arbitrarily far; the only existing limit was
+/// `max_voxels`, which is a count cap, not a spatial one.
+pub const MAX_FILL_DIST: i32 = 64;
 
 /// Available editing tools
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +128,7 @@ impl EditorTool for BrushTool {
 
                 if !changes.is_empty() {
                     let cmd = Command::set_voxels(changes);
-                    ctx.history.execute(cmd, ctx.world);
+                    ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
                 }
             }
             Tool::Remove => {
@@ -138,7 +152,7 @@ impl EditorTool for BrushTool {
 
                 if !changes.is_empty() {
                     let cmd = Command::set_voxels(changes);
-                    ctx.history.execute(cmd, ctx.world);
+                    ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
                 }
             }
             Tool::Paint => {
@@ -162,7 +176,7 @@ impl EditorTool for BrushTool {
 
                 if !changes.is_empty() {
                     let cmd = Command::set_voxels(changes);
-                    ctx.history.execute(cmd, ctx.world);
+                    ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
                 }
             }
             Tool::Eyedropper | Tool::Fill => {
@@ -215,6 +229,17 @@ pub fn flood_fill(
         }
         if changes.len() >= max_voxels {
             break;
+        }
+
+        // Spatial cap: skip cells outside the chebyshev radius around
+        // `start`. Prevents runaway fills in unbounded worlds where
+        // the connected region might extend far beyond what the user
+        // intended to paint.
+        if (pos.0 - start.0).abs() > MAX_FILL_DIST
+            || (pos.1 - start.1).abs() > MAX_FILL_DIST
+            || (pos.2 - start.2).abs() > MAX_FILL_DIST
+        {
+            continue;
         }
 
         let current = world.get_voxel(pos.0, pos.1, pos.2);
@@ -293,5 +318,44 @@ mod tests {
 
         assert_eq!(count, 9);
         assert_eq!(world.get_voxel(0, 0, 0).r, 255);
+    }
+
+    #[test]
+    fn test_flood_fill_bounding_box_caps() {
+        // A long thin connected strip extending past MAX_FILL_DIST.
+        // The fill must stop at the cap rather than traversing the
+        // whole strip.
+        let mut world = World::new();
+        let mut history = CommandHistory::new(100);
+
+        let strip_len = MAX_FILL_DIST + 50; // well beyond the cap
+        let target = Voxel::from_rgb(100, 100, 100);
+        for x in 0..strip_len {
+            world.set_voxel(x, 0, 0, target);
+        }
+        world.clear_dirty_flags();
+
+        let count = flood_fill(
+            &mut world,
+            &mut history,
+            (0, 0, 0),
+            Voxel::from_rgb(255, 0, 0),
+            1_000_000, // generous voxel cap so spatial cap is what bites
+        );
+
+        // From start (0,0,0), reachable along +X is x ∈ [0, MAX_FILL_DIST].
+        // -X is blocked at the world's edge (0 was the start).
+        assert_eq!(count as i32, MAX_FILL_DIST + 1);
+
+        // The cell just past the cap must not have been touched.
+        assert_eq!(
+            world.get_voxel(MAX_FILL_DIST + 1, 0, 0),
+            target
+        );
+        // The cell at the cap was filled.
+        assert_eq!(
+            world.get_voxel(MAX_FILL_DIST, 0, 0).r,
+            255
+        );
     }
 }

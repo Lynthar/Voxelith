@@ -1,25 +1,34 @@
 //! Procedural generation algorithms.
 //!
-//! This module provides:
-//! - Noise-based terrain generation
-//! - Wave Function Collapse
-//! - L-System vegetation
-//! - Shape grammars for buildings
+//! This module hosts the unified entry point for both algorithmic
+//! generators (noise, WFC, L-System, ...) and, eventually, AI
+//! generators. They all implement [`VoxelGenerator`] and emit a
+//! [`VoxelPatch`] — a list of voxel writes — rather than mutating a
+//! `World` directly. Decoupling the output lets callers route the
+//! result through [`CommandHistory`] (for undo), AI format converters,
+//! or preview/scratch worlds without changing the generator.
 //!
-//! All generators implement the `VoxelGenerator` trait for uniform access.
+//! [`CommandHistory`]: crate::editor::CommandHistory
 
-// TODO: Implement procedural generation algorithms
+mod graph;
+mod terrain;
+mod tree;
+mod wfc;
 
-// Core types will be used when implementing generators
-#[allow(unused_imports)]
-use crate::core::Voxel;
+pub use graph::{
+    CombineOp, GraphError, GraphNode, NodeId, NodeKind, PipelineGraph,
+};
+pub use terrain::PerlinTerrain;
+pub use tree::LSystemTree;
+pub use wfc::{WfcGenerator, WfcTileset, WFC_TILE_SIZE};
+
 use std::time::Duration;
+use thiserror::Error;
 
-/// Result type for generation operations
-pub type GenResult<T> = Result<T, GenError>;
+use crate::core::{Voxel, World};
 
-/// Generation error types
-#[derive(Debug, thiserror::Error)]
+/// Errors raised by generators.
+#[derive(Debug, Error)]
 pub enum GenError {
     #[error("Generation failed: {0}")]
     Failed(String),
@@ -29,7 +38,10 @@ pub enum GenError {
     Timeout,
 }
 
-/// Generator category for organization
+pub type GenResult<T> = Result<T, GenError>;
+
+/// Coarse classification — drives default placement, palette hints,
+/// and which UI panel groups the generator under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeneratorCategory {
     Terrain,
@@ -40,45 +52,102 @@ pub enum GeneratorCategory {
     General,
 }
 
-/// Generator backend type (for future AI integration)
+/// How the generator runs. AI variants are stubs today; the current
+/// generators are all `Algorithmic`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeneratorBackend {
-    /// Traditional algorithmic generation (WFC, Noise, etc.)
     Algorithmic,
-    /// Local AI model inference
     LocalModel,
-    /// Remote API call
     RemoteAPI,
-    /// Hybrid approach
     Hybrid,
 }
 
-/// Metadata for a generator
+/// Static metadata describing a generator. Concrete generators return
+/// their own (usually compile-time-constant) metadata from
+/// [`VoxelGenerator::metadata`].
+#[derive(Debug, Clone, Copy)]
 pub struct GeneratorMeta {
-    pub id: String,
-    pub name: String,
-    pub description: String,
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
     pub category: GeneratorCategory,
     pub backend: GeneratorBackend,
 }
 
-/// Trait for all voxel generators (algorithmic and AI)
-/// This unified interface allows mixing traditional and AI generators
-pub trait VoxelGenerator: Send + Sync {
-    /// Get generator metadata
-    fn metadata(&self) -> GeneratorMeta;
+/// A bundle of voxel writes produced by a generator.
+///
+/// Stored as a flat `Vec<(pos, voxel)>` rather than a dense buffer
+/// because most generators are sparse (terrain heightmaps, scattered
+/// trees) and the apply-via-`CommandHistory` path needs the same
+/// representation anyway.
+///
+/// `notes` carries per-run diagnostics — non-fatal warnings the
+/// generator wants the UI to surface (e.g. WFC's "N cells fell back
+/// to empty"). Consumers that don't care can ignore the field; it
+/// defaults to empty.
+#[derive(Debug, Clone, Default)]
+pub struct VoxelPatch {
+    pub voxels: Vec<((i32, i32, i32), Voxel)>,
+    pub notes: Vec<String>,
+}
 
-    /// Estimate generation time (for UI progress)
-    fn estimate_duration(&self, params: &GeneratorParams) -> Duration;
+impl VoxelPatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    /// Check if generator supports incremental/partial generation
-    fn supports_incremental(&self) -> bool {
-        false
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            voxels: Vec::with_capacity(n),
+            notes: Vec::new(),
+        }
+    }
+
+    pub fn set(&mut self, x: i32, y: i32, z: i32, voxel: Voxel) {
+        self.voxels.push(((x, y, z), voxel));
+    }
+
+    pub fn len(&self) -> usize {
+        self.voxels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.voxels.is_empty()
+    }
+
+    /// Apply directly to a world (no undo). Prefer routing through
+    /// `CommandHistory::execute(Command::set_voxels(...))` when the
+    /// caller is inside an editor session — that path is reversible.
+    pub fn apply(&self, world: &mut World) {
+        for &((x, y, z), voxel) in &self.voxels {
+            world.set_voxel(x, y, z, voxel);
+        }
     }
 }
 
-/// Parameters for generation (placeholder)
-pub struct GeneratorParams {
-    pub seed: u64,
-    pub dimensions: [u32; 3],
+/// Trait every voxel generator implements.
+///
+/// Inputs (seeds, prompts, dimensions, ...) live as fields on the
+/// concrete type. The same struct that holds parameter state is the
+/// thing that runs — UI panels can edit fields in place and call
+/// [`generate`](VoxelGenerator::generate) without any glue.
+///
+/// `Send + Sync` is required so generators can be moved to a worker
+/// thread (algorithmic ones are pure CPU; AI ones may block on I/O).
+pub trait VoxelGenerator: Send + Sync {
+    fn metadata(&self) -> GeneratorMeta;
+
+    /// Run the generator and return its output patch.
+    fn generate(&self) -> GenResult<VoxelPatch>;
+
+    /// Whether the generator can produce output incrementally.
+    /// Default: false.
+    fn supports_incremental(&self) -> bool {
+        false
+    }
+
+    /// Hint for UI progress display. Default: zero.
+    fn estimate_duration(&self) -> Duration {
+        Duration::ZERO
+    }
 }

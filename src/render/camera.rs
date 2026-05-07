@@ -161,9 +161,13 @@ impl CameraController {
             let dy = y - last_y;
 
             if self.middle_mouse_pressed {
-                // Orbit around target
-                self.yaw -= dx * self.sensitivity;
-                self.pitch -= dy * self.sensitivity;
+                // Orbit: drag-the-scene direction. Dragging down rolls
+                // the camera up (you see more of the top), dragging
+                // right swings the camera around to view the right
+                // side of the scene. Inverted from the camera-relative
+                // convention where dragging moves the camera itself.
+                self.yaw += dx * self.sensitivity;
+                self.pitch += dy * self.sensitivity;
 
                 // Clamp pitch to avoid flipping
                 self.pitch = self.pitch.clamp(-1.5, 1.5);

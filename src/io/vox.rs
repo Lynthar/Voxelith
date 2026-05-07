@@ -116,6 +116,11 @@ pub struct VoxModel {
     pub voxels: Vec<(u8, u8, u8, u8)>, // x, y, z, color_index
     /// Color palette (256 colors, RGBA)
     pub palette: [[u8; 4]; 256],
+    /// Number of distinct world colors that didn't fit in the
+    /// 255-slot palette and were quantized to the nearest existing
+    /// entry. Caller can surface this in the UI so the user knows
+    /// the export was lossy. Always 0 for `read`-loaded models.
+    pub palette_overflow: u32,
 }
 
 impl VoxModel {
@@ -125,6 +130,7 @@ impl VoxModel {
             size,
             voxels: Vec::new(),
             palette: default_palette(),
+            palette_overflow: 0,
         }
     }
 
@@ -176,6 +182,9 @@ impl VoxModel {
         let mut color_to_index: HashMap<[u8; 3], u8> = HashMap::new();
         let mut palette = default_palette();
         let mut next_index = 1u8; // 0 is reserved for empty
+        // Distinct colors we had to quantize because the palette filled.
+        let mut overflow_colors: std::collections::HashSet<[u8; 3]> =
+            std::collections::HashSet::new();
 
         let mut voxels = Vec::new();
 
@@ -200,7 +209,11 @@ impl VoxModel {
                     next_index += 1;
                     idx
                 } else {
-                    // Palette full, find closest color
+                    // Palette full — quantize to the nearest existing
+                    // entry. Track *distinct* lossy colors so the UI
+                    // can report something meaningful (multiple voxels
+                    // sharing the same lost color count as one).
+                    overflow_colors.insert(color);
                     find_closest_color(&palette, color)
                 };
 
@@ -212,6 +225,7 @@ impl VoxModel {
             size: (size_x, size_y, size_z),
             voxels,
             palette,
+            palette_overflow: overflow_colors.len() as u32,
         })
     }
 
@@ -322,6 +336,7 @@ impl VoxModel {
             size,
             voxels,
             palette,
+            palette_overflow: 0,
         })
     }
 
@@ -407,10 +422,13 @@ fn find_closest_color(palette: &[[u8; 4]; 256], color: [u8; 3]) -> u8 {
     best_index
 }
 
-/// Export world to VOX file
-pub fn export_vox<W: Write>(world: &World, writer: &mut W) -> Result<(), VoxError> {
+/// Export world to VOX file. Returns the number of distinct world
+/// colors that didn't fit in the 255-slot palette and were quantized
+/// to the nearest existing entry — 0 means a lossless export.
+pub fn export_vox<W: Write>(world: &World, writer: &mut W) -> Result<u32, VoxError> {
     let model = VoxModel::from_world(world)?;
-    model.write(writer)
+    model.write(writer)?;
+    Ok(model.palette_overflow)
 }
 
 /// Import world from VOX file
@@ -431,12 +449,39 @@ mod tests {
         world.set_voxel(0, 1, 0, Voxel::from_rgb(0, 0, 255));
 
         let mut buffer = Vec::new();
-        export_vox(&world, &mut buffer).unwrap();
+        let overflow = export_vox(&world, &mut buffer).unwrap();
+        assert_eq!(overflow, 0, "3 colors should fit in the 255-slot palette");
 
         let imported = import_vox(&mut buffer.as_slice()).unwrap();
 
         assert!(imported.get_voxel(0, 0, 0).is_solid());
         assert!(imported.get_voxel(1, 0, 0).is_solid());
         assert!(imported.get_voxel(0, 1, 0).is_solid());
+    }
+
+    #[test]
+    fn test_palette_overflow_reported() {
+        // 256 distinct world colors. VOX palette has 254 usable slots
+        // (index 0 is empty/transparent and index 255 is reserved by
+        // our writer), so at least 2 distinct colors must be quantized.
+        let mut world = World::new();
+        for i in 0..256u32 {
+            let r = i as u8;
+            let g = ((i.wrapping_mul(7)) & 0xFF) as u8;
+            let b = ((i.wrapping_mul(13)) & 0xFF) as u8;
+            world.set_voxel(
+                i as i32 % 16,
+                0,
+                i as i32 / 16,
+                Voxel::from_rgb(r, g, b),
+            );
+        }
+        let mut buffer = Vec::new();
+        let overflow = export_vox(&world, &mut buffer).unwrap();
+        assert!(
+            overflow >= 1,
+            "expected at least one overflow color, got {}",
+            overflow
+        );
     }
 }
