@@ -29,11 +29,12 @@
 
 | Feature | Description |
 |---------|-------------|
-| 🎨 **Multi-tool Editing** | Place, Remove, Paint, Eyedropper, Fill |
-| ↩️ **Undo/Redo** | Full command history |
-| 📁 **File I/O** | Native `.vxlt` and MagicaVoxel `.vox` |
-| 🎲 **Generators** | Cube, Sphere, Pyramid, Ground |
-| 🖥️ **Viewport** | Grid, axes, wireframe mode |
+| 🎨 **Editing** | Place / Remove / Paint / Eyedropper / Fill, drag-paint with stroke-merged undo, brush hover preview |
+| 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC dungeon — pick one in the procgen panel or compose them in the visual node graph editor |
+| ✨ **Live preview** | Debounced translucent overlay shows generator output before you commit |
+| 📁 **File I/O** | Native `.vxlt` and MagicaVoxel `.vox` (lossy-color quantization is reported) |
+| 💾 **Persistent state** | Window layout, panel toggles, generator params, recent files all survive restarts |
+| 🖥️ **Viewport** | Orbit / pan / zoom camera, grid, axes, optional wireframe |
 
 ## Quick Start
 
@@ -62,15 +63,19 @@ cargo run --release
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│        UI (egui)                │
-├─────────────────────────────────┤
-│   Editor (tools, commands)      │
-├─────────────────────────────────┤
-│  Core (voxel, chunk, world)     │
-│  Render (wgpu) │ IO (vox, vxlt) │
-└─────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ UI (egui panels + visual node graph editor) │
+├──────────────────────────────────────────────┤
+│ Editor (tools, commands, raycast, undo)     │
+├──────────────────────────────────────────────┤
+│ Procgen (terrain / tree / WFC + DAG eval)   │
+├──────────────────────────────────────────────┤
+│ Core (voxel, chunk, world) │ Mesh           │
+│ Render (wgpu)              │ IO    Prefs    │
+└──────────────────────────────────────────────┘
 ```
+
+See [`docs/PROGRESS.md`](docs/PROGRESS.md) for implementation status and the next-step menu, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for long-term design vision.
 
 ## License
 
