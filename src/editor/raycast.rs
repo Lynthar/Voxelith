@@ -75,6 +75,13 @@ pub struct RaycastHit {
     pub normal: (i32, i32, i32),
     /// Distance along the ray
     pub distance: f32,
+    /// True when this hit was synthesized by `cast_with_ground_plane`
+    /// because the ray missed every real voxel. Lets shape tools
+    /// detect the empty-world case and substitute screen-space
+    /// vertical drag for the missing Y axis (otherwise an empty-world
+    /// drag is stuck flat on the plane and Sphere / Cylinder produce
+    /// a disk).
+    pub virtual_ground: bool,
 }
 
 /// Voxel raycaster using DDA algorithm
@@ -149,6 +156,7 @@ impl VoxelRaycast {
                 adjacent_pos: (x, y, z), // Same position if we started inside
                 normal: (0, 0, 0),
                 distance: 0.0,
+                virtual_ground: false,
             });
         }
 
@@ -193,6 +201,7 @@ impl VoxelRaycast {
                     adjacent_pos: (prev_x, prev_y, prev_z),
                     normal: last_normal,
                     distance,
+                    virtual_ground: false,
                 });
             }
         }
@@ -245,6 +254,7 @@ impl VoxelRaycast {
             adjacent_pos: (x, plane_y, z),
             normal: (0, 1, 0),
             distance: t,
+            virtual_ground: true,
         })
     }
 

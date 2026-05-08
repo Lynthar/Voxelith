@@ -8,10 +8,12 @@
 
 mod commands;
 mod raycast;
+mod shapes;
 mod tools;
 
 pub use commands::{Command, CommandHistory, VoxelChange};
 pub use raycast::{Ray, RaycastHit, VoxelRaycast};
+pub use shapes::{box_voxels, cylinder_voxels, line_voxels, sphere_voxels};
 pub use tools::{
     compute_flood_fill_changes, eyedrop, flood_fill, flood_fill_multi, BrushTool, EditorTool,
     Tool, ToolContext,

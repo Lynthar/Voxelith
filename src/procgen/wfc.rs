@@ -40,10 +40,12 @@ pub struct Tile {
     /// adjacent tiles match when one's outgoing-face connector equals
     /// the other's incoming-face connector.
     pub connectors: [u8; 4],
-    /// Solid voxel mask, layout `x + y*S + z*S*S`.
-    pub solid: [bool; TILE_VOLUME],
-    /// Selection weight. Higher → appears more often. Floor is
-    /// boosted so output isn't dominated by walls.
+    /// Voxel data for each cell, layout `x + y*S + z*S*S`.
+    /// `Voxel::AIR` means empty. Per-cell colors let a single tile
+    /// hold multiple materials (e.g. City's road_x has both asphalt
+    /// and sidewalk strips).
+    pub cells: [Voxel; TILE_VOLUME],
+    /// Selection weight. Higher → appears more often.
     pub weight: f32,
 }
 
@@ -53,14 +55,21 @@ pub struct Tileset {
     pub tiles: Vec<Tile>,
 }
 
-/// Tilesets the WFC generator can dispatch to. Right now there's just
-/// one, but the enum keeps the door open for a UI dropdown later
-/// (e.g. dungeon vs. city vs. plumbing).
+/// Tilesets the WFC generator can dispatch to. Each variant is a
+/// distinct visual / structural theme. New themes go here +
+/// [`Self::build`] + [`Self::label`]; UI dropdowns pick from
+/// [`Self::ALL`].
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
 )]
 pub enum WfcTileset {
+    /// Stone walls, floors, T-junctions, doorways. Single ground
+    /// layer with walls rising the full tile height.
     Dungeon,
+    /// Grass plots, asphalt roads with sidewalks, intersections,
+    /// and small buildings rising above grass. Connector IDs
+    /// `0 = grass-side`, `1 = road-side`.
+    City,
 }
 
 impl Default for WfcTileset {
@@ -70,15 +79,20 @@ impl Default for WfcTileset {
 }
 
 impl WfcTileset {
+    /// All tilesets, in dropdown order.
+    pub const ALL: &'static [Self] = &[Self::Dungeon, Self::City];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Dungeon => "Dungeon",
+            Self::City => "City",
         }
     }
 
     pub fn build(self) -> Tileset {
         match self {
             Self::Dungeon => dungeon_tileset(),
+            Self::City => city_tileset(),
         }
     }
 }
@@ -98,24 +112,25 @@ impl WfcTileset {
 /// dense intersections and doorways from dominating.
 fn dungeon_tileset() -> Tileset {
     let mut tiles = Vec::with_capacity(19);
+    let stone = Voxel::from_rgb(140, 140, 140);
 
     tiles.push(Tile {
         name: "empty",
         connectors: [0, 0, 0, 0],
-        solid: [false; TILE_VOLUME],
+        cells: [Voxel::AIR; TILE_VOLUME],
         weight: 1.5,
     });
 
-    let mut floor = [false; TILE_VOLUME];
+    let mut floor = [Voxel::AIR; TILE_VOLUME];
     for x in 0..TILE_SIZE {
         for z in 0..TILE_SIZE {
-            floor[idx(x, 0, z)] = true;
+            floor[idx(x, 0, z)] = stone;
         }
     }
     tiles.push(Tile {
         name: "floor",
         connectors: [0, 0, 0, 0],
-        solid: floor,
+        cells: floor,
         weight: 4.0,
     });
 
@@ -123,13 +138,13 @@ fn dungeon_tileset() -> Tileset {
     tiles.push(Tile {
         name: "wall_x",
         connectors: [1, 1, 0, 0],
-        solid: wall_pattern(true, true, false, false),
+        cells: wall_pattern(true, true, false, false, stone),
         weight: 2.0,
     });
     tiles.push(Tile {
         name: "wall_z",
         connectors: [0, 0, 1, 1],
-        solid: wall_pattern(false, false, true, true),
+        cells: wall_pattern(false, false, true, true, stone),
         weight: 2.0,
     });
 
@@ -137,25 +152,25 @@ fn dungeon_tileset() -> Tileset {
     tiles.push(Tile {
         name: "corner_pxpz",
         connectors: [1, 0, 1, 0],
-        solid: wall_pattern(true, false, true, false),
+        cells: wall_pattern(true, false, true, false, stone),
         weight: 1.0,
     });
     tiles.push(Tile {
         name: "corner_nxpz",
         connectors: [0, 1, 1, 0],
-        solid: wall_pattern(false, true, true, false),
+        cells: wall_pattern(false, true, true, false, stone),
         weight: 1.0,
     });
     tiles.push(Tile {
         name: "corner_pxnz",
         connectors: [1, 0, 0, 1],
-        solid: wall_pattern(true, false, false, true),
+        cells: wall_pattern(true, false, false, true, stone),
         weight: 1.0,
     });
     tiles.push(Tile {
         name: "corner_nxnz",
         connectors: [0, 1, 0, 1],
-        solid: wall_pattern(false, true, false, true),
+        cells: wall_pattern(false, true, false, true, stone),
         weight: 1.0,
     });
 
@@ -164,25 +179,25 @@ fn dungeon_tileset() -> Tileset {
     tiles.push(Tile {
         name: "t_open_px",
         connectors: [0, 1, 1, 1],
-        solid: wall_pattern(false, true, true, true),
+        cells: wall_pattern(false, true, true, true, stone),
         weight: 1.0,
     });
     tiles.push(Tile {
         name: "t_open_nx",
         connectors: [1, 0, 1, 1],
-        solid: wall_pattern(true, false, true, true),
+        cells: wall_pattern(true, false, true, true, stone),
         weight: 1.0,
     });
     tiles.push(Tile {
         name: "t_open_pz",
         connectors: [1, 1, 0, 1],
-        solid: wall_pattern(true, true, false, true),
+        cells: wall_pattern(true, true, false, true, stone),
         weight: 1.0,
     });
     tiles.push(Tile {
         name: "t_open_nz",
         connectors: [1, 1, 1, 0],
-        solid: wall_pattern(true, true, true, false),
+        cells: wall_pattern(true, true, true, false, stone),
         weight: 1.0,
     });
 
@@ -191,7 +206,7 @@ fn dungeon_tileset() -> Tileset {
     tiles.push(Tile {
         name: "cross",
         connectors: [1, 1, 1, 1],
-        solid: wall_pattern(true, true, true, true),
+        cells: wall_pattern(true, true, true, true, stone),
         weight: 0.5,
     });
 
@@ -204,13 +219,13 @@ fn dungeon_tileset() -> Tileset {
     tiles.push(Tile {
         name: "wall_x_with_door",
         connectors: [1, 1, 2, 2],
-        solid: wall_with_door_pattern_x(),
+        cells: wall_with_door_pattern_x(stone),
         weight: 0.5,
     });
     tiles.push(Tile {
         name: "wall_z_with_door",
         connectors: [2, 2, 1, 1],
-        solid: wall_with_door_pattern_z(),
+        cells: wall_with_door_pattern_z(stone),
         weight: 0.5,
     });
 
@@ -229,7 +244,7 @@ fn dungeon_tileset() -> Tileset {
         tiles.push(Tile {
             name,
             connectors,
-            solid: floor, // [bool; TILE_VOLUME] is Copy
+            cells: floor, // [Voxel; TILE_VOLUME] is Copy
             weight: 0.4,
         });
     }
@@ -244,12 +259,12 @@ fn dungeon_tileset() -> Tileset {
 /// central pillar. The wall above (y∈{2,3}) and the door-jambs at
 /// x∈{0,3} stay solid so the surrounding wall reads as continuous —
 /// the carved opening is just at standing height.
-fn wall_with_door_pattern_x() -> [bool; TILE_VOLUME] {
-    let mut p = wall_pattern(true, true, false, false);
+fn wall_with_door_pattern_x(color: Voxel) -> [Voxel; TILE_VOLUME] {
+    let mut p = wall_pattern(true, true, false, false, color);
     for y in 0..2 {
         for z in 1..3 {
             for x in 1..3 {
-                p[idx(x, y, z)] = false;
+                p[idx(x, y, z)] = Voxel::AIR;
             }
         }
     }
@@ -259,15 +274,170 @@ fn wall_with_door_pattern_x() -> [bool; TILE_VOLUME] {
 /// Mirror of `wall_with_door_pattern_x` for the Z-running wall. The
 /// carve region is identical — the difference is only in which
 /// directions the wall extends out to the tile faces.
-fn wall_with_door_pattern_z() -> [bool; TILE_VOLUME] {
-    let mut p = wall_pattern(false, false, true, true);
+fn wall_with_door_pattern_z(color: Voxel) -> [Voxel; TILE_VOLUME] {
+    let mut p = wall_pattern(false, false, true, true, color);
     for y in 0..2 {
         for z in 1..3 {
             for x in 1..3 {
-                p[idx(x, y, z)] = false;
+                p[idx(x, y, z)] = Voxel::AIR;
             }
         }
     }
+    p
+}
+
+/// 13-tile city tileset: a grass plot, two straight roads, four L
+/// corners, four T-junctions, a 4-way intersection, and a small
+/// building. Connector IDs are simpler than Dungeon — `0` = grass-
+/// side (matches ground / building / road's non-road faces), `1` =
+/// road-side (asphalt strip continues out this face). Roads
+/// automatically network into grids; buildings only sit next to
+/// grass / road-sidewalk faces (no risk of one ending up in the
+/// middle of an intersection — connector mismatch).
+fn city_tileset() -> Tileset {
+    let grass = Voxel::from_rgb(76, 153, 0);
+    let asphalt = Voxel::from_rgb(50, 50, 50);
+    let sidewalk = Voxel::from_rgb(180, 180, 180);
+    let building = Voxel::from_rgb(140, 75, 50);
+
+    let mut tiles = Vec::with_capacity(13);
+
+    // Pure grass: y=0 layer all green, no upper structure.
+    let mut grass_only = [Voxel::AIR; TILE_VOLUME];
+    for x in 0..TILE_SIZE {
+        for z in 0..TILE_SIZE {
+            grass_only[idx(x, 0, z)] = grass;
+        }
+    }
+    tiles.push(Tile {
+        name: "grass",
+        connectors: [0, 0, 0, 0],
+        cells: grass_only,
+        weight: 6.0,
+    });
+
+    // Roads: straight + 4 corners + 4 T + 1 cross. Each is built
+    // by `road_y0_pattern` from the four flags marking which faces
+    // the asphalt strip exits.
+    let road_specs: &[(&'static str, [u8; 4], (bool, bool, bool, bool), f32)] = &[
+        ("road_x",            [1, 1, 0, 0], (true,  true,  false, false), 1.5),
+        ("road_z",            [0, 0, 1, 1], (false, false, true,  true ), 1.5),
+        ("road_corner_pxpz",  [1, 0, 1, 0], (true,  false, true,  false), 0.4),
+        ("road_corner_nxpz",  [0, 1, 1, 0], (false, true,  true,  false), 0.4),
+        ("road_corner_pxnz",  [1, 0, 0, 1], (true,  false, false, true ), 0.4),
+        ("road_corner_nxnz",  [0, 1, 0, 1], (false, true,  false, true ), 0.4),
+        ("road_t_open_px",    [0, 1, 1, 1], (false, true,  true,  true ), 0.3),
+        ("road_t_open_nx",    [1, 0, 1, 1], (true,  false, true,  true ), 0.3),
+        ("road_t_open_pz",    [1, 1, 0, 1], (true,  true,  false, true ), 0.3),
+        ("road_t_open_nz",    [1, 1, 1, 0], (true,  true,  true,  false), 0.3),
+        ("road_cross",        [1, 1, 1, 1], (true,  true,  true,  true ), 0.2),
+    ];
+    for &(name, conn, (px, nx, pz, nz), weight) in road_specs {
+        tiles.push(Tile {
+            name,
+            connectors: conn,
+            cells: road_y0_pattern(px, nx, pz, nz, grass, asphalt, sidewalk),
+            weight,
+        });
+    }
+
+    // Building: grass plot at y=0, solid 2×2 brick cube rising the
+    // full tile height above. Looks like a small hut from afar; with
+    // building weight ~14% relative to grass at ~43%, layouts get a
+    // sparse scatter of buildings instead of a dense urban core.
+    let mut building_cells = grass_only;
+    for y in 1..TILE_SIZE {
+        for z in 1..3 {
+            for x in 1..3 {
+                building_cells[idx(x, y, z)] = building;
+            }
+        }
+    }
+    tiles.push(Tile {
+        name: "building",
+        connectors: [0, 0, 0, 0],
+        cells: building_cells,
+        weight: 2.0,
+    });
+
+    Tileset {
+        name: "city",
+        tiles,
+    }
+}
+
+/// Build the y=0 layer of a road / corner / T / cross / intersection
+/// tile. Asphalt fills a 2×2 central pad plus a 2-wide strip
+/// extending to each enabled face; the rest of the perimeter (cells
+/// with `x ∈ {0, 3}` or `z ∈ {0, 3}`) becomes sidewalk; everything
+/// else stays grass. With no flags set, the function returns pure
+/// grass — useful as the building tile's base layer.
+fn road_y0_pattern(
+    px: bool,
+    nx: bool,
+    pz: bool,
+    nz: bool,
+    grass: Voxel,
+    asphalt: Voxel,
+    sidewalk: Voxel,
+) -> [Voxel; TILE_VOLUME] {
+    let mut p = [Voxel::AIR; TILE_VOLUME];
+
+    // Default y=0 fill: grass everywhere.
+    for x in 0..TILE_SIZE {
+        for z in 0..TILE_SIZE {
+            p[idx(x, 0, z)] = grass;
+        }
+    }
+
+    // No road exits → return pure grass (the function still gets
+    // called for the building's base layer with all flags false).
+    if !(px || nx || pz || nz) {
+        return p;
+    }
+
+    // Asphalt: central 2×2 pad + 2-wide strips reaching each
+    // enabled face.
+    for x in 1..3 {
+        for z in 1..3 {
+            p[idx(x, 0, z)] = asphalt;
+        }
+    }
+    if px {
+        for z in 1..3 {
+            p[idx(3, 0, z)] = asphalt;
+        }
+    }
+    if nx {
+        for z in 1..3 {
+            p[idx(0, 0, z)] = asphalt;
+        }
+    }
+    if pz {
+        for x in 1..3 {
+            p[idx(x, 0, 3)] = asphalt;
+        }
+    }
+    if nz {
+        for x in 1..3 {
+            p[idx(x, 0, 0)] = asphalt;
+        }
+    }
+
+    // Sidewalk: any perimeter cell that didn't become asphalt. The
+    // perimeter cells are those at x ∈ {0, 3} or z ∈ {0, 3}; whatever
+    // grass cells remain in that ring become sidewalk so the road
+    // appears framed by walkway, even on faces with no road exit.
+    for x in 0..TILE_SIZE {
+        for z in 0..TILE_SIZE {
+            let on_perimeter =
+                x == 0 || x == TILE_SIZE - 1 || z == 0 || z == TILE_SIZE - 1;
+            if on_perimeter && p[idx(x, 0, z)] == grass {
+                p[idx(x, 0, z)] = sidewalk;
+            }
+        }
+    }
+
     p
 }
 
@@ -278,44 +448,51 @@ fn idx(x: usize, y: usize, z: usize) -> usize {
 
 /// Wall pattern with optional 1-tile-thick extensions reaching to the
 /// `+X / -X / +Z / -Z` face. A central pillar (x∈{1,2}, z∈{1,2}) is
-/// always present so all extensions meet cleanly. Used for the 2 straight
-/// walls and the 4 corners.
-fn wall_pattern(px: bool, nx: bool, pz: bool, nz: bool) -> [bool; TILE_VOLUME] {
-    let mut p = [false; TILE_VOLUME];
+/// always present so all extensions meet cleanly. Used for the 2
+/// straight walls and the 4 corners. Solid cells are filled with
+/// `color`; the rest stay `Voxel::AIR`.
+fn wall_pattern(
+    px: bool,
+    nx: bool,
+    pz: bool,
+    nz: bool,
+    color: Voxel,
+) -> [Voxel; TILE_VOLUME] {
+    let mut p = [Voxel::AIR; TILE_VOLUME];
 
     // Central pillar.
     for y in 0..TILE_SIZE {
         for z in 1..3 {
             for x in 1..3 {
-                p[idx(x, y, z)] = true;
+                p[idx(x, y, z)] = color;
             }
         }
     }
     if px {
         for y in 0..TILE_SIZE {
             for z in 1..3 {
-                p[idx(3, y, z)] = true;
+                p[idx(3, y, z)] = color;
             }
         }
     }
     if nx {
         for y in 0..TILE_SIZE {
             for z in 1..3 {
-                p[idx(0, y, z)] = true;
+                p[idx(0, y, z)] = color;
             }
         }
     }
     if pz {
         for y in 0..TILE_SIZE {
             for x in 1..3 {
-                p[idx(x, y, 3)] = true;
+                p[idx(x, y, 3)] = color;
             }
         }
     }
     if nz {
         for y in 0..TILE_SIZE {
             for x in 1..3 {
-                p[idx(x, y, 0)] = true;
+                p[idx(x, y, 0)] = color;
             }
         }
     }
@@ -418,7 +595,6 @@ impl VoxelGenerator for WfcGenerator {
         }
 
         let mut patch = VoxelPatch::new();
-        let stone = Voxel::from_rgb(140, 140, 140);
         let mut failed_cells: u32 = 0;
 
         for cz in 0..d {
@@ -444,12 +620,13 @@ impl VoxelGenerator for WfcGenerator {
                 for vy in 0..TILE_SIZE {
                     for vz in 0..TILE_SIZE {
                         for vx in 0..TILE_SIZE {
-                            if tile.solid[idx(vx, vy, vz)] {
+                            let voxel = tile.cells[idx(vx, vy, vz)];
+                            if !voxel.is_air() {
                                 patch.set(
                                     ox + vx as i32,
                                     oy + vy as i32,
                                     oz + vz as i32,
-                                    stone,
+                                    voxel,
                                 );
                             }
                         }
@@ -627,7 +804,7 @@ mod tests {
             for z in 1..3 {
                 for x in 1..3 {
                     assert!(
-                        !door.solid[idx(x, y, z)],
+                        door.cells[idx(x, y, z)].is_air(),
                         "expected portal cell ({},{},{}) to be empty",
                         x, y, z
                     );
@@ -638,7 +815,7 @@ mod tests {
         for z in 1..3 {
             for x in 0..TILE_SIZE {
                 assert!(
-                    door.solid[idx(x, 3, z)],
+                    !door.cells[idx(x, 3, z)].is_air(),
                     "lintel cell ({}, 3, {}) should be solid",
                     x, z
                 );
@@ -647,8 +824,18 @@ mod tests {
         // Door-jambs at the extremes stay solid through the carve y range.
         for y in 0..2 {
             for z in 1..3 {
-                assert!(door.solid[idx(0, y, z)], "left jamb gap at ({}, {})", y, z);
-                assert!(door.solid[idx(3, y, z)], "right jamb gap at ({}, {})", y, z);
+                assert!(
+                    !door.cells[idx(0, y, z)].is_air(),
+                    "left jamb gap at ({}, {})",
+                    y,
+                    z
+                );
+                assert!(
+                    !door.cells[idx(3, y, z)].is_air(),
+                    "right jamb gap at ({}, {})",
+                    y,
+                    z
+                );
             }
         }
     }
@@ -673,7 +860,7 @@ mod tests {
                 .find(|t| t.name == variant_name)
                 .unwrap_or_else(|| panic!("{} missing", variant_name));
             assert_eq!(
-                v.solid, plain_floor.solid,
+                v.cells, plain_floor.cells,
                 "{} should share plain floor's geometry",
                 variant_name
             );
@@ -698,12 +885,90 @@ mod tests {
                 let a = &ts.tiles[i];
                 let b = &ts.tiles[j];
                 assert!(
-                    a.connectors != b.connectors || a.solid != b.solid,
+                    a.connectors != b.connectors || a.cells != b.cells,
                     "tiles {} and {} are identical",
                     a.name, b.name
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_city_tileset_loads() {
+        let ts = WfcTileset::City.build();
+        assert_eq!(ts.tiles.len(), 13);
+        let names: Vec<&str> = ts.tiles.iter().map(|t| t.name).collect();
+        assert!(names.contains(&"grass"));
+        assert!(names.contains(&"road_x"));
+        assert!(names.contains(&"road_cross"));
+        assert!(names.contains(&"building"));
+    }
+
+    #[test]
+    fn test_city_road_x_has_asphalt_and_sidewalk() {
+        let ts = WfcTileset::City.build();
+        let road = ts.tiles.iter().find(|t| t.name == "road_x").unwrap();
+
+        // Distinct colors for asphalt vs sidewalk vs grass — checks
+        // that the multi-color tile data flows through the new
+        // per-cell `Voxel` storage.
+        let middle = road.cells[idx(2, 0, 1)]; // central asphalt strip
+        let edge = road.cells[idx(2, 0, 0)]; // sidewalk on -Z edge
+        assert!(!middle.is_air(), "road interior should be solid");
+        assert!(!edge.is_air(), "sidewalk should be solid");
+        assert_ne!(middle, edge, "asphalt and sidewalk should differ");
+
+        // y=1 and above are air (no buildings on a road tile).
+        for y in 1..TILE_SIZE {
+            for z in 0..TILE_SIZE {
+                for x in 0..TILE_SIZE {
+                    assert!(
+                        road.cells[idx(x, y, z)].is_air(),
+                        "road_x cell ({}, {}, {}) should be empty",
+                        x, y, z
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_city_building_rises_above_grass_base() {
+        let ts = WfcTileset::City.build();
+        let b = ts.tiles.iter().find(|t| t.name == "building").unwrap();
+        // Building has a 2×2 footprint at x∈{1,2}, z∈{1,2}, y∈{1..=3}.
+        for y in 1..TILE_SIZE {
+            for z in 1..3 {
+                for x in 1..3 {
+                    assert!(
+                        !b.cells[idx(x, y, z)].is_air(),
+                        "building cube cell ({}, {}, {}) should be solid",
+                        x, y, z
+                    );
+                }
+            }
+        }
+        // Building base (y=0) is grass everywhere.
+        let g = ts.tiles.iter().find(|t| t.name == "grass").unwrap();
+        for x in 0..TILE_SIZE {
+            for z in 0..TILE_SIZE {
+                assert_eq!(
+                    b.cells[idx(x, 0, z)],
+                    g.cells[idx(x, 0, z)],
+                    "building base layer should match grass tile"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_city_default_generates_nonempty() {
+        let g = WfcGenerator {
+            tileset: WfcTileset::City,
+            ..Default::default()
+        };
+        let p = g.generate().unwrap();
+        assert!(!p.is_empty());
     }
 
     #[test]

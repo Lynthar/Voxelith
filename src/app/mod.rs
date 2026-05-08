@@ -28,9 +28,14 @@ use std::time::Instant;
 use rayon::prelude::*;
 use winit::{keyboard::ModifiersState, window::Window};
 
+use std::collections::HashSet;
+
 use voxelith::{
     core::{Voxel, World},
-    editor::{BrushTool, Editor, EditorTool, SymmetryAxes, Tool},
+    editor::{
+        box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Editor, EditorTool,
+        RaycastHit, SymmetryAxes, Tool,
+    },
     mesh::{patch_to_mesh, Mesher, NaiveMesher},
     prefs::{EditorPrefs, PanelVisibility, Prefs, WindowPrefs},
     render::Renderer,
@@ -88,8 +93,26 @@ pub struct App {
 
     /// Cache key for the brush hover overlay so we don't regenerate
     /// its mesh on every CursorMoved when nothing meaningful changed.
-    /// `(hovered voxel, tool, brush color, brush size, symmetry)`.
-    last_brush_preview_key: Option<((i32, i32, i32), Tool, Voxel, u8, SymmetryAxes)>,
+    /// `(active cell, tool, brush color, brush size, symmetry, shape
+    /// drag anchor)`. The "active cell" is `hover.voxel_pos` for
+    /// brush tools and `hover.adjacent_pos` for shape tools (so
+    /// shapes lock to the ground-plane fallback when the world is
+    /// empty). The trailing `Option` carries the shape's drag anchor
+    /// during an active shape drag — `None` for brush tools and
+    /// idle shape tools.
+    last_brush_preview_key: Option<(
+        (i32, i32, i32),
+        Tool,
+        Voxel,
+        u8,
+        SymmetryAxes,
+        Option<(i32, i32, i32)>,
+    )>,
+
+    /// Set when the left button is held with a shape tool active —
+    /// the anchor cell of the in-progress drag. The shape's full
+    /// voxel set is committed in `commit_shape` on mouse-up.
+    shape_drag_anchor: Option<(i32, i32, i32)>,
 
     /// Persisted user preferences. Loaded at startup, dehydrated and
     /// written back on close. The recent-files MRU lives here.
@@ -165,6 +188,7 @@ impl App {
             last_grid_spacing,
             preview: PreviewState::new(),
             last_brush_preview_key: None,
+            shape_drag_anchor: None,
             prefs,
         }
     }
@@ -254,6 +278,59 @@ impl App {
 
 }
 
+/// Expand `cells` with every symmetry mirror combination, deduped.
+/// `Symmetry off` returns `cells` unchanged so the common path skips
+/// the HashSet allocation. Used by both the live shape preview and
+/// the shape commit path so they always render the same set.
+fn expand_with_symmetry(
+    cells: Vec<(i32, i32, i32)>,
+    symmetry: SymmetryAxes,
+) -> Vec<(i32, i32, i32)> {
+    if !symmetry.any() {
+        return cells;
+    }
+    let mut out: HashSet<(i32, i32, i32)> = HashSet::new();
+    for cell in cells {
+        for m in symmetry.mirror_positions(cell) {
+            out.insert(m);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Pixels of vertical cursor movement per voxel of shape height when
+/// the drag end is on the virtual ground plane. Tuned empirically:
+/// 8 px feels responsive at the default camera distance and zoom
+/// level. Shifting to a camera-distance-aware scale would let it
+/// auto-adjust to zoom; left as a constant for now since the simple
+/// version covers the most common workflow (build into empty world
+/// at the default zoom).
+const SHAPE_HEIGHT_PIXELS_PER_VOXEL: f32 = 8.0;
+
+impl App {
+    /// Resolve a shape drag's end cell. For real-voxel hits this is
+    /// just `hit.adjacent_pos` (the 3D position the raycast already
+    /// computed). For virtual ground-plane hits — which are the
+    /// common case in an empty world — XZ comes from the plane hit
+    /// but Y is computed from the screen-vertical cursor delta from
+    /// the shape's press point. Without this override every shape
+    /// would be flat at the plane's Y because the cursor never moves
+    /// off the plane in 3D.
+    pub(super) fn shape_end_pos(
+        &self,
+        anchor: (i32, i32, i32),
+        hit: &RaycastHit,
+    ) -> (i32, i32, i32) {
+        if !hit.virtual_ground {
+            return hit.adjacent_pos;
+        }
+        let press = self.stroke_start_screen_pos.unwrap_or(self.cursor_pos);
+        let dy_screen = press.1 - self.cursor_pos.1; // screen up → positive
+        let dy_voxels = (dy_screen / SHAPE_HEIGHT_PIXELS_PER_VOXEL).round() as i32;
+        (hit.adjacent_pos.0, anchor.1 + dy_voxels, hit.adjacent_pos.2)
+    }
+}
+
 fn tool_from_index(idx: u8) -> Tool {
     match idx {
         0 => Tool::Place,
@@ -261,6 +338,10 @@ fn tool_from_index(idx: u8) -> Tool {
         2 => Tool::Paint,
         3 => Tool::Eyedropper,
         4 => Tool::Fill,
+        5 => Tool::Line,
+        6 => Tool::Box,
+        7 => Tool::Sphere,
+        8 => Tool::Cylinder,
         _ => Tool::Place,
     }
 }
@@ -272,6 +353,10 @@ fn tool_to_index(t: Tool) -> u8 {
         Tool::Paint => 2,
         Tool::Eyedropper => 3,
         Tool::Fill => 4,
+        Tool::Line => 5,
+        Tool::Box => 6,
+        Tool::Sphere => 7,
+        Tool::Cylinder => 8,
     }
 }
 
@@ -354,33 +439,37 @@ impl App {
         self.world.clear_dirty_flags();
     }
 
-    /// Refresh the translucent brush hover overlay. Called every
+    /// Refresh the translucent brush/shape hover overlay. Called every
     /// frame; the cache key short-circuits when nothing meaningful
     /// changed so the cost is just a few field comparisons.
     ///
-    /// Eyedropper / Fill don't show a preview — Eyedropper doesn't
-    /// write voxels and Fill's footprint depends on a flood-fill
-    /// traversal that we don't want to run per-frame.
+    /// Three preview modes share this overlay slot:
+    /// 1. **Brush tools** (Place/Remove/Paint/Fill): brush sphere at
+    ///    the hovered cell, expanded by symmetry mirrors.
+    /// 2. **Shape tools, idle** (no drag): single-cell anchor hint at
+    ///    `adjacent_pos` (the cell where the next press would anchor).
+    /// 3. **Shape tools, dragging** (left held with anchor set): full
+    ///    shape voxel set from anchor to current cell, plus mirrors.
+    ///
+    /// Eyedropper has no preview (its color != the sampled color would
+    /// mislead).
     pub(super) fn update_brush_preview(&mut self) {
         let tool = self.editor.current_tool;
-        // All tools that target a cell get a hover hint. Eyedropper
-        // is excluded because brush_color != the sampled color (would
-        // mislead). Fill gets one too — its preview marks the seed
-        // cell, not the full flood region.
-        let show = matches!(
-            tool,
-            Tool::Place | Tool::Remove | Tool::Paint | Tool::Fill
-        );
+        let symmetry = self.editor.symmetry;
+        let color = self.editor.brush_color;
+        let size = self.editor.brush_size;
+        let anchor = self.shape_drag_anchor;
 
+        // Eyedropper is the only tool with no preview at all.
+        let show = !matches!(tool, Tool::Eyedropper);
+
+        // Shape tools key on `adjacent_pos` (so the preview lands on
+        // the ground-plane fallback when the world is empty); brush
+        // tools key on `voxel_pos` (their existing semantics).
         let key = if show {
             self.editor.hovered_voxel.map(|h| {
-                (
-                    h.voxel_pos,
-                    tool,
-                    self.editor.brush_color,
-                    self.editor.brush_size,
-                    self.editor.symmetry,
-                )
+                let cell = if tool.is_shape() { h.adjacent_pos } else { h.voxel_pos };
+                (cell, tool, color, size, symmetry, anchor)
             })
         } else {
             None
@@ -398,13 +487,32 @@ impl App {
             return;
         };
 
-        // Use the brush tool's own preview semantics: Place uses
-        // adjacent_pos, Remove/Paint use the hovered cell. Symmetry
-        // expands those positions with mirrors so the user sees every
-        // cell that'd be affected by the next click.
-        let brush = BrushTool::new(tool);
-        let positions =
-            brush.preview_positions(&hit, self.editor.brush_size, self.editor.symmetry);
+        let positions: Vec<(i32, i32, i32)> = if let Some(a) = anchor {
+            // Active shape drag: render the shape from anchor to the
+            // current end cell. `shape_end_pos` substitutes screen-Y
+            // for world-Y when the cursor is on the virtual ground
+            // plane — without that, empty-world drags are stuck flat.
+            let end = self.shape_end_pos(a, &hit);
+            let raw = match tool {
+                Tool::Line => line_voxels(a, end),
+                Tool::Box => box_voxels(a, end),
+                Tool::Sphere => sphere_voxels(a, end),
+                Tool::Cylinder => cylinder_voxels(a, end),
+                _ => Vec::new(),
+            };
+            expand_with_symmetry(raw, symmetry)
+        } else if tool.is_shape() {
+            // Shape tool, idle: hint a single cell at the anchor
+            // candidate. Symmetry still applies — useful so the user
+            // sees both anchor candidates before pressing.
+            expand_with_symmetry(vec![hit.adjacent_pos], symmetry)
+        } else {
+            // Brush tool: fall through to BrushTool's own preview,
+            // which handles symmetry internally.
+            let brush = BrushTool::new(tool);
+            brush.preview_positions(&hit, size, symmetry)
+        };
+
         if positions.is_empty() {
             if let Some(r) = &mut self.renderer {
                 r.clear_brush_preview();
@@ -412,7 +520,6 @@ impl App {
             return;
         }
 
-        let color = self.editor.brush_color;
         let voxels: Vec<((i32, i32, i32), Voxel)> =
             positions.into_iter().map(|p| (p, color)).collect();
 

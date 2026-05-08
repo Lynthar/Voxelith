@@ -20,7 +20,13 @@ pub const STROKE_MERGE_WINDOW: Duration = Duration::from_millis(200);
 /// `max_voxels`, which is a count cap, not a spatial one.
 pub const MAX_FILL_DIST: i32 = 64;
 
-/// Available editing tools
+/// Available editing tools.
+///
+/// Brush tools (`Place`/`Remove`/`Paint`/`Eyedropper`/`Fill`) act on
+/// the hovered cell every click or drag-step. Shape tools (`Line`,
+/// `Box`, `Sphere`, `Cylinder`) use a click-anchor / drag-extent /
+/// release-commit gesture: the shape's full voxel set is committed
+/// in one `Command` on mouse-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     /// Place voxels
@@ -33,6 +39,17 @@ pub enum Tool {
     Eyedropper,
     /// Fill region with voxels
     Fill,
+    /// Line shape: drag from anchor to end, fills with brush color
+    /// using 3D Bresenham.
+    Line,
+    /// Filled axis-aligned box: drag corner-to-corner.
+    Box,
+    /// Filled ellipsoid fitting in the drag bbox (use a square-ish
+    /// drag for a uniform sphere).
+    Sphere,
+    /// Filled cylinder fitting in the drag bbox; axis = bbox's
+    /// longest dimension, ellipse cross-section in the other two.
+    Cylinder,
 }
 
 impl Tool {
@@ -44,6 +61,10 @@ impl Tool {
             Tool::Paint => "Paint",
             Tool::Eyedropper => "Eyedropper",
             Tool::Fill => "Fill",
+            Tool::Line => "Line",
+            Tool::Box => "Box",
+            Tool::Sphere => "Sphere",
+            Tool::Cylinder => "Cylinder",
         }
     }
 
@@ -55,7 +76,29 @@ impl Tool {
             Tool::Paint => "3",
             Tool::Eyedropper => "4 / Alt",
             Tool::Fill => "5",
+            Tool::Line => "6",
+            Tool::Box => "7",
+            Tool::Sphere => "8",
+            Tool::Cylinder => "9",
         }
+    }
+
+    /// Whether this tool uses click-anchor / drag-extent / release-
+    /// commit semantics. Shape tools do; brush tools don't.
+    pub fn is_shape(&self) -> bool {
+        matches!(
+            self,
+            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder
+        )
+    }
+
+    /// Whether this tool needs an anchor cell to operate. Place and
+    /// every shape tool need one (so they can build into an empty
+    /// world via the y=0 ground-plane raycast fallback); brush tools
+    /// that read the hovered cell (Remove/Paint/Eyedropper/Fill) need
+    /// a real solid voxel and shouldn't engage the fallback.
+    pub fn uses_ground_plane_fallback(&self) -> bool {
+        matches!(self, Tool::Place) || self.is_shape()
     }
 }
 
@@ -125,7 +168,15 @@ impl EditorTool for BrushTool {
         let center = match self.mode {
             Tool::Place => hit.adjacent_pos,
             Tool::Remove | Tool::Paint => hit.voxel_pos,
-            Tool::Eyedropper | Tool::Fill => return, // handled outside `apply`
+            // Eyedropper / Fill go through input.rs's tool dispatch,
+            // not BrushTool. Shape tools have their own click-anchor
+            // / drag / commit lifecycle and never call this path.
+            Tool::Eyedropper
+            | Tool::Fill
+            | Tool::Line
+            | Tool::Box
+            | Tool::Sphere
+            | Tool::Cylinder => return,
         };
 
         // Expand the brush sphere across symmetry mirrors. Spheres that
@@ -190,6 +241,12 @@ impl EditorTool for BrushTool {
             // be too expensive to compute every frame.
             Tool::Fill => symmetry.mirror_positions(hit.voxel_pos),
             Tool::Eyedropper => vec![hit.voxel_pos],
+            // Shape tools have their own preview path in
+            // `App::update_brush_preview`; BrushTool's preview is
+            // bypassed for them. Empty here keeps the trait satisfied
+            // without contributing stray cells if someone ever calls
+            // this for a shape tool by mistake.
+            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder => Vec::new(),
         }
     }
 }
