@@ -104,7 +104,11 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { button, state, .. } => {
                 if !egui_consumed {
                     if let Some(renderer) = &mut self.renderer {
-                        renderer.camera_controller.process_mouse_button(button, state);
+                        renderer.camera_controller.process_mouse_button(
+                            button,
+                            state,
+                            &mut renderer.camera,
+                        );
                     }
 
                     if button == winit::event::MouseButton::Left {

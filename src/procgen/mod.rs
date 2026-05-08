@@ -16,7 +16,8 @@ mod tree;
 mod wfc;
 
 pub use graph::{
-    CombineOp, GraphError, GraphNode, NodeId, NodeKind, PipelineGraph,
+    CombineOp, FilterPredicate, GraphError, GraphNode, MaskMode, NodeId,
+    NodeKind, PipelineGraph,
 };
 pub use terrain::PerlinTerrain;
 pub use tree::LSystemTree;

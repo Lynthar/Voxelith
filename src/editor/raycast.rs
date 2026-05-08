@@ -200,6 +200,54 @@ impl VoxelRaycast {
         None
     }
 
+    /// Cast a ray, falling back to a virtual hit on the horizontal
+    /// plane at `y = plane_y` when no solid voxel intercepts it.
+    ///
+    /// Used for the Place tool so the user can place voxels into a
+    /// freshly-cleared (empty) world — without a fallback, raycast
+    /// would miss everything and Place would have no anchor.
+    ///
+    /// The synthesized hit puts `voxel_pos` at `y = plane_y - 1` (a
+    /// virtual sub-plane "ghost" anchor) and `adjacent_pos` on the
+    /// plane itself, so a Place tool that writes at `adjacent_pos`
+    /// lands directly on the plane. Other tools (Remove/Paint/Eyedrop/
+    /// Fill) shouldn't call this — their semantics break on virtual
+    /// hits — they should call [`Self::cast`] instead.
+    ///
+    /// Only fires when the camera is above the plane and looking down;
+    /// looking sideways or up at the plane gives no synthetic hit
+    /// (avoids the cursor "snapping" to the plane behind the user).
+    pub fn cast_with_ground_plane(
+        ray: &Ray,
+        world: &World,
+        max_distance: f32,
+        plane_y: i32,
+    ) -> Option<RaycastHit> {
+        if let Some(hit) = Self::cast(ray, world, max_distance) {
+            return Some(hit);
+        }
+        let plane_y_f = plane_y as f32;
+        // Camera must be above the plane and the ray must head downward.
+        // The 1e-6 epsilon catches near-parallel rays that would otherwise
+        // intersect at huge `t` and snap the cursor far off-screen.
+        if ray.origin.y <= plane_y_f || ray.direction.y >= -1e-6 {
+            return None;
+        }
+        let t = (plane_y_f - ray.origin.y) / ray.direction.y;
+        if t <= 0.0 || t > max_distance {
+            return None;
+        }
+        let p = ray.at(t);
+        let x = p.x.floor() as i32;
+        let z = p.z.floor() as i32;
+        Some(RaycastHit {
+            voxel_pos: (x, plane_y - 1, z),
+            adjacent_pos: (x, plane_y, z),
+            normal: (0, 1, 0),
+            distance: t,
+        })
+    }
+
     /// Check if a voxel position is visible from camera
     pub fn is_visible(pos: (i32, i32, i32), camera_pos: Vec3, world: &World) -> bool {
         let voxel_center = Vec3::new(
@@ -251,5 +299,47 @@ mod tests {
         let hit = VoxelRaycast::cast(&ray, &world, 100.0);
 
         assert!(hit.is_none());
+    }
+
+    #[test]
+    fn test_ground_plane_synthesizes_hit_when_world_empty() {
+        let world = World::new();
+        // Camera at (5, 10, 5), looking down toward origin (-1, -2, -1).
+        let ray = Ray::new(Vec3::new(5.0, 10.0, 5.0), Vec3::new(-1.0, -2.0, -1.0));
+        let hit = VoxelRaycast::cast_with_ground_plane(&ray, &world, 100.0, 0)
+            .expect("ground plane fallback should fire on empty world");
+        // Adjacent position lands on the plane (y = 0).
+        assert_eq!(hit.adjacent_pos.1, 0);
+        // Virtual voxel sits one cell below the plane.
+        assert_eq!(hit.voxel_pos.1, -1);
+        assert_eq!(hit.normal, (0, 1, 0));
+    }
+
+    #[test]
+    fn test_ground_plane_skipped_when_ray_aims_upward() {
+        let world = World::new();
+        // Camera below or above plane, ray heading up — no synthesis.
+        let ray = Ray::new(Vec3::new(0.0, 5.0, 0.0), Vec3::Y);
+        assert!(VoxelRaycast::cast_with_ground_plane(&ray, &world, 100.0, 0).is_none());
+    }
+
+    #[test]
+    fn test_ground_plane_skipped_when_camera_below_plane() {
+        let world = World::new();
+        // Origin below plane, ray heading down — no synthesis (would
+        // hit plane behind / from underneath).
+        let ray = Ray::new(Vec3::new(0.0, -5.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+        assert!(VoxelRaycast::cast_with_ground_plane(&ray, &world, 100.0, 0).is_none());
+    }
+
+    #[test]
+    fn test_real_voxel_hit_takes_precedence_over_ground_plane() {
+        let mut world = World::new();
+        world.set_voxel(0, 5, 0, Voxel::from_rgb(255, 0, 0));
+        // Ray from above heading straight down through that voxel.
+        let ray = Ray::new(Vec3::new(0.5, 10.0, 0.5), Vec3::new(0.0, -1.0, 0.0));
+        let hit = VoxelRaycast::cast_with_ground_plane(&ray, &world, 100.0, 0).unwrap();
+        // Real voxel hit, not the plane fallback.
+        assert_eq!(hit.voxel_pos, (0, 5, 0));
     }
 }

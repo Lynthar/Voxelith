@@ -83,13 +83,21 @@ impl WfcTileset {
     }
 }
 
-/// 13-tile dungeon tileset: empty / floor / 2 straight walls / 4 corners /
-/// 4 T-junctions / 1 cross. Connector IDs: 0 = "open" (no wall on that
-/// face), 1 = "wall". Floor is weighted heaviest so output is mostly
-/// open ground; T-junctions and the cross are progressively rarer to
-/// keep dense intersections from dominating.
+/// 19-tile dungeon tileset: empty / floor / 2 straight walls / 4 corners /
+/// 4 T-junctions / 1 cross / 2 walls-with-door / 4 floor-with-door-mouth.
+/// Connector IDs:
+/// - `0` = "open" (no wall on that face — anything else with `0` fits)
+/// - `1` = "wall" (wall continues across the face — only other walls fit)
+/// - `2` = "doorway mouth" (this face is the open side of a doorway and
+///         must be matched by a floor-with-door-mouth tile, so the door
+///         is guaranteed to open onto walkable ground rather than into
+///         `empty`)
+///
+/// Floor is weighted heaviest so output is mostly open ground;
+/// T-junctions, cross, and door tiles are progressively rarer to keep
+/// dense intersections and doorways from dominating.
 fn dungeon_tileset() -> Tileset {
-    let mut tiles = Vec::with_capacity(13);
+    let mut tiles = Vec::with_capacity(19);
 
     tiles.push(Tile {
         name: "empty",
@@ -187,10 +195,80 @@ fn dungeon_tileset() -> Tileset {
         weight: 0.5,
     });
 
+    // Doorway tiles: same wall geometry as `wall_x` / `wall_z` but with
+    // a 2-wide × 2-tall portal carved through the middle so the player
+    // can pass through. The mouth-side faces use connector ID 2 instead
+    // of 0, which (via constraint propagation) requires the cells the
+    // door opens into to be `floor_door_*` variants — guaranteeing the
+    // door always leads onto floor and never into `empty`.
+    tiles.push(Tile {
+        name: "wall_x_with_door",
+        connectors: [1, 1, 2, 2],
+        solid: wall_with_door_pattern_x(),
+        weight: 0.5,
+    });
+    tiles.push(Tile {
+        name: "wall_z_with_door",
+        connectors: [2, 2, 1, 1],
+        solid: wall_with_door_pattern_z(),
+        weight: 0.5,
+    });
+
+    // Floor-with-door-mouth: identical geometry to plain floor, but
+    // exposes connector 2 on exactly one face. Four directional variants
+    // cover the four cardinal directions a door can open in. Weight is
+    // low — these tiles only need to be available when a door forces
+    // them; otherwise plain floor (weight 4.0) overwhelmingly wins the
+    // weighted sample.
+    for (name, connectors) in [
+        ("floor_door_px", [2u8, 0, 0, 0]),
+        ("floor_door_nx", [0, 2, 0, 0]),
+        ("floor_door_pz", [0, 0, 2, 0]),
+        ("floor_door_nz", [0, 0, 0, 2]),
+    ] {
+        tiles.push(Tile {
+            name,
+            connectors,
+            solid: floor, // [bool; TILE_VOLUME] is Copy
+            weight: 0.4,
+        });
+    }
+
     Tileset {
         name: "dungeon",
         tiles,
     }
+}
+
+/// `wall_x` geometry with a 2-wide × 2-tall portal carved out of the
+/// central pillar. The wall above (y∈{2,3}) and the door-jambs at
+/// x∈{0,3} stay solid so the surrounding wall reads as continuous —
+/// the carved opening is just at standing height.
+fn wall_with_door_pattern_x() -> [bool; TILE_VOLUME] {
+    let mut p = wall_pattern(true, true, false, false);
+    for y in 0..2 {
+        for z in 1..3 {
+            for x in 1..3 {
+                p[idx(x, y, z)] = false;
+            }
+        }
+    }
+    p
+}
+
+/// Mirror of `wall_with_door_pattern_x` for the Z-running wall. The
+/// carve region is identical — the difference is only in which
+/// directions the wall extends out to the tile faces.
+fn wall_with_door_pattern_z() -> [bool; TILE_VOLUME] {
+    let mut p = wall_pattern(false, false, true, true);
+    for y in 0..2 {
+        for z in 1..3 {
+            for x in 1..3 {
+                p[idx(x, y, z)] = false;
+            }
+        }
+    }
+    p
 }
 
 #[inline]
@@ -522,10 +600,92 @@ mod tests {
     #[test]
     fn test_dungeon_tileset_loads() {
         let ts = WfcTileset::Dungeon.build();
-        assert_eq!(ts.tiles.len(), 13);
+        assert_eq!(ts.tiles.len(), 19);
         assert_eq!(ts.tiles[0].name, "empty");
         assert_eq!(ts.tiles[1].name, "floor");
-        assert_eq!(ts.tiles.last().unwrap().name, "cross");
+        // Doorway tiles sit after the cross; the four floor-with-mouth
+        // variants close out the list.
+        let names: Vec<&str> = ts.tiles.iter().map(|t| t.name).collect();
+        assert!(names.contains(&"wall_x_with_door"));
+        assert!(names.contains(&"wall_z_with_door"));
+        assert!(names.contains(&"floor_door_px"));
+        assert!(names.contains(&"floor_door_nz"));
+    }
+
+    #[test]
+    fn test_door_tile_carves_2x2_portal() {
+        // The wall_x_with_door tile must have its central 2-wide × 2-tall
+        // region empty (the portal) but the lintel above and the
+        // door-jambs at x=0, x=3 must stay solid.
+        let ts = WfcTileset::Dungeon.build();
+        let door = ts
+            .tiles
+            .iter()
+            .find(|t| t.name == "wall_x_with_door")
+            .expect("wall_x_with_door tile missing");
+        for y in 0..2 {
+            for z in 1..3 {
+                for x in 1..3 {
+                    assert!(
+                        !door.solid[idx(x, y, z)],
+                        "expected portal cell ({},{},{}) to be empty",
+                        x, y, z
+                    );
+                }
+            }
+        }
+        // Lintel above the doorway is intact.
+        for z in 1..3 {
+            for x in 0..TILE_SIZE {
+                assert!(
+                    door.solid[idx(x, 3, z)],
+                    "lintel cell ({}, 3, {}) should be solid",
+                    x, z
+                );
+            }
+        }
+        // Door-jambs at the extremes stay solid through the carve y range.
+        for y in 0..2 {
+            for z in 1..3 {
+                assert!(door.solid[idx(0, y, z)], "left jamb gap at ({}, {})", y, z);
+                assert!(door.solid[idx(3, y, z)], "right jamb gap at ({}, {})", y, z);
+            }
+        }
+    }
+
+    #[test]
+    fn test_floor_door_variants_share_floor_geometry() {
+        let ts = WfcTileset::Dungeon.build();
+        let plain_floor = ts
+            .tiles
+            .iter()
+            .find(|t| t.name == "floor")
+            .expect("floor tile missing");
+        for variant_name in [
+            "floor_door_px",
+            "floor_door_nx",
+            "floor_door_pz",
+            "floor_door_nz",
+        ] {
+            let v = ts
+                .tiles
+                .iter()
+                .find(|t| t.name == variant_name)
+                .unwrap_or_else(|| panic!("{} missing", variant_name));
+            assert_eq!(
+                v.solid, plain_floor.solid,
+                "{} should share plain floor's geometry",
+                variant_name
+            );
+            // Exactly one connector must be `2` (the door-mouth side);
+            // everything else stays at `0` (open).
+            let mouths = v.connectors.iter().filter(|&&c| c == 2).count();
+            assert_eq!(
+                mouths, 1,
+                "{} should have exactly one door-mouth connector",
+                variant_name
+            );
+        }
     }
 
     #[test]
