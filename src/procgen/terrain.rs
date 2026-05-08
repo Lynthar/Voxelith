@@ -39,14 +39,20 @@ pub struct PerlinTerrain {
 
 impl Default for PerlinTerrain {
     fn default() -> Self {
+        // Defaults tuned for "looks like a coherent landscape" on a
+        // 64x64 footprint: shorter height range and lower frequency
+        // produce gentler, more continuous slopes; fewer octaves cuts
+        // the high-frequency choppiness that made every column read
+        // as an isolated grass spike. Users who want jagged terrain
+        // can dial these up in the panel.
         Self {
             seed: 42,
             width: 64,
             depth: 64,
             min_height: 0,
-            max_height: 24,
-            frequency: 0.05,
-            octaves: 4,
+            max_height: 12,
+            frequency: 0.03,
+            octaves: 3,
         }
     }
 }

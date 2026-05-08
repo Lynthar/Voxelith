@@ -6,8 +6,8 @@ pub use panels::{UiAction, UiState};
 
 use crate::editor::{Editor, Tool};
 use crate::procgen::{
-    CombineOp, LSystemTree, NodeId, NodeKind, PerlinTerrain, PipelineGraph,
-    WfcGenerator,
+    CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind,
+    PerlinTerrain, PipelineGraph, WfcGenerator,
 };
 use egui::Context;
 
@@ -66,9 +66,11 @@ impl Default for GeneratorChoice {
 /// sliders mutate the fields in place, then `UiAction::GenerateProcedural`
 /// triggers `selected`'s `generate()` in the application layer.
 ///
-/// `preview_enabled` drives a translucent overlay of the selected
-/// generator's output, refreshed by the app's preview ticker after a
-/// short debounce when params change.
+/// `preview_enabled` and `graph_preview_enabled` independently drive
+/// translucent overlays — the first for the selected single generator,
+/// the second for the pipeline graph's output. Both share the renderer's
+/// preview slot; when both are on, the graph wins on the slot since
+/// its tick runs second.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProcgenSettings {
     pub selected: GeneratorChoice,
@@ -76,6 +78,8 @@ pub struct ProcgenSettings {
     pub tree: LSystemTree,
     pub wfc: WfcGenerator,
     pub preview_enabled: bool,
+    #[serde(default)]
+    pub graph_preview_enabled: bool,
 }
 
 /// Main UI manager
@@ -649,6 +653,7 @@ impl Ui {
         let graph = &mut self.graph;
         let selected = &mut self.selected_node;
         let drag_wire = &mut self.dragging_wire;
+        let preview_enabled = &mut self.procgen.graph_preview_enabled;
 
         egui::Window::new("Pipeline Graph")
             .default_pos([240.0, 80.0])
@@ -667,6 +672,10 @@ impl Ui {
                     {
                         run = true;
                     }
+                    ui.checkbox(preview_enabled, "Preview").on_hover_text(
+                        "Show a translucent overlay of the graph's output \
+                         (debounced ~150ms)",
+                    );
                     ui.separator();
                     ui.menu_button("+ Add Node", |ui| {
                         for k in node_menu_options() {
@@ -939,7 +948,9 @@ impl Ui {
                     if self.viewport.show_axes {
                         ui.label("[Axes]");
                     }
-                    if self.procgen.preview_enabled {
+                    if self.procgen.preview_enabled
+                        || self.procgen.graph_preview_enabled
+                    {
                         ui.label(
                             egui::RichText::new("● Preview")
                                 .color(egui::Color32::LIGHT_GREEN),
@@ -1173,6 +1184,23 @@ fn node_menu_options() -> Vec<(&'static str, fn() -> NodeKind, bool)> {
             false,
         ),
         (
+            "Filter",
+            || NodeKind::Filter {
+                input: None,
+                predicate: FilterPredicate::default(),
+            },
+            false,
+        ),
+        (
+            "Mask",
+            || NodeKind::Mask {
+                subject: None,
+                mask: None,
+                mode: MaskMode::default(),
+            },
+            false,
+        ),
+        (
             "Combine",
             || NodeKind::Combine {
                 a: None,
@@ -1193,6 +1221,8 @@ fn node_header_color(kind: &NodeKind) -> egui::Color32 {
         NodeKind::Tree(_) => egui::Color32::from_rgb(60, 100, 60),
         NodeKind::Wfc(_) => egui::Color32::from_rgb(100, 90, 50),
         NodeKind::Translate { .. } => egui::Color32::from_rgb(70, 80, 110),
+        NodeKind::Filter { .. } => egui::Color32::from_rgb(80, 100, 110),
+        NodeKind::Mask { .. } => egui::Color32::from_rgb(90, 110, 130),
         NodeKind::Combine { .. } => egui::Color32::from_rgb(110, 70, 110),
         NodeKind::Output { .. } => egui::Color32::from_rgb(120, 80, 60),
     }
@@ -1213,6 +1243,8 @@ fn node_summary(kind: &NodeKind) -> String {
         NodeKind::Translate { dx, dy, dz, .. } => {
             format!("offset ({}, {}, {})", dx, dy, dz)
         }
+        NodeKind::Filter { predicate, .. } => predicate.label(),
+        NodeKind::Mask { mode, .. } => mode.label().to_string(),
         NodeKind::Combine { op, .. } => op.label().to_string(),
         NodeKind::Output { .. } => "pipeline result".to_string(),
     }
@@ -1613,6 +1645,40 @@ fn graph_sidebar(
                     ui.add(egui::DragValue::new(dz).prefix("z:"));
                 });
             }
+            NodeKind::Filter { input, predicate } => {
+                input_slot(ui, "Input", input, &candidates, id);
+                filter_predicate_ui(ui, predicate, id);
+            }
+            NodeKind::Mask { subject, mask, mode } => {
+                input_slot(ui, "Subject", subject, &candidates, id);
+                input_slot(ui, "Mask", mask, &candidates, id);
+                ui.horizontal(|ui| {
+                    ui.label("Mode");
+                    egui::ComboBox::from_id_salt(("mask_mode_sb", id))
+                        .selected_text(mode.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                mode,
+                                MaskMode::AboveColumn,
+                                "Above column",
+                            );
+                            ui.selectable_value(
+                                mode,
+                                MaskMode::BelowColumn,
+                                "Below column",
+                            );
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Keeps subject voxels based on mask's column profile. \
+                         Above-column → trees above terrain; Below-column → \
+                         stalactites below ceilings.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
             NodeKind::Combine { a, b, op } => {
                 input_slot(ui, "Input A", a, &candidates, id);
                 input_slot(ui, "Input B", b, &candidates, id);
@@ -1639,6 +1705,122 @@ fn graph_sidebar(
                 input_slot(ui, "Input", input, &candidates, id);
             }
         });
+}
+
+/// Sidebar editor for a `Filter` node's predicate. Top combo switches
+/// the predicate variant (resetting params to that variant's defaults
+/// on change); the rows below it edit the current variant's params.
+/// Variant switches discard the previous variant's params on purpose —
+/// keeping a "remembered y threshold" across switches would surprise
+/// the user more than help them.
+fn filter_predicate_ui(
+    ui: &mut egui::Ui,
+    predicate: &mut FilterPredicate,
+    node_id: NodeId,
+) {
+    // Variant selector. We compare via `matches!` rather than tag enums
+    // to avoid carrying a parallel discriminator type.
+    let cur_label = match predicate {
+        FilterPredicate::YAbove(_) => "Y above",
+        FilterPredicate::YBelow(_) => "Y below",
+        FilterPredicate::MatchesColor(_) => "Color match",
+        FilterPredicate::InsideBox { .. } => "Inside box",
+    };
+    ui.horizontal(|ui| {
+        ui.label("Predicate");
+        egui::ComboBox::from_id_salt(("filter_pred_kind", node_id))
+            .selected_text(cur_label)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        matches!(predicate, FilterPredicate::YAbove(_)),
+                        "Y above",
+                    )
+                    .clicked()
+                    && !matches!(predicate, FilterPredicate::YAbove(_))
+                {
+                    *predicate = FilterPredicate::YAbove(0);
+                }
+                if ui
+                    .selectable_label(
+                        matches!(predicate, FilterPredicate::YBelow(_)),
+                        "Y below",
+                    )
+                    .clicked()
+                    && !matches!(predicate, FilterPredicate::YBelow(_))
+                {
+                    *predicate = FilterPredicate::YBelow(0);
+                }
+                if ui
+                    .selectable_label(
+                        matches!(predicate, FilterPredicate::MatchesColor(_)),
+                        "Color match",
+                    )
+                    .clicked()
+                    && !matches!(predicate, FilterPredicate::MatchesColor(_))
+                {
+                    *predicate = FilterPredicate::MatchesColor([200, 200, 200, 255]);
+                }
+                if ui
+                    .selectable_label(
+                        matches!(predicate, FilterPredicate::InsideBox { .. }),
+                        "Inside box",
+                    )
+                    .clicked()
+                    && !matches!(predicate, FilterPredicate::InsideBox { .. })
+                {
+                    *predicate = FilterPredicate::InsideBox {
+                        min: (-8, 0, -8),
+                        max: (8, 16, 8),
+                    };
+                }
+            });
+    });
+
+    // Variant params.
+    match predicate {
+        FilterPredicate::YAbove(t) | FilterPredicate::YBelow(t) => {
+            ui.horizontal(|ui| {
+                ui.label("Threshold y");
+                ui.add(egui::DragValue::new(t));
+            });
+        }
+        FilterPredicate::MatchesColor(rgba) => {
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                let mut rgb = [rgba[0], rgba[1], rgba[2]];
+                color_button_u8(ui, &mut rgb);
+                rgba[0] = rgb[0];
+                rgba[1] = rgb[1];
+                rgba[2] = rgb[2];
+                // Editor-placed voxels always have alpha 255; pin the
+                // predicate's alpha to 255 too so a colour picked here
+                // matches what's actually in the world.
+                rgba[3] = 255;
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Matches voxels with this exact RGB (alpha pinned to 255).",
+                )
+                .small()
+                .weak(),
+            );
+        }
+        FilterPredicate::InsideBox { min, max } => {
+            ui.horizontal(|ui| {
+                ui.label("Min");
+                ui.add(egui::DragValue::new(&mut min.0).prefix("x:"));
+                ui.add(egui::DragValue::new(&mut min.1).prefix("y:"));
+                ui.add(egui::DragValue::new(&mut min.2).prefix("z:"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max");
+                ui.add(egui::DragValue::new(&mut max.0).prefix("x:"));
+                ui.add(egui::DragValue::new(&mut max.1).prefix("y:"));
+                ui.add(egui::DragValue::new(&mut max.2).prefix("z:"));
+            });
+        }
+    }
 }
 
 /// ComboBox for picking one of the graph's existing nodes as an input.

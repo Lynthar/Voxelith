@@ -59,6 +59,13 @@ impl App {
                         renderer.camera_controller.distance = 40.0;
                         renderer.camera_controller.yaw = 0.0;
                         renderer.camera_controller.pitch = 0.5;
+                        // Apply immediately so camera.position matches the
+                        // new orbit state — without this, the camera would
+                        // appear "stuck" until the next orbit drag, and
+                        // that drag would start with a visible teleport.
+                        renderer
+                            .camera_controller
+                            .update_camera_position(&mut renderer.camera);
                     }
                 }
                 UiAction::SetCameraView(view) => {
@@ -78,6 +85,12 @@ impl App {
                                     std::f32::consts::FRAC_PI_2;
                             }
                         }
+                        // Same rationale as ResetCamera: apply now so the
+                        // first orbit drag continues from this view rather
+                        // than snapping from a stale spherical state.
+                        renderer
+                            .camera_controller
+                            .update_camera_position(&mut renderer.camera);
                     }
                 }
                 UiAction::NewProject => self.new_project(),

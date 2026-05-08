@@ -140,18 +140,57 @@ impl CameraController {
         }
     }
 
-    /// Handle mouse button input
-    pub fn process_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+    /// Handle mouse button input.
+    ///
+    /// Takes `&mut Camera` so middle-press can sync orbit state from
+    /// the camera's current position before any orbit motion runs.
+    /// Without this sync, anything that wrote `target` / yaw / pitch /
+    /// distance without also writing `camera.position` (Reset Camera,
+    /// Set Camera View) would cause the next orbit drag to snap the
+    /// camera to a stale spherical position — visible teleport.
+    pub fn process_mouse_button(
+        &mut self,
+        button: MouseButton,
+        state: ElementState,
+        camera: &mut Camera,
+    ) {
         let pressed = state == ElementState::Pressed;
         match button {
             MouseButton::Right => self.right_mouse_pressed = pressed,
-            MouseButton::Middle => self.middle_mouse_pressed = pressed,
+            MouseButton::Middle => {
+                self.middle_mouse_pressed = pressed;
+                if pressed {
+                    self.sync_orbit_state_from_camera(camera);
+                }
+            }
             _ => {}
         }
 
         if !pressed {
             self.last_mouse_pos = None;
         }
+    }
+
+    /// Re-derive `yaw` / `pitch` / `distance` from the current
+    /// `camera.position - camera.target` vector. Treats the camera's
+    /// actual position as the source of truth; the controller's
+    /// stored angles are just a cache used to apply orbit deltas.
+    ///
+    /// Call this whenever the camera's position has been changed by
+    /// something other than the orbit/zoom path (currently only
+    /// middle-press; the other gestures — pan, WASD — already preserve
+    /// the camera-target offset by translating both endpoints together).
+    pub fn sync_orbit_state_from_camera(&mut self, camera: &Camera) {
+        let to_camera = camera.position - camera.target;
+        // Floor avoids `to_camera / 0` when camera sits exactly at
+        // target (degenerate — distance becomes 0.01 instead of NaN).
+        let dist = to_camera.length().max(0.01);
+        self.distance = dist;
+        let dir = to_camera / dist;
+        self.yaw = dir.z.atan2(dir.x);
+        // Clamp into the same range orbit motion uses so a first drag
+        // after sync doesn't immediately hit the clamp boundary.
+        self.pitch = dir.y.asin().clamp(-1.5, 1.5);
     }
 
     /// Handle mouse movement
@@ -174,7 +213,12 @@ impl CameraController {
 
                 self.update_camera_position(camera);
             } else if self.right_mouse_pressed {
-                // Pan camera
+                // Pan camera. Both position and target shift by the same
+                // offset so the view direction and the camera-to-target
+                // vector both stay fixed — orbit angles derived from
+                // that vector remain valid, so the next orbit gesture
+                // continues to rotate around the new (panned-to) target
+                // without any discontinuity.
                 let right = camera.right();
                 let up = camera.up;
                 let pan_speed = self.distance * 0.002;
@@ -201,8 +245,13 @@ impl CameraController {
         self.update_camera_position(camera);
     }
 
-    /// Update camera position based on orbital parameters
-    fn update_camera_position(&self, camera: &mut Camera) {
+    /// Write `camera.position` from the controller's current
+    /// `yaw` / `pitch` / `distance` (relative to `camera.target`).
+    /// Public so callers that change those fields directly (e.g.
+    /// Reset Camera, Set Camera View) can apply the change immediately
+    /// instead of leaving `camera.position` desynced until the next
+    /// orbit drag.
+    pub fn update_camera_position(&self, camera: &mut Camera) {
         let x = self.distance * self.yaw.cos() * self.pitch.cos();
         let y = self.distance * self.pitch.sin();
         let z = self.distance * self.yaw.sin() * self.pitch.cos();
