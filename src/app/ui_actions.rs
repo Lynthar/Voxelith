@@ -101,6 +101,7 @@ impl App {
                 UiAction::ImportVox => self.import_vox(),
                 UiAction::ExportVox => self.export_vox(),
                 UiAction::ExportObj => self.export_obj(),
+                UiAction::ExportGlb => self.export_glb(),
                 UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
             }

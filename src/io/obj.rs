@@ -1,6 +1,6 @@
 //! Wavefront OBJ export.
 //!
-//! Walks every chunk in the world, re-meshes it with the `NaiveMesher`
+//! Walks every chunk in the world, re-meshes it with the `GreedyMesher`
 //! (the same path used at render time), and writes the combined
 //! geometry to a single OBJ file. Vertex colors are emitted using the
 //! `v x y z r g b` extension that Blender / MeshLab / most modern
@@ -24,7 +24,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::core::World;
-use crate::mesh::{Mesher, NaiveMesher};
+use crate::mesh::{GreedyMesher, Mesher};
 
 #[derive(Debug, Error)]
 pub enum ObjError {
@@ -47,7 +47,7 @@ pub struct ObjStats {
 /// OBJ with header + object name but no geometry — readers should
 /// import it as an empty mesh rather than choking.
 pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
-    let mesher = NaiveMesher::new();
+    let mesher = GreedyMesher::new();
 
     // Generate meshes for every chunk and keep only non-empty ones so
     // air-only chunks don't bloat the output with `g` headers.
@@ -194,8 +194,11 @@ mod tests {
 
     #[test]
     fn test_export_adjacent_voxels_cull_shared_face() {
-        // Two voxels sharing a face: the shared face is culled from
-        // both, so the total is 12 - 2 = 10 visible faces × 2 tris = 20.
+        // Two voxels sharing a face, *different colors*: the shared
+        // face is culled from both (10 visible faces) and greedy
+        // can't merge the same-axis pairs because colors differ →
+        // 10 quads × 2 tris = 20. Confirms color barriers prevent
+        // merging in the OBJ path the same way they do in render.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(1, 0, 0, Voxel::from_rgb(0, 0, 255));
@@ -205,6 +208,25 @@ mod tests {
         let path = dir.join("voxelith_two_adjacent.obj");
         let stats = export_obj(&world, &path).unwrap();
         assert_eq!(stats.triangle_count, 20);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_adjacent_same_color_voxels_merge() {
+        // Two adjacent same-color voxels: greedy merges top, bottom,
+        // +Z, -Z into 2-wide quads (1 each); ±X stay 1×1 (1 each).
+        // 6 quads × 2 tris = 12. Confirms greedy is actually doing
+        // the merging in the OBJ output path (not just at render).
+        let mut world = World::new();
+        let c = Voxel::from_rgb(128, 128, 128);
+        world.set_voxel(0, 0, 0, c);
+        world.set_voxel(1, 0, 0, c);
+        world.clear_dirty_flags();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("voxelith_two_adjacent_same.obj");
+        let stats = export_obj(&world, &path).unwrap();
+        assert_eq!(stats.triangle_count, 12);
         let _ = std::fs::remove_file(&path);
     }
 

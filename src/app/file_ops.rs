@@ -197,8 +197,48 @@ impl App {
         }
     }
 
+    /// Prompt for a path and export to glTF Binary (.glb). Same
+    /// mesh-collection path as OBJ (greedy meshing across all
+    /// chunks), but writes a single self-contained .glb that imports
+    /// directly into Unity / Unreal / Godot / Blender. Status bar
+    /// reports vertex / triangle / chunk counts and the resulting
+    /// file size so the user can sanity-check large exports.
+    pub(super) fn export_glb(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("glTF Binary", &["glb"])
+            .set_title("Export as glTF Binary");
+
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        match io::export_glb(&self.world, &path) {
+            Ok(stats) => {
+                self.touch_recent(&path);
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let msg = if stats.triangle_count == 0 {
+                    format!("Exported: {} (empty — no geometry)", filename)
+                } else {
+                    let kib = (stats.byte_size as f32) / 1024.0;
+                    format!(
+                        "Exported: {} ({} tris, {} chunks, {:.1} KiB)",
+                        filename, stats.triangle_count, stats.chunk_count, kib
+                    )
+                };
+                self.ui.set_status(msg);
+            }
+            Err(e) => {
+                log::error!("Failed to export GLB: {}", e);
+                self.ui.set_status(format!("Export failed: {}", e));
+            }
+        }
+    }
+
     /// Prompt for a path and export to OBJ. Walks every chunk, runs
-    /// the naive mesher to capture currently-visible geometry, and
+    /// the greedy mesher to capture currently-visible geometry, and
     /// writes a single .obj with vertex colors. Touches the recent-
     /// files MRU on success and surfaces triangle counts in the status
     /// bar so the user knows the export wasn't silently empty.

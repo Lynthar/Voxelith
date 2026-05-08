@@ -4,12 +4,14 @@
 //! - Native project format (.vxlt) - compressed binary with metadata
 //! - MagicaVoxel (.vox) - import/export
 //! - Wavefront OBJ (.obj) - export (geometry + vertex colors)
-//! - (Future) GLTF (.gltf, .glb) - export
+//! - glTF Binary (.glb) - export (single-file, native vertex colors)
 
+mod gltf;
 mod obj;
 mod project;
 mod vox;
 
+pub use gltf::{export_glb, GlbError, GlbStats};
 pub use obj::{export_obj, ObjError, ObjStats};
 pub use project::{
     EditorState, Project, ProjectError, ProjectMetadata,
@@ -31,6 +33,8 @@ pub enum FileFormat {
     Vox,
     /// Wavefront OBJ (.obj) — export only
     Obj,
+    /// glTF Binary (.glb) — export only
+    Glb,
 }
 
 impl FileFormat {
@@ -41,6 +45,7 @@ impl FileFormat {
             "vxlt" | "voxelith" => Some(Self::Project),
             "vox" => Some(Self::Vox),
             "obj" => Some(Self::Obj),
+            "glb" => Some(Self::Glb),
             _ => None,
         }
     }
@@ -51,6 +56,7 @@ impl FileFormat {
             Self::Project => "vxlt",
             Self::Vox => "vox",
             Self::Obj => "obj",
+            Self::Glb => "glb",
         }
     }
 
@@ -60,6 +66,7 @@ impl FileFormat {
             Self::Project => "Voxelith Project",
             Self::Vox => "MagicaVoxel",
             Self::Obj => "Wavefront OBJ",
+            Self::Glb => "glTF Binary",
         }
     }
 
@@ -69,6 +76,7 @@ impl FileFormat {
             Self::Project => ("Voxelith Project", &["vxlt", "voxelith"]),
             Self::Vox => ("MagicaVoxel", &["vox"]),
             Self::Obj => ("Wavefront OBJ", &["obj"]),
+            Self::Glb => ("glTF Binary", &["glb"]),
         }
     }
 }
@@ -80,5 +88,10 @@ pub fn import_formats() -> Vec<FileFormat> {
 
 /// All supported export formats
 pub fn export_formats() -> Vec<FileFormat> {
-    vec![FileFormat::Project, FileFormat::Vox, FileFormat::Obj]
+    vec![
+        FileFormat::Project,
+        FileFormat::Vox,
+        FileFormat::Obj,
+        FileFormat::Glb,
+    ]
 }
