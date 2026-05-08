@@ -11,10 +11,12 @@
 //! mesh, with internal face culling — used for the procgen preview
 //! overlay.
 
+mod greedy;
 mod naive;
 mod patch;
 mod vertex;
 
+pub use greedy::GreedyMesher;
 pub use naive::NaiveMesher;
 pub use patch::patch_to_mesh;
 pub use vertex::{ChunkMesh, Vertex};
@@ -94,44 +96,71 @@ pub(crate) fn face_quad_vertices(
     face: Face,
     color: [f32; 4],
 ) -> [Vertex; 4] {
+    face_quad_vertices_sized(x, y, z, face, 1.0, 1.0, color)
+}
+
+/// Build the 4 vertices of a `w × h` face at start cell `(x, y, z)`,
+/// where `w` and `h` are extents in the face's plane. The greedy
+/// mesher uses this to emit merged rectangular quads; `w == h == 1.0`
+/// reduces to the unit-cube case used by the naive mesher, so both
+/// meshers go through the same winding logic and the merged quads
+/// stay consistent with the unmerged ones at chunk boundaries.
+///
+/// Per-face axis convention (matches Lysenko's reference greedy
+/// algorithm and the established voxel-engine convention):
+/// - `+Y` / `-Y`: `w` along +X, `h` along +Z
+/// - `+X` / `-X`: `w` along +Z, `h` along +Y
+/// - `+Z` / `-Z`: `w` along +X, `h` along +Y
+///
+/// Vertices are emitted CCW from outside, so wgpu's default
+/// `front_face: Ccw` + `cull_mode: Back` works without flips.
+pub(crate) fn face_quad_vertices_sized(
+    x: f32,
+    y: f32,
+    z: f32,
+    face: Face,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+) -> [Vertex; 4] {
     let normal = face.normal();
 
     match face {
         Face::PosX => [
             Vertex::new([x + 1.0, y, z], normal, color),
-            Vertex::new([x + 1.0, y, z + 1.0], normal, color),
-            Vertex::new([x + 1.0, y + 1.0, z + 1.0], normal, color),
-            Vertex::new([x + 1.0, y + 1.0, z], normal, color),
+            Vertex::new([x + 1.0, y, z + w], normal, color),
+            Vertex::new([x + 1.0, y + h, z + w], normal, color),
+            Vertex::new([x + 1.0, y + h, z], normal, color),
         ],
         Face::NegX => [
-            Vertex::new([x, y, z + 1.0], normal, color),
+            Vertex::new([x, y, z + w], normal, color),
             Vertex::new([x, y, z], normal, color),
-            Vertex::new([x, y + 1.0, z], normal, color),
-            Vertex::new([x, y + 1.0, z + 1.0], normal, color),
+            Vertex::new([x, y + h, z], normal, color),
+            Vertex::new([x, y + h, z + w], normal, color),
         ],
         Face::PosY => [
             Vertex::new([x, y + 1.0, z], normal, color),
-            Vertex::new([x + 1.0, y + 1.0, z], normal, color),
-            Vertex::new([x + 1.0, y + 1.0, z + 1.0], normal, color),
-            Vertex::new([x, y + 1.0, z + 1.0], normal, color),
+            Vertex::new([x + w, y + 1.0, z], normal, color),
+            Vertex::new([x + w, y + 1.0, z + h], normal, color),
+            Vertex::new([x, y + 1.0, z + h], normal, color),
         ],
         Face::NegY => [
-            Vertex::new([x, y, z + 1.0], normal, color),
-            Vertex::new([x + 1.0, y, z + 1.0], normal, color),
-            Vertex::new([x + 1.0, y, z], normal, color),
+            Vertex::new([x, y, z + h], normal, color),
+            Vertex::new([x + w, y, z + h], normal, color),
+            Vertex::new([x + w, y, z], normal, color),
             Vertex::new([x, y, z], normal, color),
         ],
         Face::PosZ => [
-            Vertex::new([x + 1.0, y, z + 1.0], normal, color),
+            Vertex::new([x + w, y, z + 1.0], normal, color),
             Vertex::new([x, y, z + 1.0], normal, color),
-            Vertex::new([x, y + 1.0, z + 1.0], normal, color),
-            Vertex::new([x + 1.0, y + 1.0, z + 1.0], normal, color),
+            Vertex::new([x, y + h, z + 1.0], normal, color),
+            Vertex::new([x + w, y + h, z + 1.0], normal, color),
         ],
         Face::NegZ => [
             Vertex::new([x, y, z], normal, color),
-            Vertex::new([x + 1.0, y, z], normal, color),
-            Vertex::new([x + 1.0, y + 1.0, z], normal, color),
-            Vertex::new([x, y + 1.0, z], normal, color),
+            Vertex::new([x + w, y, z], normal, color),
+            Vertex::new([x + w, y + h, z], normal, color),
+            Vertex::new([x, y + h, z], normal, color),
         ],
     }
 }

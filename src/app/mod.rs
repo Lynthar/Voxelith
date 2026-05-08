@@ -36,7 +36,7 @@ use voxelith::{
         box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Editor, EditorTool,
         RaycastHit, SymmetryAxes, Tool,
     },
-    mesh::{patch_to_mesh, Mesher, NaiveMesher},
+    mesh::{patch_to_mesh, GreedyMesher, Mesher},
     prefs::{EditorPrefs, PanelVisibility, Prefs, WindowPrefs},
     render::Renderer,
     ui::{RenderStats, Ui},
@@ -57,7 +57,7 @@ pub struct App {
     egui_renderer: Option<egui_wgpu::Renderer>,
 
     world: World,
-    mesher: NaiveMesher,
+    mesher: GreedyMesher,
     editor: Editor,
     ui: Ui,
 
@@ -172,7 +172,7 @@ impl App {
             egui_state: None,
             egui_renderer: None,
             world: World::new(),
-            mesher: NaiveMesher::new(),
+            mesher: GreedyMesher::new(),
             editor,
             ui,
             last_frame: Instant::now(),
