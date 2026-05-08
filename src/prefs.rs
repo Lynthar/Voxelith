@@ -104,6 +104,9 @@ pub struct EditorPrefs {
     pub selected_tool: u8,
     /// Custom palette. Empty means "use Editor's built-in defaults".
     pub palette: Vec<[u8; 4]>,
+    /// Symmetry axes (`[x, y, z]`). Stored as a plain array rather than
+    /// a struct so the on-disk shape stays trivial.
+    pub symmetry: [bool; 3],
 }
 
 impl Default for EditorPrefs {
@@ -113,6 +116,7 @@ impl Default for EditorPrefs {
             brush_size: 1,
             selected_tool: 0,
             palette: Vec::new(),
+            symmetry: [false; 3],
         }
     }
 }

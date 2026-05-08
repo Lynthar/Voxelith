@@ -30,7 +30,7 @@ use winit::{keyboard::ModifiersState, window::Window};
 
 use voxelith::{
     core::{Voxel, World},
-    editor::{BrushTool, Editor, EditorTool, Tool},
+    editor::{BrushTool, Editor, EditorTool, SymmetryAxes, Tool},
     mesh::{patch_to_mesh, Mesher, NaiveMesher},
     prefs::{EditorPrefs, PanelVisibility, Prefs, WindowPrefs},
     render::Renderer,
@@ -88,8 +88,8 @@ pub struct App {
 
     /// Cache key for the brush hover overlay so we don't regenerate
     /// its mesh on every CursorMoved when nothing meaningful changed.
-    /// `(hovered voxel, tool, brush color, brush size)`.
-    last_brush_preview_key: Option<((i32, i32, i32), Tool, Voxel, u8)>,
+    /// `(hovered voxel, tool, brush color, brush size, symmetry)`.
+    last_brush_preview_key: Option<((i32, i32, i32), Tool, Voxel, u8, SymmetryAxes)>,
 
     /// Persisted user preferences. Loaded at startup, dehydrated and
     /// written back on close. The recent-files MRU lives here.
@@ -109,6 +109,11 @@ impl App {
         );
         editor.brush_size = prefs.editor.brush_size.max(1);
         editor.current_tool = tool_from_index(prefs.editor.selected_tool);
+        editor.symmetry = SymmetryAxes {
+            x: prefs.editor.symmetry[0],
+            y: prefs.editor.symmetry[1],
+            z: prefs.editor.symmetry[2],
+        };
         if !prefs.editor.palette.is_empty() {
             editor.palette = prefs
                 .editor
@@ -219,6 +224,11 @@ impl App {
                 .iter()
                 .map(|v| [v.r, v.g, v.b, v.a])
                 .collect(),
+            symmetry: [
+                self.editor.symmetry.x,
+                self.editor.symmetry.y,
+                self.editor.symmetry.z,
+            ],
         };
         if let Some(window) = &self.window {
             // `inner_size()` returns physical pixels; `WindowPrefs` is
@@ -369,6 +379,7 @@ impl App {
                     tool,
                     self.editor.brush_color,
                     self.editor.brush_size,
+                    self.editor.symmetry,
                 )
             })
         } else {
@@ -388,9 +399,12 @@ impl App {
         };
 
         // Use the brush tool's own preview semantics: Place uses
-        // adjacent_pos, Remove/Paint use the hovered cell.
+        // adjacent_pos, Remove/Paint use the hovered cell. Symmetry
+        // expands those positions with mirrors so the user sees every
+        // cell that'd be affected by the next click.
         let brush = BrushTool::new(tool);
-        let positions = brush.preview_positions(&hit, self.editor.brush_size);
+        let positions =
+            brush.preview_positions(&hit, self.editor.brush_size, self.editor.symmetry);
         if positions.is_empty() {
             if let Some(r) = &mut self.renderer {
                 r.clear_brush_preview();

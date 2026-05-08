@@ -2,9 +2,10 @@
 //!
 //! Provides different brush types and editing modes.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::{Command, CommandHistory, RaycastHit, VoxelChange};
+use super::{Command, CommandHistory, RaycastHit, SymmetryAxes, VoxelChange};
 use crate::core::{Voxel, World};
 
 /// Time window within which consecutive brush writes coalesce into a
@@ -64,6 +65,7 @@ pub struct ToolContext<'a> {
     pub history: &'a mut CommandHistory,
     pub brush_color: Voxel,
     pub brush_size: u8,
+    pub symmetry: SymmetryAxes,
 }
 
 /// Trait for tool implementations
@@ -71,8 +73,16 @@ pub trait EditorTool {
     /// Apply the tool at the given hit location
     fn apply(&self, ctx: &mut ToolContext, hit: &RaycastHit);
 
-    /// Get the preview positions (voxels that would be affected)
-    fn preview_positions(&self, hit: &RaycastHit, brush_size: u8) -> Vec<(i32, i32, i32)>;
+    /// Positions the brush hover overlay should highlight, including
+    /// any symmetry-mirrored copies (deduped). Caller passes its
+    /// current `symmetry` so a single source of truth drives both this
+    /// preview and the matching `apply` call.
+    fn preview_positions(
+        &self,
+        hit: &RaycastHit,
+        brush_size: u8,
+        symmetry: SymmetryAxes,
+    ) -> Vec<(i32, i32, i32)>;
 }
 
 /// Brush tool for place/remove/paint operations
@@ -112,85 +122,98 @@ impl BrushTool {
 
 impl EditorTool for BrushTool {
     fn apply(&self, ctx: &mut ToolContext, hit: &RaycastHit) {
-        match self.mode {
-            Tool::Place => {
-                // Place at adjacent position
-                let positions = Self::get_brush_positions(hit.adjacent_pos, ctx.brush_size);
-                let changes: Vec<VoxelChange> = positions
-                    .iter()
-                    .map(|&pos| VoxelChange {
-                        pos,
-                        old_voxel: ctx.world.get_voxel(pos.0, pos.1, pos.2),
-                        new_voxel: ctx.brush_color,
-                    })
-                    .filter(|c| c.old_voxel != c.new_voxel)
-                    .collect();
+        let center = match self.mode {
+            Tool::Place => hit.adjacent_pos,
+            Tool::Remove | Tool::Paint => hit.voxel_pos,
+            Tool::Eyedropper | Tool::Fill => return, // handled outside `apply`
+        };
 
-                if !changes.is_empty() {
-                    let cmd = Command::set_voxels(changes);
-                    ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
-                }
-            }
-            Tool::Remove => {
-                // Remove at hit position
-                let positions = Self::get_brush_positions(hit.voxel_pos, ctx.brush_size);
-                let changes: Vec<VoxelChange> = positions
-                    .iter()
-                    .filter_map(|&pos| {
-                        let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
-                        if !old.is_air() {
-                            Some(VoxelChange {
-                                pos,
-                                old_voxel: old,
-                                new_voxel: Voxel::AIR,
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        // Expand the brush sphere across symmetry mirrors. Spheres that
+        // overlap near a symmetry plane would double-count cells, so we
+        // dedup via HashSet — both for efficiency and so the resulting
+        // change set has each position exactly once.
+        let positions = Self::affected_positions(center, ctx.brush_size, ctx.symmetry);
 
-                if !changes.is_empty() {
-                    let cmd = Command::set_voxels(changes);
-                    ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
-                }
-            }
-            Tool::Paint => {
-                // Paint at hit position (change color of existing voxels)
-                let positions = Self::get_brush_positions(hit.voxel_pos, ctx.brush_size);
-                let changes: Vec<VoxelChange> = positions
-                    .iter()
-                    .filter_map(|&pos| {
-                        let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
-                        if !old.is_air() && old != ctx.brush_color {
-                            Some(VoxelChange {
-                                pos,
-                                old_voxel: old,
-                                new_voxel: ctx.brush_color,
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        let changes: Vec<VoxelChange> = match self.mode {
+            Tool::Place => positions
+                .into_iter()
+                .map(|pos| VoxelChange {
+                    pos,
+                    old_voxel: ctx.world.get_voxel(pos.0, pos.1, pos.2),
+                    new_voxel: ctx.brush_color,
+                })
+                .filter(|c| c.old_voxel != c.new_voxel)
+                .collect(),
+            Tool::Remove => positions
+                .into_iter()
+                .filter_map(|pos| {
+                    let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
+                    if old.is_air() {
+                        None
+                    } else {
+                        Some(VoxelChange { pos, old_voxel: old, new_voxel: Voxel::AIR })
+                    }
+                })
+                .collect(),
+            Tool::Paint => positions
+                .into_iter()
+                .filter_map(|pos| {
+                    let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
+                    if !old.is_air() && old != ctx.brush_color {
+                        Some(VoxelChange { pos, old_voxel: old, new_voxel: ctx.brush_color })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            _ => return,
+        };
 
-                if !changes.is_empty() {
-                    let cmd = Command::set_voxels(changes);
-                    ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
-                }
-            }
-            Tool::Eyedropper | Tool::Fill => {
-                // Eyedropper and Fill are handled separately
-            }
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
         }
     }
 
-    fn preview_positions(&self, hit: &RaycastHit, brush_size: u8) -> Vec<(i32, i32, i32)> {
+    fn preview_positions(
+        &self,
+        hit: &RaycastHit,
+        brush_size: u8,
+        symmetry: SymmetryAxes,
+    ) -> Vec<(i32, i32, i32)> {
         match self.mode {
-            Tool::Place => Self::get_brush_positions(hit.adjacent_pos, brush_size),
-            Tool::Remove | Tool::Paint => Self::get_brush_positions(hit.voxel_pos, brush_size),
-            Tool::Eyedropper | Tool::Fill => vec![hit.voxel_pos],
+            Tool::Place => Self::affected_positions(hit.adjacent_pos, brush_size, symmetry),
+            Tool::Remove | Tool::Paint => {
+                Self::affected_positions(hit.voxel_pos, brush_size, symmetry)
+            }
+            // Fill marks just the seed cell(s) — full flood region would
+            // be too expensive to compute every frame.
+            Tool::Fill => symmetry.mirror_positions(hit.voxel_pos),
+            Tool::Eyedropper => vec![hit.voxel_pos],
         }
+    }
+}
+
+impl BrushTool {
+    /// Brush sphere positions centered at `center` plus every mirror
+    /// implied by `symmetry`, deduped. Pulled out so both `apply` and
+    /// `preview_positions` go through the same expansion path.
+    fn affected_positions(
+        center: (i32, i32, i32),
+        brush_size: u8,
+        symmetry: SymmetryAxes,
+    ) -> Vec<(i32, i32, i32)> {
+        if !symmetry.any() {
+            // Common path: skip the HashSet allocation when no mirroring.
+            return Self::get_brush_positions(center, brush_size);
+        }
+        let mut out: HashSet<(i32, i32, i32)> = HashSet::new();
+        for c in symmetry.mirror_positions(center) {
+            for p in Self::get_brush_positions(c, brush_size) {
+                out.insert(p);
+            }
+        }
+        out.into_iter().collect()
     }
 }
 
@@ -204,23 +227,27 @@ pub fn eyedrop(world: &World, hit: &RaycastHit) -> Option<Voxel> {
     }
 }
 
-/// Flood fill starting from a position
-pub fn flood_fill(
-    world: &mut World,
-    history: &mut CommandHistory,
+/// Compute the changes a flood-fill would make from `start`, without
+/// applying them. Pulled out of `flood_fill` so callers that need to
+/// batch multiple fills into a single undo entry (notably the symmetric
+/// fill path in `app::input::apply_tool`) can collect changes from
+/// several seeds and submit one combined `Command`.
+///
+/// Returns an empty `Vec` if `start` already holds `new_voxel` or
+/// would produce no writes for any reason.
+pub fn compute_flood_fill_changes(
+    world: &World,
     start: (i32, i32, i32),
     new_voxel: Voxel,
     max_voxels: usize,
-) -> usize {
+) -> Vec<VoxelChange> {
     let target_voxel = world.get_voxel(start.0, start.1, start.2);
-
-    // Don't fill if same color or target is solid and new is air
     if target_voxel == new_voxel {
-        return 0;
+        return Vec::new();
     }
 
     let mut changes = Vec::new();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = HashSet::new();
     let mut stack = vec![start];
 
     while let Some(pos) = stack.pop() {
@@ -230,7 +257,6 @@ pub fn flood_fill(
         if changes.len() >= max_voxels {
             break;
         }
-
         // Spatial cap: skip cells outside the chebyshev radius around
         // `start`. Prevents runaway fills in unbounded worlds where
         // the connected region might extend far beyond what the user
@@ -254,7 +280,7 @@ pub fn flood_fill(
             new_voxel,
         });
 
-        // Add neighbors (6-connectivity)
+        // 6-connectivity expansion.
         let neighbors = [
             (pos.0 + 1, pos.1, pos.2),
             (pos.0 - 1, pos.1, pos.2),
@@ -263,7 +289,6 @@ pub fn flood_fill(
             (pos.0, pos.1, pos.2 + 1),
             (pos.0, pos.1, pos.2 - 1),
         ];
-
         for neighbor in neighbors {
             if !visited.contains(&neighbor) {
                 stack.push(neighbor);
@@ -271,12 +296,57 @@ pub fn flood_fill(
         }
     }
 
+    changes
+}
+
+/// Flood fill from a single seed: thin wrapper that computes the
+/// changes via `compute_flood_fill_changes` and pushes one `Command`
+/// onto `history`. Returns the number of voxels written.
+pub fn flood_fill(
+    world: &mut World,
+    history: &mut CommandHistory,
+    start: (i32, i32, i32),
+    new_voxel: Voxel,
+    max_voxels: usize,
+) -> usize {
+    let changes = compute_flood_fill_changes(world, start, new_voxel, max_voxels);
     let count = changes.len();
     if !changes.is_empty() {
         let cmd = Command::set_voxels(changes);
         history.execute(cmd, world);
     }
+    count
+}
 
+/// Flood fill from multiple seeds, batching all resulting writes into
+/// a single `Command` so the whole symmetric stroke is one undo entry.
+/// Each seed's flood is computed against the *original* world snapshot
+/// (not the cumulative one), so two seeds spreading toward the same
+/// region won't surprise each other; the per-position dedup keeps the
+/// first occurrence (any later mirror writing the same cell would
+/// produce the same `new_voxel` anyway, so the choice is benign).
+pub fn flood_fill_multi(
+    world: &mut World,
+    history: &mut CommandHistory,
+    starts: &[(i32, i32, i32)],
+    new_voxel: Voxel,
+    max_voxels: usize,
+) -> usize {
+    let mut combined: HashMap<(i32, i32, i32), VoxelChange> = HashMap::new();
+    for &start in starts {
+        // Skip air seeds defensively — Fill semantics don't extend air.
+        if world.get_voxel(start.0, start.1, start.2).is_air() {
+            continue;
+        }
+        for change in compute_flood_fill_changes(world, start, new_voxel, max_voxels) {
+            combined.entry(change.pos).or_insert(change);
+        }
+    }
+    let count = combined.len();
+    if count > 0 {
+        let cmd = Command::set_voxels(combined.into_values().collect());
+        history.execute(cmd, world);
+    }
     count
 }
 

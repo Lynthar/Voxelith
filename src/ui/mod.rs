@@ -439,6 +439,27 @@ impl Ui {
 
                 ui.separator();
 
+                // Symmetry
+                ui.heading("Symmetry");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut editor.symmetry.x, "X")
+                        .on_hover_text("Mirror brush across the x = 0 plane");
+                    ui.checkbox(&mut editor.symmetry.y, "Y")
+                        .on_hover_text("Mirror brush across the y = 0 plane");
+                    ui.checkbox(&mut editor.symmetry.z, "Z")
+                        .on_hover_text("Mirror brush across the z = 0 plane");
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Mirrors Place / Remove / Paint / Fill across enabled \
+                         planes through the world origin. Eyedropper is exempt.",
+                    )
+                    .small()
+                    .weak(),
+                );
+
+                ui.separator();
+
                 // Color
                 ui.heading("Color");
                 let mut color = [
@@ -924,6 +945,17 @@ impl Ui {
                 );
                 ui.separator();
                 ui.label(format!("Brush: {}px", editor.brush_size));
+                if editor.symmetry.any() {
+                    ui.separator();
+                    let mut axes = String::new();
+                    if editor.symmetry.x { axes.push('X'); }
+                    if editor.symmetry.y { axes.push('Y'); }
+                    if editor.symmetry.z { axes.push('Z'); }
+                    ui.label(
+                        egui::RichText::new(format!("Sym: {}", axes))
+                            .color(egui::Color32::LIGHT_YELLOW),
+                    );
+                }
                 ui.separator();
                 ui.label(format!(
                     "Color: RGB({}, {}, {})",

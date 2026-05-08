@@ -3,7 +3,8 @@
 use winit::keyboard::KeyCode;
 
 use voxelith::editor::{
-    eyedrop, flood_fill, BrushTool, EditorTool, Ray, Tool, ToolContext, VoxelRaycast,
+    eyedrop, flood_fill, flood_fill_multi, BrushTool, EditorTool, Ray, Tool, ToolContext,
+    VoxelRaycast,
 };
 
 use super::App;
@@ -55,6 +56,7 @@ impl App {
                     history: &mut self.editor.history,
                     brush_color: self.editor.brush_color,
                     brush_size: self.editor.brush_size,
+                    symmetry: self.editor.symmetry,
                 };
                 brush.apply(&mut ctx, &hit);
             }
@@ -75,7 +77,23 @@ impl App {
                     hit.voxel_pos.1,
                     hit.voxel_pos.2,
                 );
-                if !v.is_air() {
+                if v.is_air() {
+                    return;
+                }
+                let symmetry = self.editor.symmetry;
+                if symmetry.any() {
+                    // Combine all mirrored fills into one undo entry —
+                    // a single click should be a single undo, even at
+                    // 8-fold symmetry.
+                    let starts = symmetry.mirror_positions(hit.voxel_pos);
+                    flood_fill_multi(
+                        &mut self.world,
+                        &mut self.editor.history,
+                        &starts,
+                        self.editor.brush_color,
+                        10000,
+                    );
+                } else {
                     flood_fill(
                         &mut self.world,
                         &mut self.editor.history,
