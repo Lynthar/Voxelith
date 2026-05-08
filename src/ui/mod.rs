@@ -225,6 +225,10 @@ impl Ui {
                             self.state.request(UiAction::ExportObj);
                             ui.close_menu();
                         }
+                        if ui.button("glTF Binary (.glb)...").clicked() {
+                            self.state.request(UiAction::ExportGlb);
+                            ui.close_menu();
+                        }
                     });
                     ui.separator();
                     if ui.button("Exit").clicked() {
