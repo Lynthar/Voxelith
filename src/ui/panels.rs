@@ -19,6 +19,7 @@ pub enum UiAction {
     SaveAs,
     ImportVox,
     ExportVox,
+    ExportObj,
     Exit,
 
     // Edit operations

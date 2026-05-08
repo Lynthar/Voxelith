@@ -197,6 +197,44 @@ impl App {
         }
     }
 
+    /// Prompt for a path and export to OBJ. Walks every chunk, runs
+    /// the naive mesher to capture currently-visible geometry, and
+    /// writes a single .obj with vertex colors. Touches the recent-
+    /// files MRU on success and surfaces triangle counts in the status
+    /// bar so the user knows the export wasn't silently empty.
+    pub(super) fn export_obj(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Wavefront OBJ", &["obj"])
+            .set_title("Export as Wavefront OBJ");
+
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        match io::export_obj(&self.world, &path) {
+            Ok(stats) => {
+                self.touch_recent(&path);
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let msg = if stats.triangle_count == 0 {
+                    format!("Exported: {} (empty — no geometry)", filename)
+                } else {
+                    format!(
+                        "Exported: {} ({} tris, {} chunks)",
+                        filename, stats.triangle_count, stats.chunk_count
+                    )
+                };
+                self.ui.set_status(msg);
+            }
+            Err(e) => {
+                log::error!("Failed to export OBJ: {}", e);
+                self.ui.set_status(format!("Export failed: {}", e));
+            }
+        }
+    }
+
     /// Prompt for a path and export to VOX.
     pub(super) fn export_vox(&mut self) {
         let dialog = rfd::FileDialog::new()

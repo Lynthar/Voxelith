@@ -3,12 +3,14 @@
 //! Supported formats:
 //! - Native project format (.vxlt) - compressed binary with metadata
 //! - MagicaVoxel (.vox) - import/export
+//! - Wavefront OBJ (.obj) - export (geometry + vertex colors)
 //! - (Future) GLTF (.gltf, .glb) - export
-//! - (Future) OBJ (.obj) - export
 
+mod obj;
 mod project;
 mod vox;
 
+pub use obj::{export_obj, ObjError, ObjStats};
 pub use project::{
     EditorState, Project, ProjectError, ProjectMetadata,
     load_world, load_world_with_state, save_world, save_world_with_state,
@@ -27,6 +29,8 @@ pub enum FileFormat {
     Project,
     /// MagicaVoxel (.vox)
     Vox,
+    /// Wavefront OBJ (.obj) — export only
+    Obj,
 }
 
 impl FileFormat {
@@ -36,6 +40,7 @@ impl FileFormat {
         match ext.as_str() {
             "vxlt" | "voxelith" => Some(Self::Project),
             "vox" => Some(Self::Vox),
+            "obj" => Some(Self::Obj),
             _ => None,
         }
     }
@@ -45,6 +50,7 @@ impl FileFormat {
         match self {
             Self::Project => "vxlt",
             Self::Vox => "vox",
+            Self::Obj => "obj",
         }
     }
 
@@ -53,6 +59,7 @@ impl FileFormat {
         match self {
             Self::Project => "Voxelith Project",
             Self::Vox => "MagicaVoxel",
+            Self::Obj => "Wavefront OBJ",
         }
     }
 
@@ -61,6 +68,7 @@ impl FileFormat {
         match self {
             Self::Project => ("Voxelith Project", &["vxlt", "voxelith"]),
             Self::Vox => ("MagicaVoxel", &["vox"]),
+            Self::Obj => ("Wavefront OBJ", &["obj"]),
         }
     }
 }
@@ -72,5 +80,5 @@ pub fn import_formats() -> Vec<FileFormat> {
 
 /// All supported export formats
 pub fn export_formats() -> Vec<FileFormat> {
-    vec![FileFormat::Project, FileFormat::Vox]
+    vec![FileFormat::Project, FileFormat::Vox, FileFormat::Obj]
 }
