@@ -221,6 +221,10 @@ impl Ui {
                             self.state.request(UiAction::ExportVox);
                             ui.close_menu();
                         }
+                        if ui.button("Wavefront OBJ (.obj)...").clicked() {
+                            self.state.request(UiAction::ExportObj);
+                            ui.close_menu();
+                        }
                     });
                     ui.separator();
                     if ui.button("Exit").clicked() {
