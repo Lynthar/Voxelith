@@ -112,22 +112,38 @@ impl ApplicationHandler for App {
                     }
 
                     if button == winit::event::MouseButton::Left {
+                        let is_shape = self.editor.current_tool.is_shape();
                         if state == ElementState::Pressed {
-                            // Stroke begin: apply once, mark held, remember
-                            // position so CursorMoved can decide whether to
-                            // re-apply on motion.
+                            // Brush tools: apply on press, then drag-paint
+                            // re-applies on motion. Shape tools: latch the
+                            // anchor on press and commit the shape on
+                            // release — the in-between motion only
+                            // refreshes the translucent shape preview.
                             self.apply_tool();
                             self.left_button_held = true;
                             self.last_stroke_voxel =
                                 self.editor.hovered_voxel.map(|h| h.voxel_pos);
                             self.stroke_start_screen_pos = Some(self.cursor_pos);
                         } else {
-                            // Stroke end: finalize the merged command so
-                            // the next click starts a fresh undo entry.
+                            // Run the release action BEFORE clearing
+                            // stroke state. `commit_shape` reads
+                            // `stroke_start_screen_pos` (via
+                            // `shape_end_pos`) to recover the press-
+                            // to-release vertical drag delta — clearing
+                            // it first would zero the delta and the
+                            // committed shape would collapse to a flat
+                            // disk while the live preview (computed
+                            // pre-release) showed the correct 3D shape.
+                            if is_shape {
+                                self.commit_shape();
+                            } else {
+                                // Brush end: finalize the merged command
+                                // so the next click starts a fresh undo.
+                                self.editor.history.end_stroke();
+                            }
                             self.left_button_held = false;
                             self.last_stroke_voxel = None;
                             self.stroke_start_screen_pos = None;
-                            self.editor.history.end_stroke();
                         }
                     }
 

@@ -7,7 +7,7 @@ pub use panels::{UiAction, UiState};
 use crate::editor::{Editor, Tool};
 use crate::procgen::{
     CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind,
-    PerlinTerrain, PipelineGraph, WfcGenerator,
+    PerlinTerrain, PipelineGraph, WfcGenerator, WfcTileset,
 };
 use egui::Context;
 
@@ -173,7 +173,7 @@ impl Ui {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New Project").clicked() {
+                    if ui.button("New").clicked() {
                         self.state.request(UiAction::NewProject);
                         ui.close_menu();
                     }
@@ -339,6 +339,24 @@ impl Ui {
                         editor.current_tool = Tool::Fill;
                     }
 
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Shape tools — click-anchor / drag / release.
+                    if tool_button(ui, Tool::Line, editor.current_tool, "L", "Line (6)") {
+                        editor.current_tool = Tool::Line;
+                    }
+                    if tool_button(ui, Tool::Box, editor.current_tool, "▢", "Box (7)") {
+                        editor.current_tool = Tool::Box;
+                    }
+                    if tool_button(ui, Tool::Sphere, editor.current_tool, "○", "Sphere (8)") {
+                        editor.current_tool = Tool::Sphere;
+                    }
+                    if tool_button(ui, Tool::Cylinder, editor.current_tool, "⌭", "Cylinder (9)") {
+                        editor.current_tool = Tool::Cylinder;
+                    }
+
                     ui.add_space(16.0);
                     ui.separator();
                     ui.add_space(8.0);
@@ -407,9 +425,11 @@ impl Ui {
             .resizable(true)
             .collapsible(true)
             .show(ctx, |ui| {
-                // Tool selection
-                ui.heading("Tool");
-                egui::Grid::new("tool_grid")
+                // Tool selection — split into Brush (cell-by-cell) and
+                // Shape (click-anchor / drag / release) groups so the
+                // distinct interaction model is visually clear.
+                ui.heading("Brush");
+                egui::Grid::new("brush_tool_grid")
                     .num_columns(3)
                     .spacing([4.0, 4.0])
                     .show(ui, |ui| {
@@ -429,6 +449,47 @@ impl Ui {
                         }
                         if ui.selectable_label(editor.current_tool == Tool::Fill, "Fill").clicked() {
                             editor.current_tool = Tool::Fill;
+                        }
+                        ui.end_row();
+                    });
+
+                ui.add_space(4.0);
+                ui.heading("Shape");
+                egui::Grid::new("shape_tool_grid")
+                    .num_columns(3)
+                    .spacing([4.0, 4.0])
+                    .show(ui, |ui| {
+                        if ui
+                            .selectable_label(editor.current_tool == Tool::Line, "Line")
+                            .on_hover_text("Drag from anchor to end (3D Bresenham line)")
+                            .clicked()
+                        {
+                            editor.current_tool = Tool::Line;
+                        }
+                        if ui
+                            .selectable_label(editor.current_tool == Tool::Box, "Box")
+                            .on_hover_text("Drag corner to corner (filled AABB)")
+                            .clicked()
+                        {
+                            editor.current_tool = Tool::Box;
+                        }
+                        if ui
+                            .selectable_label(editor.current_tool == Tool::Sphere, "Sphere")
+                            .on_hover_text("Drag bbox; ellipsoid fits in it")
+                            .clicked()
+                        {
+                            editor.current_tool = Tool::Sphere;
+                        }
+                        ui.end_row();
+
+                        if ui
+                            .selectable_label(editor.current_tool == Tool::Cylinder, "Cylinder")
+                            .on_hover_text(
+                                "Drag bbox; cylinder axis runs along the longest dimension",
+                            )
+                            .clicked()
+                        {
+                            editor.current_tool = Tool::Cylinder;
                         }
                         ui.end_row();
                     });
@@ -818,6 +879,22 @@ impl Ui {
                         ui.label("Fill tool");
                         ui.end_row();
 
+                        ui.label("6");
+                        ui.label("Line shape");
+                        ui.end_row();
+
+                        ui.label("7");
+                        ui.label("Box shape");
+                        ui.end_row();
+
+                        ui.label("8");
+                        ui.label("Sphere shape");
+                        ui.end_row();
+
+                        ui.label("9");
+                        ui.label("Cylinder shape");
+                        ui.end_row();
+
                         ui.end_row();
                         ui.heading("Edit");
                         ui.end_row();
@@ -1185,6 +1262,16 @@ fn wfc_params_ui(ui: &mut egui::Ui, t: &mut WfcGenerator) {
                 ui.add(egui::DragValue::new(&mut t.origin.1).prefix("y:"));
                 ui.add(egui::DragValue::new(&mut t.origin.2).prefix("z:"));
             });
+            ui.end_row();
+
+            ui.label("Tileset");
+            egui::ComboBox::from_id_salt("wfc_tileset")
+                .selected_text(t.tileset.label())
+                .show_ui(ui, |ui| {
+                    for &option in WfcTileset::ALL {
+                        ui.selectable_value(&mut t.tileset, option, option.label());
+                    }
+                });
             ui.end_row();
         });
 
