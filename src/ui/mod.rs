@@ -225,8 +225,57 @@ impl Ui {
                             self.state.request(UiAction::ExportObj);
                             ui.close_menu();
                         }
+                        if ui
+                            .button("Wavefront OBJ — smoothed, light (.obj)...")
+                            .on_hover_text(
+                                "Marching Cubes over raw voxel density: \
+                                 voxel surfaces with rounded edges. \
+                                 Preserves thin features (tree branches, \
+                                 sparse detail).",
+                            )
+                            .clicked()
+                        {
+                            self.state.request(UiAction::ExportObjSmoothedLight);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button("Wavefront OBJ — smoothed, heavy (.obj)...")
+                            .on_hover_text(
+                                "Marching Cubes after a 3×3×3 density \
+                                 blur: clay-like blobs. Best for terrain \
+                                 / large solid masses; thin features may \
+                                 dissolve.",
+                            )
+                            .clicked()
+                        {
+                            self.state.request(UiAction::ExportObjSmoothedHeavy);
+                            ui.close_menu();
+                        }
                         if ui.button("glTF Binary (.glb)...").clicked() {
                             self.state.request(UiAction::ExportGlb);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button("glTF Binary — smoothed, light (.glb)...")
+                            .on_hover_text(
+                                "Marching Cubes over raw voxel density: \
+                                 voxel surfaces with rounded edges. \
+                                 Preserves thin features.",
+                            )
+                            .clicked()
+                        {
+                            self.state.request(UiAction::ExportGlbSmoothedLight);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button("glTF Binary — smoothed, heavy (.glb)...")
+                            .on_hover_text(
+                                "Marching Cubes after a 3×3×3 density \
+                                 blur: clay-like blobs. Best for terrain.",
+                            )
+                            .clicked()
+                        {
+                            self.state.request(UiAction::ExportGlbSmoothedHeavy);
                             ui.close_menu();
                         }
                     });

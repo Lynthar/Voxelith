@@ -101,7 +101,11 @@ impl App {
                 UiAction::ImportVox => self.import_vox(),
                 UiAction::ExportVox => self.export_vox(),
                 UiAction::ExportObj => self.export_obj(),
+                UiAction::ExportObjSmoothedLight => self.export_obj_smoothed(false),
+                UiAction::ExportObjSmoothedHeavy => self.export_obj_smoothed(true),
                 UiAction::ExportGlb => self.export_glb(),
+                UiAction::ExportGlbSmoothedLight => self.export_glb_smoothed(false),
+                UiAction::ExportGlbSmoothedHeavy => self.export_glb_smoothed(true),
                 UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
             }

@@ -11,8 +11,8 @@ mod obj;
 mod project;
 mod vox;
 
-pub use gltf::{export_glb, GlbError, GlbStats};
-pub use obj::{export_obj, ObjError, ObjStats};
+pub use gltf::{export_glb, export_glb_smoothed, GlbError, GlbStats};
+pub use obj::{export_obj, export_obj_smoothed, ObjError, ObjStats};
 pub use project::{
     EditorState, Project, ProjectError, ProjectMetadata,
     load_world, load_world_with_state, save_world, save_world_with_state,

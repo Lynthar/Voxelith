@@ -197,6 +197,93 @@ impl App {
         }
     }
 
+    /// OBJ export with Marching Cubes smoothing. `blur` selects the
+    /// strength: `false` keeps thin features by running MC on the
+    /// raw 0/1 density (rounded-cube look); `true` runs a 3×3×3 blur
+    /// first for clay-like terrain output but dissolves sparse
+    /// 1-cell features.
+    pub(super) fn export_obj_smoothed(&mut self, blur: bool) {
+        let title = if blur {
+            "Export Smoothed OBJ (heavy / clay)"
+        } else {
+            "Export Smoothed OBJ (light / preserve detail)"
+        };
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Wavefront OBJ", &["obj"])
+            .set_title(title);
+
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        match io::export_obj_smoothed(&self.world, &path, blur) {
+            Ok(stats) => {
+                self.touch_recent(&path);
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let mode = if blur { "heavy" } else { "light" };
+                let msg = if stats.triangle_count == 0 {
+                    format!("Exported: {} (empty — no geometry)", filename)
+                } else {
+                    format!(
+                        "Exported (smoothed, {}): {} ({} tris)",
+                        mode, filename, stats.triangle_count
+                    )
+                };
+                self.ui.set_status(msg);
+            }
+            Err(e) => {
+                log::error!("Failed to export smoothed OBJ: {}", e);
+                self.ui.set_status(format!("Export failed: {}", e));
+            }
+        }
+    }
+
+    /// GLB export with Marching Cubes smoothing. `blur` matches
+    /// `export_obj_smoothed`: light (no blur) preserves detail,
+    /// heavy (3×3×3 blur) is clay-like and best for terrain.
+    pub(super) fn export_glb_smoothed(&mut self, blur: bool) {
+        let title = if blur {
+            "Export Smoothed glTF Binary (heavy / clay)"
+        } else {
+            "Export Smoothed glTF Binary (light / preserve detail)"
+        };
+        let dialog = rfd::FileDialog::new()
+            .add_filter("glTF Binary", &["glb"])
+            .set_title(title);
+
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        match io::export_glb_smoothed(&self.world, &path, blur) {
+            Ok(stats) => {
+                self.touch_recent(&path);
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                let mode = if blur { "heavy" } else { "light" };
+                let msg = if stats.triangle_count == 0 {
+                    format!("Exported: {} (empty — no geometry)", filename)
+                } else {
+                    let kib = (stats.byte_size as f32) / 1024.0;
+                    format!(
+                        "Exported (smoothed, {}): {} ({} tris, {:.1} KiB)",
+                        mode, filename, stats.triangle_count, kib
+                    )
+                };
+                self.ui.set_status(msg);
+            }
+            Err(e) => {
+                log::error!("Failed to export smoothed GLB: {}", e);
+                self.ui.set_status(format!("Export failed: {}", e));
+            }
+        }
+    }
+
     /// Prompt for a path and export to glTF Binary (.glb). Same
     /// mesh-collection path as OBJ (greedy meshing across all
     /// chunks), but writes a single self-contained .glb that imports
