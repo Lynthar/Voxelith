@@ -29,12 +29,12 @@
 
 | Feature | Description |
 |---------|-------------|
-| 🎨 **Editing** | Place / Remove / Paint / Eyedropper / Fill, drag-paint with stroke-merged undo, brush hover preview |
-| 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC dungeon — pick one in the procgen panel or compose them in the visual node graph editor |
+| 🎨 **Editing** | 5 brush tools (Place / Remove / Paint / Eyedropper / Fill) + 4 shape tools (Line / Box / Sphere / Cylinder) with click-anchor / drag / release. Drag-paint with stroke-merged undo, brush hover preview, X / Y / Z symmetry mirroring |
+| 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC tilesets (Dungeon + City) — pick one in the procgen panel or compose with Translate / Filter / Mask / Combine nodes in the visual graph editor |
 | ✨ **Live preview** | Debounced translucent overlay shows generator output before you commit |
-| 📁 **File I/O** | Native `.vxlt` and MagicaVoxel `.vox` (lossy-color quantization is reported) |
+| 📁 **File I/O** | Native `.vxlt` (gzip + state), MagicaVoxel `.vox` (import + export with palette quantization), Wavefront `.obj` and glTF Binary `.glb` export. OBJ / GLB also have Marching Cubes "smoothed" variants (light: rounded cubes / heavy: clay-like) for organic exports |
 | 💾 **Persistent state** | Window layout, panel toggles, generator params, recent files all survive restarts |
-| 🖥️ **Viewport** | Orbit / pan / zoom camera, grid, axes, optional wireframe |
+| 🖥️ **Viewport** | Orbit / pan / zoom camera (with auto-resync on every orbit), grid, axes, optional wireframe |
 
 ## Quick Start
 
@@ -48,10 +48,13 @@ cargo run --release
 
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|
-| `1-5` | Select tool | `Ctrl+Z` | Undo |
-| `WASD` | Move camera | `Ctrl+Y` | Redo |
-| `Scroll` | Zoom | `Ctrl+S` | Save |
-| `Middle Mouse` | Orbit | `Ctrl+O` | Open |
+| `1-5` | Brush tools | `Ctrl+Z` | Undo |
+| `6-9` | Shape tools | `Ctrl+Y` | Redo |
+| `WASD` | Move camera | `Ctrl+S` | Save |
+| `Q / Space / E / Shift` | Camera up / down | `Ctrl+O` | Open |
+| `Middle Mouse` | Orbit | `Ctrl+N` | New |
+| `Right Mouse` | Pan | `Alt` (hold) | Eyedropper |
+| `Scroll` | Zoom | | |
 
 ## Tech Stack
 
