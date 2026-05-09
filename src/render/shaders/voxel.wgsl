@@ -67,11 +67,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply lighting + AO to color
     var result = in.color.rgb * lighting * ao_factor;
 
-    // Simple fog based on distance from camera
+    // Simple fog based on distance from camera. Tuned for ~256³
+    // scenes — fog stays out of the way at typical editing zoom
+    // and only kicks in when you really pull back. Editor's mouse-
+    // raycast (in app/input.rs) uses the same scale so anything
+    // visibly clear is also click-reachable.
     let camera_pos = camera.camera_pos.xyz;
     let dist = length(in.world_position - camera_pos);
-    let fog_start = 100.0;
-    let fog_end = 300.0;
+    let fog_start = 200.0;
+    let fog_end = 800.0;
     let fog_color = vec3<f32>(0.1, 0.1, 0.15);
     let fog_factor = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     result = mix(result, fog_color, fog_factor);
