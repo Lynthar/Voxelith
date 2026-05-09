@@ -33,8 +33,8 @@ use std::collections::HashSet;
 use voxelith::{
     core::{Voxel, World},
     editor::{
-        box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Editor, EditorTool,
-        RaycastHit, SymmetryAxes, Tool,
+        box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Clipboard, Editor,
+        EditorTool, RaycastHit, Selection, SymmetryAxes, Tool,
     },
     mesh::{patch_to_mesh, GreedyMesher, Mesher},
     prefs::{EditorPrefs, PanelVisibility, Prefs, WindowPrefs},
@@ -114,6 +114,31 @@ pub struct App {
     /// voxel set is committed in `commit_shape` on mouse-up.
     shape_drag_anchor: Option<(i32, i32, i32)>,
 
+    /// Set when the left button is held with the Select tool active
+    /// **outside** any existing selection — the anchor cell of a new
+    /// selection drag. Finalized into `editor.selection` by
+    /// `commit_selection` on mouse-up.
+    pub(super) selection_drag_anchor: Option<(i32, i32, i32)>,
+
+    /// Set when the left button is held with the Select tool active
+    /// **inside** an existing selection — the cell the press landed
+    /// on. While set, every cursor move computes `current - anchor`
+    /// as a translation delta, and `commit_selection` on mouse-up
+    /// runs `move_selection(delta)` so the selection's voxels
+    /// translate as one undoable Command.
+    pub(super) selection_move_anchor: Option<(i32, i32, i32)>,
+
+    /// Cache key for the selection wireframe so we don't rebuild the
+    /// 24-vertex line buffer on every `CursorMoved` when the AABB
+    /// hasn't changed.
+    last_selection_box: Option<Selection>,
+
+    /// Voxel data captured by the most recent Copy / Cut. Pasting
+    /// composites these onto the world (only the non-air voxels;
+    /// see `Clipboard` docs). Not persisted across sessions —
+    /// matches the convention in MagicaVoxel / Goxel / vengi.
+    pub(super) clipboard: Option<Clipboard>,
+
     /// Persisted user preferences. Loaded at startup, dehydrated and
     /// written back on close. The recent-files MRU lives here.
     prefs: Prefs,
@@ -189,6 +214,10 @@ impl App {
             preview: PreviewState::new(),
             last_brush_preview_key: None,
             shape_drag_anchor: None,
+            selection_drag_anchor: None,
+            selection_move_anchor: None,
+            last_selection_box: None,
+            clipboard: None,
             prefs,
         }
     }
@@ -342,6 +371,7 @@ fn tool_from_index(idx: u8) -> Tool {
         6 => Tool::Box,
         7 => Tool::Sphere,
         8 => Tool::Cylinder,
+        9 => Tool::Select,
         _ => Tool::Place,
     }
 }
@@ -357,6 +387,7 @@ fn tool_to_index(t: Tool) -> u8 {
         Tool::Box => 6,
         Tool::Sphere => 7,
         Tool::Cylinder => 8,
+        Tool::Select => 9,
     }
 }
 
@@ -460,8 +491,12 @@ impl App {
         let size = self.editor.brush_size;
         let anchor = self.shape_drag_anchor;
 
-        // Eyedropper is the only tool with no preview at all.
-        let show = !matches!(tool, Tool::Eyedropper);
+        // Eyedropper and Select skip the brush-style hover overlay
+        // entirely. Eyedropper would mislead (the brush color != the
+        // sampled color); Select draws its own AABB wireframe through
+        // a different slot (`update_selection_visualization`) so the
+        // brush sphere would be doubly-confusing.
+        let show = !matches!(tool, Tool::Eyedropper | Tool::Select);
 
         // Shape tools key on `adjacent_pos` (so the preview lands on
         // the ground-plane fallback when the world is empty); brush
@@ -526,6 +561,73 @@ impl App {
         let mesh = patch_to_mesh(&voxels, BRUSH_PREVIEW_ALPHA);
         if let Some(r) = &mut self.renderer {
             r.set_brush_preview_mesh(&mesh);
+        }
+    }
+
+    /// Refresh the box-selection wireframe overlay. Four states feed
+    /// the same renderer slot:
+    ///
+    /// 1. **New-selection drag** (`selection_drag_anchor` set):
+    ///    live AABB from anchor → current cell.
+    /// 2. **Move-selection drag** (`selection_move_anchor` set):
+    ///    existing AABB translated by `current - anchor`.
+    /// 3. **Idle with a committed selection**: static AABB.
+    /// 4. **Nothing**: clear the slot.
+    ///
+    /// Cached against `last_selection_box` so dragging the cursor
+    /// inside the same cell doesn't rebuild the vertex buffer every
+    /// `CursorMoved`.
+    pub(super) fn update_selection_visualization(&mut self) {
+        let preview = if let Some(anchor) = self.selection_drag_anchor {
+            // New-selection drag — anchor → current end cell.
+            self.editor
+                .hovered_voxel
+                .map(|hit| Selection::from_corners(anchor, Self::select_anchor_pos(&hit)))
+        } else if let Some(move_anchor) = self.selection_move_anchor {
+            // Move drag — existing selection translated by the cursor
+            // delta. Falls back to the un-translated selection if
+            // there's no current hover (cursor off-world); the user
+            // sees the box stay put rather than vanish.
+            match (self.editor.selection, self.editor.hovered_voxel) {
+                (Some(sel), Some(hit)) => {
+                    let cur = Self::select_anchor_pos(&hit);
+                    let delta = (
+                        cur.0 - move_anchor.0,
+                        cur.1 - move_anchor.1,
+                        cur.2 - move_anchor.2,
+                    );
+                    Some(sel.translated(delta))
+                }
+                _ => self.editor.selection,
+            }
+        } else {
+            self.editor.selection
+        };
+
+        if preview == self.last_selection_box {
+            return;
+        }
+        self.last_selection_box = preview;
+
+        if let Some(r) = &mut self.renderer {
+            match preview {
+                Some(sel) => r.set_selection_mesh(sel.min, sel.max),
+                None => r.clear_selection(),
+            }
+        }
+    }
+
+    /// Resolve the cell a Select-tool gesture should anchor at for a
+    /// given raycast hit. Real-voxel hits select the hit cell itself
+    /// (so clicking a tree trunk grabs the trunk); virtual-ground
+    /// hits use `adjacent_pos` (the cell *on* the plane, not the
+    /// `(x, -1, z)` ghost below it) — otherwise an empty-world drag
+    /// would silently put the selection one cell underground.
+    pub(super) fn select_anchor_pos(hit: &RaycastHit) -> (i32, i32, i32) {
+        if hit.virtual_ground {
+            hit.adjacent_pos
+        } else {
+            hit.voxel_pos
         }
     }
 

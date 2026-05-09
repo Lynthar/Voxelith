@@ -30,6 +30,7 @@
 | 功能 | 说明 |
 |------|------|
 | 🎨 **编辑** | 5 个笔刷工具(放置/删除/绘制/取色/填充)+ 4 个形状工具(直线/盒/球/圆柱),按下-拖拽-释放手势。支持拖动笔刷、笔画级 undo、实时悬停预览、X/Y/Z 对称镜像 |
+| ▭ **盒选** | `0` 切到 Select 工具。拖角创建 AABB,选区内拖动 = 整团搬运(单一可撤销 Command,正确处理重叠);方向键平移 X/Z(`Ctrl+↑↓` 走 Y 轴,`Shift` × 10)。`Ctrl+C/X/V`、`Ctrl+Shift+V` 粘到光标、`Del` 删除、`Ctrl+A` 选所有非空、`Esc`/`Ctrl+D` 取消。粘贴后自动选中目标 AABB,可链式 Paste→拖→Paste |
 | 🌱 **程序化生成** | Perlin 地形、L-System 树、WFC 多套 tileset(Dungeon + City)—— 单生成器面板,或在可视化节点图里用 Translate / Filter / Mask / Combine 组合 |
 | ✨ **实时预览** | 防抖半透明叠加,生成结果落世界前可见 |
 | 📁 **文件支持** | 原生 `.vxlt`(gzip+状态)、MagicaVoxel `.vox`(导入导出,带调色板量化提示)、Wavefront `.obj` 和 glTF Binary `.glb` 导出。OBJ/GLB 还有 Marching Cubes "smoothed" 变体(light: 圆角方块 / heavy: 黏土感)支持有机模型导出 |
@@ -50,11 +51,13 @@ cargo run --release
 |------|------|------|------|
 | `1-5` | 笔刷工具 | `Ctrl+Z` | 撤销 |
 | `6-9` | 形状工具 | `Ctrl+Y` | 重做 |
-| `WASD` | 移动相机 | `Ctrl+S` | 保存 |
-| `Q / Space / E / Shift` | 相机上 / 下 | `Ctrl+O` | 打开 |
-| `鼠标中键` | 轨道旋转 | `Ctrl+N` | 新建 |
-| `鼠标右键` | 平移 | `Alt`(按住) | 取色 |
-| `滚轮` | 缩放 | | |
+| `0` | 盒选工具 | `Ctrl+C/X/V` | 复制 / 剪切 / 粘贴 |
+| `WASD` | 移动相机 | `Ctrl+Shift+V` | 粘到光标 |
+| `Q / Space` / `E` | 相机上 / 下 | `Del` | 删除选区 |
+| `鼠标中键` | 轨道旋转 | `Ctrl+A` | 全选所有非空体素 |
+| `鼠标右键` | 平移 | `Esc / Ctrl+D` | 取消选区 |
+| `滚轮` | 缩放 | `方向键 / Ctrl+↑↓` | 微调选区 |
+| `Ctrl+S/O/N` | 文件操作 | `Alt`(按住) | 取色 |
 
 ## 技术栈
 

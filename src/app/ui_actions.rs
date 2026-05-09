@@ -29,6 +29,16 @@ impl App {
                         renderer.chunk_meshes.clear();
                     }
                 }
+                UiAction::CopySelection => self.copy_selection(),
+                UiAction::CutSelection => self.cut_selection(),
+                UiAction::PasteClipboard => self.paste_clipboard(false),
+                UiAction::DeleteSelection => self.delete_selection(),
+                UiAction::SelectAllSolid => self.select_all_solid(),
+                UiAction::Deselect => {
+                    self.selection_drag_anchor = None;
+                    self.selection_move_anchor = None;
+                    self.editor.selection = None;
+                }
                 UiAction::GenerateTestCube => {
                     self.world.clear();
                     self.editor.history.clear();

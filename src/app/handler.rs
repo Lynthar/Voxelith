@@ -112,13 +112,14 @@ impl ApplicationHandler for App {
                     }
 
                     if button == winit::event::MouseButton::Left {
-                        let is_shape = self.editor.current_tool.is_shape();
+                        let tool = self.editor.current_tool;
                         if state == ElementState::Pressed {
                             // Brush tools: apply on press, then drag-paint
-                            // re-applies on motion. Shape tools: latch the
-                            // anchor on press and commit the shape on
+                            // re-applies on motion. Shape tools / Select:
+                            // latch the anchor on press and commit on
                             // release — the in-between motion only
-                            // refreshes the translucent shape preview.
+                            // refreshes the translucent preview / AABB
+                            // wireframe.
                             self.apply_tool();
                             self.left_button_held = true;
                             self.last_stroke_voxel =
@@ -134,8 +135,10 @@ impl ApplicationHandler for App {
                             // committed shape would collapse to a flat
                             // disk while the live preview (computed
                             // pre-release) showed the correct 3D shape.
-                            if is_shape {
+                            if tool.is_shape() {
                                 self.commit_shape();
+                            } else if matches!(tool, Tool::Select) {
+                                self.commit_selection();
                             } else {
                                 // Brush end: finalize the merged command
                                 // so the next click starts a fresh undo.
@@ -227,6 +230,7 @@ impl ApplicationHandler for App {
 
                 self.tick_preview();
                 self.update_brush_preview();
+                self.update_selection_visualization();
                 self.rebuild_all_meshes();
                 self.render_frame(dt);
 

@@ -102,6 +102,10 @@ pub struct Ui {
     /// App syncs this whenever the prefs version changes (touch_recent
     /// + initial load).
     pub recent_files: Vec<std::path::PathBuf>,
+    /// Mirror of `App::clipboard.is_some()` so the Tools panel can
+    /// gray out the Paste button without `App::clipboard` leaking
+    /// across the UI layer boundary. App syncs it before each frame.
+    pub has_clipboard: bool,
 }
 
 impl Ui {
@@ -114,6 +118,7 @@ impl Ui {
             selected_node: None,
             dragging_wire: None,
             recent_files: Vec::new(),
+            has_clipboard: false,
         }
     }
 
@@ -297,6 +302,49 @@ impl Ui {
                         ui.close_menu();
                     }
                     ui.separator();
+                    let has_sel = editor.selection.is_some();
+                    let can_paste = self.has_clipboard;
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Cut  Ctrl+X"))
+                        .clicked()
+                    {
+                        self.state.request(UiAction::CutSelection);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Copy  Ctrl+C"))
+                        .clicked()
+                    {
+                        self.state.request(UiAction::CopySelection);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(can_paste, egui::Button::new("Paste  Ctrl+V"))
+                        .clicked()
+                    {
+                        self.state.request(UiAction::PasteClipboard);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Delete  Del"))
+                        .clicked()
+                    {
+                        self.state.request(UiAction::DeleteSelection);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Select All  Ctrl+A").clicked() {
+                        self.state.request(UiAction::SelectAllSolid);
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Deselect  Esc"))
+                        .clicked()
+                    {
+                        self.state.request(UiAction::Deselect);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Clear All").clicked() {
                         self.state.request(UiAction::ClearAll);
                         ui.close_menu();
@@ -408,6 +456,21 @@ impl Ui {
                     }
                     if tool_button(ui, Tool::Cylinder, editor.current_tool, "⌭", "Cylinder (9)") {
                         editor.current_tool = Tool::Cylinder;
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Selection — drag an AABB; Esc / Ctrl+D to clear.
+                    if tool_button(
+                        ui,
+                        Tool::Select,
+                        editor.current_tool,
+                        "▭",
+                        "Select (0)\nDrag to mark an AABB. Esc or Ctrl+D deselects.",
+                    ) {
+                        editor.current_tool = Tool::Select;
                     }
 
                     ui.add_space(16.0);
@@ -546,6 +609,84 @@ impl Ui {
                         }
                         ui.end_row();
                     });
+
+                ui.add_space(4.0);
+                ui.heading("Selection");
+                if ui
+                    .selectable_label(editor.current_tool == Tool::Select, "Box Select")
+                    .on_hover_text(
+                        "Drag corner-to-corner to mark an AABB region for batch \
+                         operations. Esc or Ctrl+D deselects.",
+                    )
+                    .clicked()
+                {
+                    editor.current_tool = Tool::Select;
+                }
+                if let Some(sel) = editor.selection {
+                    let (w, h, d) = sel.size();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Active: {}×{}×{} ({} cells)",
+                            w,
+                            h,
+                            d,
+                            sel.cell_count()
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+                let has_sel = editor.selection.is_some();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Copy"))
+                        .on_hover_text("Ctrl+C — copy non-air voxels into the clipboard")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::CopySelection);
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Cut"))
+                        .on_hover_text("Ctrl+X — copy then clear in one undoable Command")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::CutSelection);
+                    }
+                    let can_paste = self.has_clipboard;
+                    if ui
+                        .add_enabled(can_paste, egui::Button::new("Paste"))
+                        .on_hover_text(
+                            "Ctrl+V — paste at selection origin (or cursor cell if no \
+                             selection). Ctrl+Shift+V always pastes at cursor.",
+                        )
+                        .clicked()
+                    {
+                        self.state.request(UiAction::PasteClipboard);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Delete"))
+                        .on_hover_text("Del — clear non-air voxels inside the selection")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::DeleteSelection);
+                    }
+                    if ui
+                        .button("Select All")
+                        .on_hover_text("Ctrl+A — select the AABB of every non-air voxel")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::SelectAllSolid);
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Deselect"))
+                        .on_hover_text("Esc / Ctrl+D — clear the active selection")
+                        .clicked()
+                    {
+                        editor.selection = None;
+                    }
+                });
 
                 ui.separator();
 
@@ -948,6 +1089,10 @@ impl Ui {
                         ui.label("Cylinder shape");
                         ui.end_row();
 
+                        ui.label("0");
+                        ui.label("Box select tool");
+                        ui.end_row();
+
                         ui.end_row();
                         ui.heading("Edit");
                         ui.end_row();
@@ -965,6 +1110,50 @@ impl Ui {
                         ui.end_row();
 
                         ui.end_row();
+                        ui.heading("Selection");
+                        ui.end_row();
+
+                        ui.label("Drag in selection");
+                        ui.label("Move (single SetVoxels Command)");
+                        ui.end_row();
+
+                        ui.label("Drag outside");
+                        ui.label("Create new selection");
+                        ui.end_row();
+
+                        ui.label("Ctrl+C / Ctrl+X");
+                        ui.label("Copy / Cut non-air voxels");
+                        ui.end_row();
+
+                        ui.label("Ctrl+V");
+                        ui.label("Paste at selection origin (or cursor)");
+                        ui.end_row();
+
+                        ui.label("Ctrl+Shift+V");
+                        ui.label("Paste at cursor cell");
+                        ui.end_row();
+
+                        ui.label("Del");
+                        ui.label("Delete non-air voxels in selection");
+                        ui.end_row();
+
+                        ui.label("Ctrl+A");
+                        ui.label("Select all (AABB of all solid voxels)");
+                        ui.end_row();
+
+                        ui.label("Esc / Ctrl+D");
+                        ui.label("Deselect");
+                        ui.end_row();
+
+                        ui.label("Arrows");
+                        ui.label("Nudge selection on X / Z (Shift × 10)");
+                        ui.end_row();
+
+                        ui.label("Ctrl + Up/Down");
+                        ui.label("Nudge selection on Y axis");
+                        ui.end_row();
+
+                        ui.end_row();
                         ui.heading("Camera");
                         ui.end_row();
 
@@ -976,7 +1165,7 @@ impl Ui {
                         ui.label("Move up");
                         ui.end_row();
 
-                        ui.label("E / Shift");
+                        ui.label("E");
                         ui.label("Move down");
                         ui.end_row();
 
@@ -1101,6 +1290,20 @@ impl Ui {
                         "Cursor: ({}, {}, {})",
                         hit.voxel_pos.0, hit.voxel_pos.1, hit.voxel_pos.2
                     ));
+                }
+                if let Some(sel) = editor.selection {
+                    let (w, h, d) = sel.size();
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Sel: {}×{}×{} ({} cells)",
+                            w,
+                            h,
+                            d,
+                            sel.cell_count()
+                        ))
+                        .color(egui::Color32::from_rgb(255, 230, 60)),
+                    );
                 }
 
                 // Right-aligned viewport / preview info.

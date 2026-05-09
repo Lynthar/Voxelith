@@ -10,11 +10,13 @@ mod camera;
 mod pipeline;
 mod gpu_mesh;
 mod grid;
+mod selection;
 
 pub use camera::{Camera, CameraController, CameraUniform};
 pub use pipeline::RenderPipeline;
 pub use gpu_mesh::GpuMesh;
 pub use grid::{AxisMesh, GridMesh, LinePipeline, LineVertex};
+pub use selection::SelectionMesh;
 
 use crate::mesh::ChunkMesh;
 use crate::core::ChunkPos;
@@ -44,6 +46,11 @@ pub struct Renderer {
     /// Eyedropper/Fill: just the hovered cell). Updated as the
     /// cursor moves so the user can see where a click would land.
     pub brush_preview_mesh: Option<GpuMesh>,
+    /// Wireframe AABB for the active box selection (or the live
+    /// preview during a Select-tool drag). Drawn through the same
+    /// `LinePipeline` as the grid/axes — bright yellow, 12 edges.
+    /// `None` when no selection is active and no drag is in progress.
+    pub selection_mesh: Option<SelectionMesh>,
     /// Whether wireframe mode is supported
     pub wireframe_supported: bool,
 }
@@ -163,6 +170,7 @@ impl Renderer {
             axis_mesh,
             preview_mesh: None,
             brush_preview_mesh: None,
+            selection_mesh: None,
             wireframe_supported,
         })
     }
@@ -270,6 +278,34 @@ impl Renderer {
             render_pass.set_pipeline(&self.pipeline.transparent_pipeline);
             render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
             preview.draw(render_pass);
+        }
+    }
+
+    /// Replace the box-selection wireframe with one covering the
+    /// closed AABB `[min, max]` (in world cell coordinates). The
+    /// rendered mesh expands to `max + 1` so it envelops the outer
+    /// face of the corner cells.
+    pub fn set_selection_mesh(
+        &mut self,
+        min: (i32, i32, i32),
+        max: (i32, i32, i32),
+    ) {
+        self.selection_mesh = Some(SelectionMesh::new(&self.device, min, max));
+    }
+
+    /// Clear the box-selection wireframe.
+    pub fn clear_selection(&mut self) {
+        self.selection_mesh = None;
+    }
+
+    /// Draw the box-selection wireframe (if any) using the line
+    /// pipeline. Call after grid/axes so it draws on top.
+    pub fn draw_selection<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        if let Some(sel) = &self.selection_mesh {
+            render_pass.set_pipeline(&self.line_pipeline.render_pipeline);
+            render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, sel.vertex_buffer.slice(..));
+            render_pass.draw(0..sel.vertex_count, 0..1);
         }
     }
 

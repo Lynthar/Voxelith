@@ -36,6 +36,22 @@ pub enum UiAction {
     Redo,
     ClearAll,
 
+    // Selection / clipboard operations
+    CopySelection,
+    CutSelection,
+    /// Paste at the selection's origin (or hovered cell when no
+    /// selection exists). Ctrl+Shift+V's "always paste at cursor"
+    /// is keyboard-only — UI buttons go through this default path.
+    PasteClipboard,
+    DeleteSelection,
+    /// Set the selection to the AABB of every non-air voxel in
+    /// the world.
+    SelectAllSolid,
+    /// Clear the active selection (Esc / Ctrl+D / Edit menu →
+    /// Deselect). Mirror of `editor.selection = None` for menu-
+    /// bar contexts that don't get `&mut Editor`.
+    Deselect,
+
     // Generate operations
     GenerateTestCube,
     GenerateGround,

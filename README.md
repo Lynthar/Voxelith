@@ -30,6 +30,7 @@
 | Feature | Description |
 |---------|-------------|
 | 🎨 **Editing** | 5 brush tools (Place / Remove / Paint / Eyedropper / Fill) + 4 shape tools (Line / Box / Sphere / Cylinder) with click-anchor / drag / release. Drag-paint with stroke-merged undo, brush hover preview, X / Y / Z symmetry mirroring |
+| ▭ **Box select** | `0` to enter Select. Drag corners to mark an AABB; drag inside to move (single undoable Command, overlap-safe); arrow keys nudge X / Z, `Ctrl+↑↓` Y, `Shift` × 10. `Ctrl+C/X/V`, `Ctrl+Shift+V` paste-at-cursor, `Del`, `Ctrl+A` select-all-solid, `Esc` / `Ctrl+D` deselect. Paste auto-selects the destination AABB so Paste→drag→Paste chains |
 | 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC tilesets (Dungeon + City) — pick one in the procgen panel or compose with Translate / Filter / Mask / Combine nodes in the visual graph editor |
 | ✨ **Live preview** | Debounced translucent overlay shows generator output before you commit |
 | 📁 **File I/O** | Native `.vxlt` (gzip + state), MagicaVoxel `.vox` (import + export with palette quantization), Wavefront `.obj` and glTF Binary `.glb` export. OBJ / GLB also have Marching Cubes "smoothed" variants (light: rounded cubes / heavy: clay-like) for organic exports |
@@ -50,11 +51,13 @@ cargo run --release
 |-----|--------|-----|--------|
 | `1-5` | Brush tools | `Ctrl+Z` | Undo |
 | `6-9` | Shape tools | `Ctrl+Y` | Redo |
-| `WASD` | Move camera | `Ctrl+S` | Save |
-| `Q / Space / E / Shift` | Camera up / down | `Ctrl+O` | Open |
-| `Middle Mouse` | Orbit | `Ctrl+N` | New |
-| `Right Mouse` | Pan | `Alt` (hold) | Eyedropper |
-| `Scroll` | Zoom | | |
+| `0` | Box select | `Ctrl+C/X/V` | Copy / Cut / Paste |
+| `WASD` | Move camera | `Ctrl+Shift+V` | Paste at cursor |
+| `Q / Space` / `E` | Camera up / down | `Del` | Delete selection |
+| `Middle Mouse` | Orbit | `Ctrl+A` | Select all solid |
+| `Right Mouse` | Pan | `Esc / Ctrl+D` | Deselect |
+| `Scroll` | Zoom | `Arrows / Ctrl+↑↓` | Nudge selection |
+| `Ctrl+S/O/N` | File ops | `Alt` (hold) | Eyedropper |
 
 ## Tech Stack
 

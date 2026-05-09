@@ -6,13 +6,20 @@
 //! - Command pattern for undo/redo
 //! - History management
 
+mod clipboard;
 mod commands;
 mod raycast;
+mod selection;
 mod shapes;
 mod tools;
 
+pub use clipboard::{
+    build_clear_changes, build_move_changes, build_paste_changes,
+    copy_selection_to_clipboard, Clipboard,
+};
 pub use commands::{Command, CommandHistory, VoxelChange};
 pub use raycast::{Ray, RaycastHit, VoxelRaycast};
+pub use selection::Selection;
 pub use shapes::{box_voxels, cylinder_voxels, line_voxels, sphere_voxels};
 pub use tools::{
     compute_flood_fill_changes, eyedrop, flood_fill, flood_fill_multi, BrushTool, EditorTool,
@@ -99,6 +106,12 @@ pub struct Editor {
     /// Paint / Fill all honor it; Eyedropper doesn't write so it's
     /// exempt). Persists across sessions via prefs.
     pub symmetry: SymmetryAxes,
+    /// Active box selection, if any. Set by the `Select` tool's
+    /// click-drag-release lifecycle and cleared via Esc / Ctrl+D.
+    /// Selection state is *not* persisted across sessions and *not*
+    /// pushed onto the undo stack — it's an ephemeral marquee, like
+    /// in image editors.
+    pub selection: Option<Selection>,
 }
 
 impl Default for Editor {
@@ -118,6 +131,7 @@ impl Editor {
             palette: Self::default_palette(),
             tool_before_alt: None,
             symmetry: SymmetryAxes::default(),
+            selection: None,
         }
     }
 
