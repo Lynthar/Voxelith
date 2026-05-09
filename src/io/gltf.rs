@@ -41,7 +41,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::core::World;
-use crate::mesh::{GreedyMesher, Mesher, Vertex};
+use crate::mesh::{mesh_world_smoothed, GreedyMesher, Mesher, Vertex};
 
 #[derive(Debug, Error)]
 pub enum GlbError {
@@ -90,24 +90,60 @@ pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
         indices.extend(mesh.indices.iter().map(|&i| base + i));
     }
 
+    write_glb_from_buffers(&vertices, &indices, chunk_count, path)
+}
+
+/// Export the world as a glTF Binary with Marching-Cubes smoothing.
+/// Counterpart to `export_obj_smoothed`: walks the entire world as a
+/// single density field and runs MC to produce a continuous
+/// interpolated surface. Per-vertex colors and gradient-based
+/// normals carry through to the GLB unchanged from MC's output.
+/// `chunk_count` is reported as 1 (single combined mesh).
+///
+/// `blur` matches `export_obj_smoothed`: `false` keeps thin features
+/// at the cost of less organic curvature ("rounded cubes"); `true`
+/// applies a 3×3×3 blur for clay-like terrain output but dissolves
+/// sparse / 1-cell-wide detail.
+pub fn export_glb_smoothed(
+    world: &World,
+    path: &Path,
+    blur: bool,
+) -> Result<GlbStats, GlbError> {
+    let mesh = mesh_world_smoothed(world, blur);
+    let chunk_count = if mesh.is_empty() { 0 } else { 1 };
+    write_glb_from_buffers(&mesh.vertices, &mesh.indices, chunk_count, path)
+}
+
+/// Shared GLB writer. Takes a flat vertex / index pair (as if every
+/// chunk's mesh has been pre-flattened) plus a `chunk_count` for stats
+/// reporting. Both `export_glb` and `export_glb_smoothed` build their
+/// data here then converge on this single writer to keep the GLB
+/// structure (header / JSON chunk / BIN chunk / accessor layout)
+/// identical.
+fn write_glb_from_buffers(
+    vertices: &[Vertex],
+    indices: &[u32],
+    chunk_count: usize,
+    path: &Path,
+) -> Result<GlbStats, GlbError> {
     // Build the BIN payload (deinterleaved: positions, then normals,
     // then colors, then indices) and remember each section's offset.
     let mut bin = Vec::<u8>::new();
 
     let pos_offset = bin.len();
-    for v in &vertices {
+    for v in vertices {
         bin.extend_from_slice(bytemuck::bytes_of(&v.position));
     }
     let pos_len = bin.len() - pos_offset;
 
     let normal_offset = bin.len();
-    for v in &vertices {
+    for v in vertices {
         bin.extend_from_slice(bytemuck::bytes_of(&v.normal));
     }
     let normal_len = bin.len() - normal_offset;
 
     let color_offset = bin.len();
-    for v in &vertices {
+    for v in vertices {
         bin.extend_from_slice(bytemuck::bytes_of(&v.color));
     }
     let color_len = bin.len() - color_offset;
@@ -129,7 +165,7 @@ pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
     } else {
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
-        for v in &vertices {
+        for v in vertices {
             for axis in 0..3 {
                 if v.position[axis] < min[axis] {
                     min[axis] = v.position[axis];

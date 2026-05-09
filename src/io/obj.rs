@@ -24,7 +24,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::core::World;
-use crate::mesh::{GreedyMesher, Mesher};
+use crate::mesh::{mesh_world_smoothed, ChunkMesh, GreedyMesher, Mesher};
 
 #[derive(Debug, Error)]
 pub enum ObjError {
@@ -123,6 +123,89 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
 
     writer.flush()?;
     Ok(stats)
+}
+
+/// Export the world to OBJ with Marching-Cubes smoothing applied.
+/// Walks the entire world as a single density field and runs MC to
+/// produce a continuous interpolated surface with per-vertex colors
+/// blended from neighboring solid voxels.
+///
+/// `blur` controls the smoothing strength:
+/// - `false` (light): MC runs directly on the raw 0/1 density. Output
+///   is "rounded cubes" — voxel surfaces with rounded edges.
+///   Preserves thin features (1-cell-wide tree branches, sparse
+///   detail) at the cost of less organic curvature.
+/// - `true` (heavy / clay): a 3×3×3 box blur is applied to the
+///   density field before MC. Output is clay-like blobs — great for
+///   terrain and large solid masses, but thin / isolated features
+///   dilute below the 0.5 isolevel and disappear.
+///
+/// Output structure: single `o Voxelith` object, single `g smoothed`
+/// group. Uses the same `v x y z r g b` vertex-color extension as
+/// the regular OBJ exporter.
+pub fn export_obj_smoothed(
+    world: &World,
+    path: &Path,
+    blur: bool,
+) -> Result<ObjStats, ObjError> {
+    let mesh = mesh_world_smoothed(world, blur);
+    let stats = ObjStats {
+        vertex_count: mesh.vertex_count(),
+        triangle_count: mesh.triangle_count(),
+        chunk_count: if mesh.is_empty() { 0 } else { 1 },
+    };
+
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writeln!(writer, "# Voxelith OBJ export (Marching Cubes smoothed)")?;
+    writeln!(
+        writer,
+        "# vertices: {}, triangles: {}",
+        stats.vertex_count, stats.triangle_count
+    )?;
+    writeln!(writer, "o Voxelith")?;
+    writeln!(writer, "g smoothed")?;
+
+    write_obj_combined_mesh(&mesh, &mut writer)?;
+    writer.flush()?;
+    Ok(stats)
+}
+
+/// Write a single combined `ChunkMesh` to an OBJ writer in the same
+/// format `export_obj` uses per chunk: vertex positions with embedded
+/// colors, then per-vertex normals, then triangle face lines indexed
+/// 1-based as `f v//vn v//vn v//vn`.
+fn write_obj_combined_mesh<W: Write>(
+    mesh: &ChunkMesh,
+    writer: &mut W,
+) -> Result<(), ObjError> {
+    for v in &mesh.vertices {
+        writeln!(
+            writer,
+            "v {:.4} {:.4} {:.4} {:.3} {:.3} {:.3}",
+            v.position[0],
+            v.position[1],
+            v.position[2],
+            v.color[0],
+            v.color[1],
+            v.color[2],
+        )?;
+    }
+    for v in &mesh.vertices {
+        writeln!(
+            writer,
+            "vn {:.4} {:.4} {:.4}",
+            v.normal[0], v.normal[1], v.normal[2]
+        )?;
+    }
+    for tri in mesh.indices.chunks_exact(3) {
+        // OBJ is 1-indexed.
+        let a = tri[0] as usize + 1;
+        let b = tri[1] as usize + 1;
+        let c = tri[2] as usize + 1;
+        writeln!(writer, "f {a}//{a} {b}//{b} {c}//{c}")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

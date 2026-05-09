@@ -20,7 +20,15 @@ pub enum UiAction {
     ImportVox,
     ExportVox,
     ExportObj,
+    /// MC smoothed OBJ, no blur — preserves thin features
+    ExportObjSmoothedLight,
+    /// MC smoothed OBJ, 3×3×3 blur — clay-like, may dissolve thin features
+    ExportObjSmoothedHeavy,
     ExportGlb,
+    /// MC smoothed GLB, no blur
+    ExportGlbSmoothedLight,
+    /// MC smoothed GLB, 3×3×3 blur
+    ExportGlbSmoothedHeavy,
     Exit,
 
     // Edit operations
