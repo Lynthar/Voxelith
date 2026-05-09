@@ -53,7 +53,7 @@ cargo run --release
 | `6-9` | Shape tools | `Ctrl+Y` | Redo |
 | `0` | Box select | `Ctrl+C/X/V` | Copy / Cut / Paste |
 | `WASD` | Move camera | `Ctrl+Shift+V` | Paste at cursor |
-| `Q / Space` / `E` | Camera up / down | `Del` | Delete selection |
+| `Q` / `E` | Camera up / down | `Del` | Delete selection |
 | `Middle Mouse` | Orbit | `Ctrl+A` | Select all solid |
 | `Right Mouse` | Pan | `Esc / Ctrl+D` | Deselect |
 | `Scroll` | Zoom | `Arrows / Ctrl+↑↓` | Nudge selection |

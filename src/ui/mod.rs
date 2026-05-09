@@ -1161,7 +1161,7 @@ impl Ui {
                         ui.label("Move camera");
                         ui.end_row();
 
-                        ui.label("Q / Space");
+                        ui.label("Q");
                         ui.label("Move up");
                         ui.end_row();
 
