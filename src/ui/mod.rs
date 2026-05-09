@@ -1094,6 +1094,38 @@ impl Ui {
                         ui.end_row();
 
                         ui.end_row();
+                        ui.heading("Shape Tools (6–9)");
+                        ui.end_row();
+
+                        ui.label("First click + drag");
+                        ui.label("Lay footprint on the locked face plane");
+                        ui.end_row();
+
+                        ui.label("Release");
+                        ui.label("Enter height phase");
+                        ui.end_row();
+
+                        ui.label("Cursor up / down");
+                        ui.label("Set extruded height (~8 px / voxel)");
+                        ui.end_row();
+
+                        ui.label("Second click");
+                        ui.label("Commit the shape");
+                        ui.end_row();
+
+                        ui.label("Esc");
+                        ui.label("Cancel shape");
+                        ui.end_row();
+
+                        ui.end_row();
+                        ui.heading("Brush Drag-Paint");
+                        ui.end_row();
+
+                        ui.label("Press + drag");
+                        ui.label("Paint stays on the first hit's face plane");
+                        ui.end_row();
+
+                        ui.end_row();
                         ui.heading("Edit");
                         ui.end_row();
 

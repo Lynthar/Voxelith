@@ -94,25 +94,32 @@ pub struct App {
     /// Cache key for the brush hover overlay so we don't regenerate
     /// its mesh on every CursorMoved when nothing meaningful changed.
     /// `(active cell, tool, brush color, brush size, symmetry, shape
-    /// drag anchor)`. The "active cell" is `hover.voxel_pos` for
+    /// drag key)`. The "active cell" is `hover.voxel_pos` for
     /// brush tools and `hover.adjacent_pos` for shape tools (so
     /// shapes lock to the ground-plane fallback when the world is
-    /// empty). The trailing `Option` carries the shape's drag anchor
-    /// during an active shape drag — `None` for brush tools and
-    /// idle shape tools.
+    /// empty). The trailing `Option<ShapeDragKey>` carries the
+    /// shape drag's enough-to-detect-change snapshot during a
+    /// Footprint or Height phase.
     last_brush_preview_key: Option<(
         (i32, i32, i32),
         Tool,
         Voxel,
         u8,
         SymmetryAxes,
-        Option<(i32, i32, i32)>,
+        Option<ShapeDragKey>,
     )>,
 
-    /// Set when the left button is held with a shape tool active —
-    /// the anchor cell of the in-progress drag. The shape's full
-    /// voxel set is committed in `commit_shape` on mouse-up.
-    shape_drag_anchor: Option<(i32, i32, i32)>,
+    /// In-progress shape drag (Line / Box / Sphere / Cylinder).
+    /// Two-phase: Footprint while the left button is held (cursor
+    /// drags on a locked plane defining W×D), then Height after
+    /// release (cursor's vertical screen-space delta defines H along
+    /// the plane normal). A second click commits; Esc cancels.
+    /// Replaces the prior single-anchor `shape_drag_anchor` so the
+    /// 3D-bbox-from-two-raycast-points "flat shape" bug is gone:
+    /// W/D come from a 1:1 ray-vs-plane projection on the locked
+    /// face, H is its own dedicated screen-Y axis. See vengi
+    /// `ShapeBrush` for the same idea.
+    pub(super) shape_drag: Option<ShapeDrag>,
 
     /// Set when the left button is held with the Select tool active
     /// **outside** any existing selection — the anchor cell of a new
@@ -132,6 +139,16 @@ pub struct App {
     /// 24-vertex line buffer on every `CursorMoved` when the AABB
     /// hasn't changed.
     last_selection_box: Option<Selection>,
+
+    /// Locked face plane for drag-paint. Captured on the first
+    /// `apply_tool` of a brush stroke (Place / Remove / Paint) and
+    /// cleared on left-button release. While set,
+    /// `update_raycast` ray-casts against this plane instead of the
+    /// voxel world — without it, each new voxel written would shift
+    /// the next ray-vs-voxels hit toward the camera and the stroke
+    /// would "stack" along the view direction (vengi-style fix; see
+    /// `vengi/AABBBrush.cpp`).
+    pub(super) stroke_plane: Option<StrokePlane>,
 
     /// Voxel data captured by the most recent Copy / Cut. Pasting
     /// composites these onto the world (only the non-air voxels;
@@ -213,10 +230,11 @@ impl App {
             last_grid_spacing,
             preview: PreviewState::new(),
             last_brush_preview_key: None,
-            shape_drag_anchor: None,
+            shape_drag: None,
             selection_drag_anchor: None,
             selection_move_anchor: None,
             last_selection_box: None,
+            stroke_plane: None,
             clipboard: None,
             prefs,
         }
@@ -327,37 +345,171 @@ fn expand_with_symmetry(
     out.into_iter().collect()
 }
 
-/// Pixels of vertical cursor movement per voxel of shape height when
-/// the drag end is on the virtual ground plane. Tuned empirically:
-/// 8 px feels responsive at the default camera distance and zoom
-/// level. Shifting to a camera-distance-aware scale would let it
-/// auto-adjust to zoom; left as a constant for now since the simple
-/// version covers the most common workflow (build into empty world
-/// at the default zoom).
-const SHAPE_HEIGHT_PIXELS_PER_VOXEL: f32 = 8.0;
+/// Locked face plane captured at the start of a brush stroke. The
+/// stroke's drag-paint stays on this plane until release, so paint
+/// doesn't stack along the view direction as new voxels occlude the
+/// cursor's ray-vs-voxels hit.
+///
+/// The plane is axis-aligned (face normal is one of ±X / ±Y / ±Z),
+/// stored as `axis` (which axis is the normal) plus `sign` (which
+/// face). `plane_coord` is the world-space position of the plane
+/// along `axis`. `anchor_along_axis` is the locked value of
+/// `adjacent_pos[axis]` — every paint cell in the stroke pins this
+/// component, so Place fills along the face, Remove / Paint stay on
+/// the same layer.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StrokePlane {
+    pub axis: usize,
+    pub sign: i32,
+    pub plane_coord: f32,
+    pub anchor_along_axis: i32,
+}
 
-impl App {
-    /// Resolve a shape drag's end cell. For real-voxel hits this is
-    /// just `hit.adjacent_pos` (the 3D position the raycast already
-    /// computed). For virtual ground-plane hits — which are the
-    /// common case in an empty world — XZ comes from the plane hit
-    /// but Y is computed from the screen-vertical cursor delta from
-    /// the shape's press point. Without this override every shape
-    /// would be flat at the plane's Y because the cursor never moves
-    /// off the plane in 3D.
-    pub(super) fn shape_end_pos(
-        &self,
+/// Build a `StrokePlane` from a raycast hit. Returns `None` when
+/// the hit's normal isn't axis-aligned (e.g. starting inside a
+/// voxel produces `(0, 0, 0)`); the caller falls back to the
+/// existing per-cell ray-vs-voxels path.
+pub(super) fn build_stroke_plane(hit: &RaycastHit) -> Option<StrokePlane> {
+    let (nx, ny, nz) = hit.normal;
+    let (axis, sign) = if nx != 0 && ny == 0 && nz == 0 {
+        (0_usize, nx)
+    } else if nx == 0 && ny != 0 && nz == 0 {
+        (1_usize, ny)
+    } else if nx == 0 && ny == 0 && nz != 0 {
+        (2_usize, nz)
+    } else {
+        return None;
+    };
+    let ap = [hit.adjacent_pos.0, hit.adjacent_pos.1, hit.adjacent_pos.2];
+    // The plane is the face *between* `voxel_pos` and `adjacent_pos`.
+    // For sign > 0 the plane sits at `adjacent_pos[axis]` (its near
+    // face); for sign < 0 it sits at `adjacent_pos[axis] + 1`
+    // (its far face). Either way, every cell painted on this plane
+    // has `adjacent_pos[axis] == anchor_along_axis`.
+    let plane_coord = if sign > 0 {
+        ap[axis] as f32
+    } else {
+        (ap[axis] + 1) as f32
+    };
+    Some(StrokePlane {
+        axis,
+        sign,
+        plane_coord,
+        anchor_along_axis: ap[axis],
+    })
+}
+
+/// Pixels of vertical cursor movement per voxel of shape height in
+/// the second phase of a shape drag. Tuned empirically; 8 px feels
+/// responsive at the default camera distance.
+pub(super) const SHAPE_HEIGHT_PIXELS_PER_VOXEL: f32 = 8.0;
+
+/// In-progress shape drag (anchor + locked plane + current phase).
+/// First phase is Footprint (left button held, cursor on the locked
+/// plane defines W × D). Second phase is Height (left released, the
+/// cursor's vertical screen-space movement defines H along the
+/// plane normal until a second click commits).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ShapeDrag {
+    /// First-press hit's `adjacent_pos`. Sits on the locked plane,
+    /// so `anchor[plane.axis] == plane.anchor_along_axis`.
+    pub anchor: (i32, i32, i32),
+    /// Locked face plane — same `StrokePlane` shape brush stroke
+    /// uses. All cells in the footprint have their `axis` component
+    /// pinned to this plane.
+    pub plane: StrokePlane,
+    pub phase: ShapePhase,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ShapePhase {
+    /// Left button held; cursor's plane-locked hit is the
+    /// footprint's other corner.
+    Footprint,
+    /// Left button released; cursor's vertical screen movement
+    /// defines extruded height along the plane normal. A second
+    /// click commits.
+    Height {
+        /// Footprint's other corner at the moment the user
+        /// released the button (locked from then on — only height
+        /// changes during this phase).
+        end_on_plane: (i32, i32, i32),
+        /// Cursor's screen-Y at release. Height = `(release_y -
+        /// cursor_y) / SHAPE_HEIGHT_PIXELS_PER_VOXEL` (clamped to
+        /// ≥ 0 since the user can't extrude *into* the face).
+        release_screen_y: f32,
+    },
+}
+
+/// Reduced cache key for `update_brush_preview` — drops the f32
+/// `release_screen_y` (uses quantized integer height instead) so
+/// the key implements `Eq` for the existing tuple-comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShapeDragKey {
+    Footprint {
         anchor: (i32, i32, i32),
-        hit: &RaycastHit,
-    ) -> (i32, i32, i32) {
-        if !hit.virtual_ground {
-            return hit.adjacent_pos;
+        /// Current cursor's plane-locked cell. Without this in the
+        /// key, dragging the cursor across cells in Footprint phase
+        /// wouldn't invalidate the cache and the preview would
+        /// freeze on the first cell.
+        end_cell: (i32, i32, i32),
+    },
+    Height {
+        anchor: (i32, i32, i32),
+        end_on_plane: (i32, i32, i32),
+        height: i32,
+    },
+}
+
+impl ShapeDrag {
+    /// Build the cache key for `update_brush_preview`. `hovered_cell`
+    /// is the cursor's current plane-locked `adjacent_pos` (used in
+    /// Footprint phase only; `None` falls back to anchor).
+    pub fn cache_key(
+        &self,
+        cursor_y: f32,
+        hovered_cell: Option<(i32, i32, i32)>,
+    ) -> ShapeDragKey {
+        match self.phase {
+            ShapePhase::Footprint => ShapeDragKey::Footprint {
+                anchor: self.anchor,
+                end_cell: hovered_cell.unwrap_or(self.anchor),
+            },
+            ShapePhase::Height {
+                end_on_plane,
+                release_screen_y,
+            } => ShapeDragKey::Height {
+                anchor: self.anchor,
+                end_on_plane,
+                height: shape_height_from_cursor(release_screen_y, cursor_y),
+            },
         }
-        let press = self.stroke_start_screen_pos.unwrap_or(self.cursor_pos);
-        let dy_screen = press.1 - self.cursor_pos.1; // screen up → positive
-        let dy_voxels = (dy_screen / SHAPE_HEIGHT_PIXELS_PER_VOXEL).round() as i32;
-        (hit.adjacent_pos.0, anchor.1 + dy_voxels, hit.adjacent_pos.2)
     }
+
+    /// 3D end corner of the shape after extrusion. Only valid in
+    /// `Height` phase — `Footprint` callers should use the cursor's
+    /// plane-locked `hovered_voxel.adjacent_pos` directly.
+    pub fn extruded_end(&self, cursor_y: f32) -> Option<(i32, i32, i32)> {
+        let ShapePhase::Height {
+            end_on_plane,
+            release_screen_y,
+        } = self.phase
+        else {
+            return None;
+        };
+        let h = shape_height_from_cursor(release_screen_y, cursor_y);
+        let mut e = [end_on_plane.0, end_on_plane.1, end_on_plane.2];
+        e[self.plane.axis] += self.plane.sign * h;
+        Some((e[0], e[1], e[2]))
+    }
+}
+
+/// Pure helper: `(release_y - cursor_y) / SHAPE_HEIGHT_PIXELS_PER_VOXEL`,
+/// clamped at 0 (negative would extrude into the face the plane was
+/// captured on, which is never what the user means).
+pub(super) fn shape_height_from_cursor(release_y: f32, cursor_y: f32) -> i32 {
+    let dy = release_y - cursor_y; // screen up → positive
+    (dy / SHAPE_HEIGHT_PIXELS_PER_VOXEL).round().max(0.0) as i32
 }
 
 fn tool_from_index(idx: u8) -> Tool {
@@ -486,26 +638,48 @@ impl App {
     /// mislead).
     pub(super) fn update_brush_preview(&mut self) {
         let tool = self.editor.current_tool;
+
+        // If the user switched away from a shape tool while a drag
+        // was in progress (e.g. via the toolbar mid-Footprint),
+        // drop the drag so the next tool's preview isn't haunted by
+        // the orphaned state.
+        if !tool.is_shape() && self.shape_drag.is_some() {
+            self.shape_drag = None;
+        }
+
         let symmetry = self.editor.symmetry;
         let color = self.editor.brush_color;
         let size = self.editor.brush_size;
-        let anchor = self.shape_drag_anchor;
+        let cursor_y = self.cursor_pos.1;
 
         // Eyedropper and Select skip the brush-style hover overlay
-        // entirely. Eyedropper would mislead (the brush color != the
-        // sampled color); Select draws its own AABB wireframe through
-        // a different slot (`update_selection_visualization`) so the
-        // brush sphere would be doubly-confusing.
+        // entirely. Eyedropper would mislead (brush color != sampled
+        // color); Select draws its own AABB wireframe.
         let show = !matches!(tool, Tool::Eyedropper | Tool::Select);
 
-        // Shape tools key on `adjacent_pos` (so the preview lands on
-        // the ground-plane fallback when the world is empty); brush
-        // tools key on `voxel_pos` (their existing semantics).
+        // Cache key. `cell` is hover-derived for non-shape tools and
+        // for idle shapes; for an active ShapeDrag, `cell` is fixed
+        // to `(0,0,0)` since the drag's own `cache_key` already
+        // captures everything that affects the preview output
+        // (including the current hovered cell in Footprint phase).
+        let hovered_cell = self.editor.hovered_voxel.map(|h| h.adjacent_pos);
+        let drag_key = self.shape_drag.map(|d| d.cache_key(cursor_y, hovered_cell));
         let key = if show {
-            self.editor.hovered_voxel.map(|h| {
-                let cell = if tool.is_shape() { h.adjacent_pos } else { h.voxel_pos };
-                (cell, tool, color, size, symmetry, anchor)
-            })
+            if drag_key.is_some() {
+                Some((
+                    (0, 0, 0),
+                    tool,
+                    color,
+                    size,
+                    symmetry,
+                    drag_key,
+                ))
+            } else {
+                self.editor.hovered_voxel.map(|h| {
+                    let cell = if tool.is_shape() { h.adjacent_pos } else { h.voxel_pos };
+                    (cell, tool, color, size, symmetry, None)
+                })
+            }
         } else {
             None
         };
@@ -515,35 +689,63 @@ impl App {
         }
         self.last_brush_preview_key = key;
 
-        let Some(hit) = self.editor.hovered_voxel.filter(|_| show) else {
+        if !show {
             if let Some(r) = &mut self.renderer {
                 r.clear_brush_preview();
             }
             return;
-        };
+        }
 
-        let positions: Vec<(i32, i32, i32)> = if let Some(a) = anchor {
-            // Active shape drag: render the shape from anchor to the
-            // current end cell. `shape_end_pos` substitutes screen-Y
-            // for world-Y when the cursor is on the virtual ground
-            // plane — without that, empty-world drags are stuck flat.
-            let end = self.shape_end_pos(a, &hit);
+        // Compute the preview cell list. Active shape drag has its
+        // own dedicated branch (no dependency on `hovered_voxel` in
+        // Height phase, since the cursor lives in screen space); all
+        // other modes need a real hover.
+        let positions: Vec<(i32, i32, i32)> = if let Some(drag) = self.shape_drag {
+            let (anchor, end_3d) = match drag.phase {
+                ShapePhase::Footprint => {
+                    // Footprint: cursor's plane-locked hit is the
+                    // other corner. No hit (cursor off-world) → no
+                    // preview this frame.
+                    let Some(hit) = self.editor.hovered_voxel else {
+                        if let Some(r) = &mut self.renderer {
+                            r.clear_brush_preview();
+                        }
+                        return;
+                    };
+                    (drag.anchor, hit.adjacent_pos)
+                }
+                ShapePhase::Height { .. } => {
+                    // Height: extrude end_on_plane along the plane
+                    // normal by the cursor-Y delta.
+                    let end_3d = drag.extruded_end(cursor_y).expect("Height phase");
+                    (drag.anchor, end_3d)
+                }
+            };
             let raw = match tool {
-                Tool::Line => line_voxels(a, end),
-                Tool::Box => box_voxels(a, end),
-                Tool::Sphere => sphere_voxels(a, end),
-                Tool::Cylinder => cylinder_voxels(a, end),
+                Tool::Line => line_voxels(anchor, end_3d),
+                Tool::Box => box_voxels(anchor, end_3d),
+                Tool::Sphere => sphere_voxels(anchor, end_3d),
+                Tool::Cylinder => cylinder_voxels(anchor, end_3d),
                 _ => Vec::new(),
             };
             expand_with_symmetry(raw, symmetry)
         } else if tool.is_shape() {
-            // Shape tool, idle: hint a single cell at the anchor
-            // candidate. Symmetry still applies — useful so the user
-            // sees both anchor candidates before pressing.
+            // Idle shape tool: hint at the anchor cell. Need a hit.
+            let Some(hit) = self.editor.hovered_voxel else {
+                if let Some(r) = &mut self.renderer {
+                    r.clear_brush_preview();
+                }
+                return;
+            };
             expand_with_symmetry(vec![hit.adjacent_pos], symmetry)
         } else {
-            // Brush tool: fall through to BrushTool's own preview,
-            // which handles symmetry internally.
+            // Brush tool: BrushTool handles symmetry internally.
+            let Some(hit) = self.editor.hovered_voxel else {
+                if let Some(r) = &mut self.renderer {
+                    r.clear_brush_preview();
+                }
+                return;
+            };
             let brush = BrushTool::new(tool);
             brush.preview_positions(&hit, size, symmetry)
         };

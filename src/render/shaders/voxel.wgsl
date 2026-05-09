@@ -13,6 +13,10 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    // Per-vertex Ambient Occlusion in [0, 1]. 0 = fully occluded
+    // (sharp inside corner), 1 = no occlusion. Bilinearly
+    // interpolated across the quad by the rasterizer.
+    @location(3) ao: f32,
 };
 
 struct VertexOutput {
@@ -20,6 +24,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) ao: f32,
 };
 
 @vertex
@@ -29,6 +34,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.world_position = in.position;
     out.normal = in.normal;
     out.color = in.color;
+    out.ao = in.ao;
     return out;
 }
 
@@ -48,8 +54,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine lighting
     let lighting = ambient + diffuse;
 
-    // Apply lighting to color
-    var result = in.color.rgb * lighting;
+    // Ambient occlusion: maps the per-vertex AO factor to a
+    // brightness multiplier. ao=0 (fully occluded inside corner)
+    // → ambient_min; ao=1 (open space) → 1.0 (no darkening).
+    // ambient_min is set above 0.5 because the mesher already
+    // bakes face-direction shading into vertex color (NegY pressed
+    // to 0.6) — stacking aggressive AO on top would tip dark
+    // corners into near-black.
+    let ambient_min = 0.5;
+    let ao_factor = ambient_min + (1.0 - ambient_min) * in.ao;
+
+    // Apply lighting + AO to color
+    var result = in.color.rgb * lighting * ao_factor;
 
     // Simple fog based on distance from camera
     let camera_pos = camera.camera_pos.xyz;

@@ -36,6 +36,7 @@
 | 📁 **File I/O** | Native `.vxlt` (gzip + state), MagicaVoxel `.vox` (import + export with palette quantization), Wavefront `.obj` and glTF Binary `.glb` export. OBJ / GLB also have Marching Cubes "smoothed" variants (light: rounded cubes / heavy: clay-like) for organic exports |
 | 💾 **Persistent state** | Window layout, panel toggles, generator params, recent files all survive restarts |
 | 🖥️ **Viewport** | Orbit / pan / zoom camera (with auto-resync on every orbit), grid, axes, optional wireframe |
+| 💡 **Per-vertex AO** | Minecraft-style ambient occlusion baked into the greedy mesh — corners and crevices darken, open faces stay bright. Adds visible block-by-block depth without runtime cost |
 
 ## Quick Start
 

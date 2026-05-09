@@ -7,11 +7,11 @@ use std::collections::HashSet;
 use voxelith::editor::{
     box_voxels, build_clear_changes, build_move_changes, build_paste_changes,
     copy_selection_to_clipboard, cylinder_voxels, eyedrop, flood_fill, flood_fill_multi,
-    line_voxels, sphere_voxels, BrushTool, Command, EditorTool, Ray, Selection, Tool,
-    ToolContext, VoxelChange, VoxelRaycast,
+    line_voxels, sphere_voxels, BrushTool, Command, EditorTool, Ray, RaycastHit, Selection,
+    Tool, ToolContext, VoxelChange, VoxelRaycast,
 };
 
-use super::App;
+use super::{build_stroke_plane, App, ShapeDrag, ShapePhase, StrokePlane};
 
 impl App {
     /// Update the editor's hovered voxel from the current cursor position.
@@ -23,7 +23,28 @@ impl App {
     /// (Remove/Paint/Eyedropper/Fill) stay strict: virtual hits would
     /// give confusing previews and either no-op or, worse, explode
     /// (Fill flooding a 3D air region).
+    ///
+    /// **Plane-locked drag-paint takes precedence**: when
+    /// `stroke_plane` is set (Place / Remove / Paint left-pressed),
+    /// the cursor casts ray-vs-plane against the locked face. This
+    /// keeps the stroke on one face instead of stacking along the
+    /// view direction as new voxels occlude the ray-vs-voxels hit.
     pub(super) fn update_raycast(&mut self) {
+        if let Some(plane) = self.stroke_plane {
+            self.editor.hovered_voxel = self.cast_ray_to_plane(&plane);
+            return;
+        }
+        // Shape drag (Footprint or Height phase) also locks the
+        // plane — Footprint needs ray-vs-plane to compute the other
+        // corner; Height doesn't actually use `hovered_voxel`, but
+        // routing through plane lock means a stray cursor move
+        // doesn't briefly reveal a "real-world" hit and confuse the
+        // preview cache key.
+        if let Some(drag) = self.shape_drag {
+            self.editor.hovered_voxel = self.cast_ray_to_plane(&drag.plane);
+            return;
+        }
+
         let Some(renderer) = &self.renderer else {
             return;
         };
@@ -46,6 +67,52 @@ impl App {
         };
     }
 
+    /// Synthesize a `RaycastHit` from a ray-vs-plane intersection
+    /// against `plane`. Used during drag-paint to keep the stroke
+    /// on the locked face. Returns `None` if the ray is parallel to
+    /// the plane or the intersection lies behind the camera (cursor
+    /// pointing the wrong way).
+    fn cast_ray_to_plane(&self, plane: &StrokePlane) -> Option<RaycastHit> {
+        let renderer = self.renderer.as_ref()?;
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        let view_proj_inv = renderer.camera.view_projection_matrix().inverse();
+        let ray = Ray::from_screen(
+            self.cursor_pos,
+            (size.width as f32, size.height as f32),
+            view_proj_inv,
+        );
+
+        let dir_arr = ray.direction.to_array();
+        let origin_arr = ray.origin.to_array();
+        let dir_axis = dir_arr[plane.axis];
+        if dir_axis.abs() < 1e-6 {
+            return None;
+        }
+        let t = (plane.plane_coord - origin_arr[plane.axis]) / dir_axis;
+        if t <= 0.0 {
+            return None;
+        }
+        let p_arr = ray.at(t).to_array();
+        let other1 = (plane.axis + 1) % 3;
+        let other2 = (plane.axis + 2) % 3;
+        let mut ap = [0i32; 3];
+        ap[plane.axis] = plane.anchor_along_axis;
+        ap[other1] = p_arr[other1].floor() as i32;
+        ap[other2] = p_arr[other2].floor() as i32;
+        let mut vp = ap;
+        vp[plane.axis] -= plane.sign;
+        let mut normal = [0i32; 3];
+        normal[plane.axis] = plane.sign;
+        Some(RaycastHit {
+            voxel_pos: (vp[0], vp[1], vp[2]),
+            adjacent_pos: (ap[0], ap[1], ap[2]),
+            normal: (normal[0], normal[1], normal[2]),
+            distance: t,
+            virtual_ground: false,
+        })
+    }
+
     /// Apply the current tool at the hovered location.
     pub(super) fn apply_tool(&mut self) {
         let Some(hit) = self.editor.hovered_voxel else {
@@ -54,6 +121,15 @@ impl App {
 
         match self.editor.current_tool {
             Tool::Place | Tool::Remove | Tool::Paint => {
+                // Lock the stroke to the first hit's face plane.
+                // Subsequent CursorMoved events (drag-paint) will
+                // ray-vs-plane against this lock instead of the
+                // voxel world — so paint stays on one face instead
+                // of stacking toward the camera. The lock is
+                // released in `handler.rs` on left-up.
+                if self.stroke_plane.is_none() {
+                    self.stroke_plane = build_stroke_plane(&hit);
+                }
                 let brush = BrushTool::new(self.editor.current_tool);
                 let mut ctx = ToolContext {
                     world: &mut self.world,
@@ -108,10 +184,43 @@ impl App {
                 }
             }
             Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder => {
-                // Shape press: latch the anchor at the current cell.
-                // The shape's full voxel set is computed and committed
-                // in `commit_shape` on mouse-up.
-                self.shape_drag_anchor = Some(hit.adjacent_pos);
+                // Shape press is two-phase:
+                //   - First press (drag is None): enter Footprint —
+                //     lock the plane from the hit's face, anchor at
+                //     `adjacent_pos`. Subsequent CursorMoved walks
+                //     ray-vs-plane to find the W×D corner.
+                //   - Second press (drag is in Height phase): commit
+                //     the extruded shape and clear the drag.
+                //   - Press while still in Footprint shouldn't happen
+                //     (the second press only fires after release
+                //     transitions us to Height); ignore defensively.
+                match self.shape_drag {
+                    None => {
+                        if let Some(plane) = build_stroke_plane(&hit) {
+                            self.shape_drag = Some(ShapeDrag {
+                                anchor: hit.adjacent_pos,
+                                plane,
+                                phase: ShapePhase::Footprint,
+                            });
+                        } else {
+                            self.ui.set_status(
+                                "Shape tool: face normal not axis-aligned, ignoring click",
+                            );
+                        }
+                    }
+                    Some(ShapeDrag {
+                        phase: ShapePhase::Height { .. },
+                        ..
+                    }) => {
+                        self.commit_shape();
+                    }
+                    Some(ShapeDrag {
+                        phase: ShapePhase::Footprint,
+                        ..
+                    }) => {
+                        // Defensive: ignore.
+                    }
+                }
             }
             Tool::Select => {
                 // Selection press splits two ways:
@@ -198,6 +307,41 @@ impl App {
         self.editor.selection = Some(sel.translated(delta));
     }
 
+    /// Transition an in-progress shape drag from Footprint to
+    /// Height phase on left-button release. The cursor's current
+    /// plane-locked hit becomes the locked footprint corner, and
+    /// its screen-Y becomes the baseline that future cursor moves
+    /// measure against to set extruded height.
+    ///
+    /// If the cursor is off-world at release (no plane hit), cancel
+    /// the drag — committing a shape with no second corner would
+    /// produce a single-cell at the anchor, which is almost never
+    /// what the user wants.
+    pub(super) fn transition_shape_to_height(&mut self) {
+        let Some(drag) = self.shape_drag else {
+            return;
+        };
+        if !matches!(drag.phase, ShapePhase::Footprint) {
+            return;
+        }
+        let Some(hit) = self.editor.hovered_voxel else {
+            self.shape_drag = None;
+            self.ui
+                .set_status("Shape canceled (cursor off-plane on release)");
+            return;
+        };
+        self.shape_drag = Some(ShapeDrag {
+            anchor: drag.anchor,
+            plane: drag.plane,
+            phase: ShapePhase::Height {
+                end_on_plane: hit.adjacent_pos,
+                release_screen_y: self.cursor_pos.1,
+            },
+        });
+        self.ui
+            .set_status("Drag vertically to set height, click to commit (Esc cancels)");
+    }
+
     /// Step the selection by `delta` in response to an arrow-key
     /// press. No-op if there's no selection or a mouse drag is in
     /// progress (so the user can't fight a drag with the keyboard).
@@ -211,25 +355,38 @@ impl App {
         self.move_selection(delta);
     }
 
-    /// Commit the in-progress shape drag (called on left-button
-    /// release). Computes the shape's voxels from anchor → current
-    /// hover, applies symmetry, and submits one `Command` so the
-    /// shape is a single undo entry. No-op if there's no active drag
-    /// or the cursor isn't over a valid cell.
+    /// Commit the in-progress shape drag. Called on the second
+    /// click (after the user has dragged a footprint, released, and
+    /// then optionally moved the cursor vertically to set height).
+    /// Reads anchor + plane + phase from `shape_drag` and clears it.
+    /// No-op if there's no active drag.
+    ///
+    /// Footprint-only commit (no Height phase reached) treats height
+    /// as 0 — the shape is one cell thick along the plane normal,
+    /// matching the Goxel `planar=on` single-click flow.
     pub(super) fn commit_shape(&mut self) {
-        let Some(anchor) = self.shape_drag_anchor.take() else {
-            return;
-        };
-        let Some(hit) = self.editor.hovered_voxel else {
+        let Some(drag) = self.shape_drag.take() else {
             return;
         };
         let tool = self.editor.current_tool;
-        // `shape_end_pos` resolves the drag end: real-voxel hits use
-        // their 3D adjacent_pos, virtual-ground hits substitute the
-        // press-screen-vertical delta for Y so empty-world drags
-        // produce real 3D shapes (Sphere → ball not disk; Cylinder
-        // → tower not flat ring).
-        let end = self.shape_end_pos(anchor, &hit);
+        let cursor_y = self.cursor_pos.1;
+
+        let (anchor, end) = match drag.phase {
+            ShapePhase::Footprint => {
+                // Defensive — second-click commit should always come
+                // from Height phase. If we somehow get here from
+                // Footprint, fall back to the cursor's current
+                // plane-locked cell.
+                let Some(hit) = self.editor.hovered_voxel else {
+                    return;
+                };
+                (drag.anchor, hit.adjacent_pos)
+            }
+            ShapePhase::Height { .. } => {
+                let end = drag.extruded_end(cursor_y).expect("Height phase");
+                (drag.anchor, end)
+            }
+        };
 
         let raw = match tool {
             Tool::Line => line_voxels(anchor, end),
@@ -479,6 +636,10 @@ impl App {
             KeyCode::Escape => {
                 self.selection_drag_anchor = None;
                 self.editor.selection = None;
+                if self.shape_drag.is_some() {
+                    self.shape_drag = None;
+                    self.ui.set_status("Shape canceled");
+                }
             }
             KeyCode::KeyD if self.modifiers.control_key() => {
                 self.selection_drag_anchor = None;
