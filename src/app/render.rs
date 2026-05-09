@@ -18,6 +18,11 @@ impl App {
         egui_ctx.begin_pass(raw_input);
 
         let stats = self.calculate_stats();
+        // Mirror clipboard presence into Ui so Tools-panel buttons can
+        // gray out Paste when there's nothing to paste. Cheap (bool
+        // copy) and avoids leaking App::clipboard across the UI
+        // boundary.
+        self.ui.has_clipboard = self.clipboard.is_some();
         self.ui.show(&egui_ctx, &stats, &mut self.editor);
 
         let full_output = egui_ctx.end_pass();
@@ -126,6 +131,14 @@ impl App {
             for mesh in renderer.chunk_meshes.values() {
                 mesh.draw(&mut render_pass);
             }
+
+            // Box-selection wireframe (yellow AABB). Drawn after
+            // opaque chunks but before the translucent overlays so
+            // brush hover hints stay readable on top of the selection.
+            // Uses `LinePipeline` (depth-test on, depth-write off) —
+            // the wireframe is correctly occluded by intervening
+            // voxels, matching how Goxel renders its selection.
+            renderer.draw_selection(&mut render_pass);
 
             // Procgen preview overlay (alpha-blended). Drawn after
             // opaque chunks so the depth buffer already correctly

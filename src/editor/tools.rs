@@ -26,7 +26,9 @@ pub const MAX_FILL_DIST: i32 = 64;
 /// the hovered cell every click or drag-step. Shape tools (`Line`,
 /// `Box`, `Sphere`, `Cylinder`) use a click-anchor / drag-extent /
 /// release-commit gesture: the shape's full voxel set is committed
-/// in one `Command` on mouse-up.
+/// in one `Command` on mouse-up. The `Select` tool follows the same
+/// click-drag-release gesture as shapes, but commits a `Selection`
+/// AABB into `Editor::selection` instead of writing voxels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     /// Place voxels
@@ -50,6 +52,9 @@ pub enum Tool {
     /// Filled cylinder fitting in the drag bbox; axis = bbox's
     /// longest dimension, ellipse cross-section in the other two.
     Cylinder,
+    /// Box selection: drag corner-to-corner to mark an AABB region
+    /// for batch operations (copy / cut / paste / delete / move).
+    Select,
 }
 
 impl Tool {
@@ -65,6 +70,7 @@ impl Tool {
             Tool::Box => "Box",
             Tool::Sphere => "Sphere",
             Tool::Cylinder => "Cylinder",
+            Tool::Select => "Select",
         }
     }
 
@@ -80,11 +86,14 @@ impl Tool {
             Tool::Box => "7",
             Tool::Sphere => "8",
             Tool::Cylinder => "9",
+            Tool::Select => "0",
         }
     }
 
     /// Whether this tool uses click-anchor / drag-extent / release-
-    /// commit semantics. Shape tools do; brush tools don't.
+    /// commit semantics. Shape tools do; brush tools don't. `Select`
+    /// shares the gesture but goes through its own commit path
+    /// (writing into `Editor::selection`, not the world).
     pub fn is_shape(&self) -> bool {
         matches!(
             self,
@@ -92,13 +101,22 @@ impl Tool {
         )
     }
 
-    /// Whether this tool needs an anchor cell to operate. Place and
-    /// every shape tool need one (so they can build into an empty
-    /// world via the y=0 ground-plane raycast fallback); brush tools
-    /// that read the hovered cell (Remove/Paint/Eyedropper/Fill) need
-    /// a real solid voxel and shouldn't engage the fallback.
+    /// Whether this tool's gesture needs a release-time commit
+    /// (latch anchor on press, finalize on release). Used by the
+    /// event handler to dispatch between `commit_shape` /
+    /// `commit_selection` / brush stroke-end on mouse-up.
+    pub fn needs_release_commit(&self) -> bool {
+        self.is_shape() || matches!(self, Tool::Select)
+    }
+
+    /// Whether this tool needs an anchor cell to operate. Place,
+    /// every shape tool, and Select need one (so they can build /
+    /// pick into an empty world via the y=0 ground-plane raycast
+    /// fallback); brush tools that read the hovered cell
+    /// (Remove/Paint/Eyedropper/Fill) need a real solid voxel and
+    /// shouldn't engage the fallback.
     pub fn uses_ground_plane_fallback(&self) -> bool {
-        matches!(self, Tool::Place) || self.is_shape()
+        matches!(self, Tool::Place | Tool::Select) || self.is_shape()
     }
 }
 
@@ -169,14 +187,16 @@ impl EditorTool for BrushTool {
             Tool::Place => hit.adjacent_pos,
             Tool::Remove | Tool::Paint => hit.voxel_pos,
             // Eyedropper / Fill go through input.rs's tool dispatch,
-            // not BrushTool. Shape tools have their own click-anchor
-            // / drag / commit lifecycle and never call this path.
+            // not BrushTool. Shape tools and Select have their own
+            // click-anchor / drag / commit lifecycle and never call
+            // this path.
             Tool::Eyedropper
             | Tool::Fill
             | Tool::Line
             | Tool::Box
             | Tool::Sphere
-            | Tool::Cylinder => return,
+            | Tool::Cylinder
+            | Tool::Select => return,
         };
 
         // Expand the brush sphere across symmetry mirrors. Spheres that
@@ -241,12 +261,15 @@ impl EditorTool for BrushTool {
             // be too expensive to compute every frame.
             Tool::Fill => symmetry.mirror_positions(hit.voxel_pos),
             Tool::Eyedropper => vec![hit.voxel_pos],
-            // Shape tools have their own preview path in
-            // `App::update_brush_preview`; BrushTool's preview is
+            // Shape tools and Select have their own preview path
+            // (App::update_brush_preview for shapes; the dedicated
+            // selection-mesh slot for Select). BrushTool's preview is
             // bypassed for them. Empty here keeps the trait satisfied
             // without contributing stray cells if someone ever calls
-            // this for a shape tool by mistake.
-            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder => Vec::new(),
+            // this for a non-brush tool by mistake.
+            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder | Tool::Select => {
+                Vec::new()
+            }
         }
     }
 }

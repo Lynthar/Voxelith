@@ -5,9 +5,10 @@ use winit::keyboard::KeyCode;
 use std::collections::HashSet;
 
 use voxelith::editor::{
-    box_voxels, cylinder_voxels, eyedrop, flood_fill, flood_fill_multi, line_voxels,
-    sphere_voxels, BrushTool, Command, EditorTool, Ray, Tool, ToolContext, VoxelChange,
-    VoxelRaycast,
+    box_voxels, build_clear_changes, build_move_changes, build_paste_changes,
+    copy_selection_to_clipboard, cylinder_voxels, eyedrop, flood_fill, flood_fill_multi,
+    line_voxels, sphere_voxels, BrushTool, Command, EditorTool, Ray, Selection, Tool,
+    ToolContext, VoxelChange, VoxelRaycast,
 };
 
 use super::App;
@@ -112,7 +113,102 @@ impl App {
                 // in `commit_shape` on mouse-up.
                 self.shape_drag_anchor = Some(hit.adjacent_pos);
             }
+            Tool::Select => {
+                // Selection press splits two ways:
+                //   - Inside an existing selection → move mode.
+                //   - Anywhere else → start a fresh selection drag.
+                // `select_anchor_pos` picks the hit voxel for real
+                // hits and the plane cell for virtual-ground hits,
+                // so empty-world drags don't sink one cell
+                // underground.
+                let cell = Self::select_anchor_pos(&hit);
+                if let Some(sel) = self.editor.selection {
+                    if sel.contains(cell) {
+                        self.selection_move_anchor = Some(cell);
+                        return;
+                    }
+                }
+                self.selection_drag_anchor = Some(cell);
+            }
         }
+    }
+
+    /// Commit the in-progress selection drag on left-button release.
+    /// Two paths:
+    /// - **Move drag** (`selection_move_anchor` set): translate the
+    ///   selection's voxels by `current - anchor` as a single
+    ///   `SetVoxels` Command, then update the AABB.
+    /// - **New-selection drag** (`selection_drag_anchor` set): build
+    ///   a `Selection` from the press anchor → current hover cell
+    ///   and store it on the editor.
+    ///
+    /// Selection state itself is *not* pushed onto the undo history
+    /// — the marquee is ephemeral, like in image editors. Move's
+    /// voxel writes *are* undoable through their `SetVoxels`.
+    pub(super) fn commit_selection(&mut self) {
+        // Move mode wins if both anchors happen to be set (defensive
+        // — they shouldn't both be set at once).
+        if let Some(move_anchor) = self.selection_move_anchor.take() {
+            // Cancel any new-selection anchor that snuck in.
+            self.selection_drag_anchor = None;
+            if let (Some(_sel), Some(hit)) =
+                (self.editor.selection, self.editor.hovered_voxel)
+            {
+                let cur = Self::select_anchor_pos(&hit);
+                let delta = (
+                    cur.0 - move_anchor.0,
+                    cur.1 - move_anchor.1,
+                    cur.2 - move_anchor.2,
+                );
+                if delta != (0, 0, 0) {
+                    self.move_selection(delta);
+                }
+            }
+            return;
+        }
+
+        let Some(anchor) = self.selection_drag_anchor.take() else {
+            return;
+        };
+        let Some(hit) = self.editor.hovered_voxel else {
+            return;
+        };
+        let end = Self::select_anchor_pos(&hit);
+        self.editor.selection = Some(Selection::from_corners(anchor, end));
+    }
+
+    /// Translate the active selection's non-air voxels by `delta` as
+    /// a single `SetVoxels` Command (so one Ctrl+Z undoes the whole
+    /// move). Updates `editor.selection` to the translated AABB.
+    /// Overlap handling lives in `build_move_changes`.
+    pub(super) fn move_selection(&mut self, delta: (i32, i32, i32)) {
+        if delta == (0, 0, 0) {
+            return;
+        }
+        let Some(sel) = self.editor.selection else {
+            return;
+        };
+        let changes = build_move_changes(&self.world, sel, delta);
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            self.editor.history.execute(cmd, &mut self.world);
+        }
+        // Even an empty selection (all air) bumps its AABB so the
+        // user can keyboard-nudge a marquee around empty space.
+        self.editor.selection = Some(sel.translated(delta));
+    }
+
+    /// Step the selection by `delta` in response to an arrow-key
+    /// press. No-op if there's no selection or a mouse drag is in
+    /// progress (so the user can't fight a drag with the keyboard).
+    fn step_selection(&mut self, delta: (i32, i32, i32)) {
+        if self.selection_drag_anchor.is_some() || self.selection_move_anchor.is_some() {
+            return;
+        }
+        if self.editor.selection.is_none() {
+            return;
+        }
+        self.move_selection(delta);
     }
 
     /// Commit the in-progress shape drag (called on left-button
@@ -176,7 +272,170 @@ impl App {
         }
     }
 
-    /// Handle keyboard shortcuts (tools, undo/redo, file ops).
+    /// Capture the active selection's non-air voxels into the
+    /// clipboard. No-op (with a status hint) if there's no selection.
+    pub(super) fn copy_selection(&mut self) {
+        let Some(sel) = self.editor.selection else {
+            self.ui.set_status("No selection — drag with the Select tool first");
+            return;
+        };
+        let clipboard = copy_selection_to_clipboard(&self.world, sel);
+        let count = clipboard.voxel_count();
+        self.clipboard = Some(clipboard);
+        if count == 0 {
+            self.ui.set_status("Selection contains no solid voxels");
+        } else {
+            self.ui.set_status(format!("Copied {} voxels", count));
+        }
+    }
+
+    /// Cut: snapshot the selection into the clipboard, then clear
+    /// every non-air cell inside the selection in a **single**
+    /// `Command::set_voxels`. Critical that it's one Command — if we
+    /// pushed Copy + Delete separately, Ctrl+Z would only restore
+    /// half the cut, which is the textbook reverse-intuitive bug.
+    pub(super) fn cut_selection(&mut self) {
+        let Some(sel) = self.editor.selection else {
+            self.ui.set_status("No selection — drag with the Select tool first");
+            return;
+        };
+        let clipboard = copy_selection_to_clipboard(&self.world, sel);
+        let count = clipboard.voxel_count();
+        self.clipboard = Some(clipboard);
+
+        let changes = build_clear_changes(&self.world, sel);
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            self.editor.history.execute(cmd, &mut self.world);
+        }
+
+        if count == 0 {
+            self.ui.set_status("Selection had no solid voxels — clipboard empty");
+        } else {
+            self.ui.set_status(format!("Cut {} voxels", count));
+        }
+    }
+
+    /// Delete: clear non-air cells inside the selection without
+    /// touching the clipboard.
+    pub(super) fn delete_selection(&mut self) {
+        let Some(sel) = self.editor.selection else {
+            self.ui.set_status("No selection — drag with the Select tool first");
+            return;
+        };
+        let changes = build_clear_changes(&self.world, sel);
+        let count = changes.len();
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            self.editor.history.execute(cmd, &mut self.world);
+        }
+        if count == 0 {
+            self.ui.set_status("Selection had no solid voxels to delete");
+        } else {
+            self.ui.set_status(format!("Deleted {} voxels", count));
+        }
+    }
+
+    /// Paste the clipboard at:
+    /// - **selection origin** when `prefer_cursor == false` and a
+    ///   selection exists (Ctrl+V — typical "paste back where the
+    ///   selection is");
+    /// - **hovered cell** otherwise (Ctrl+V with no selection, OR
+    ///   Ctrl+Shift+V regardless of selection — vengi-style "paste
+    ///   to cursor").
+    ///
+    /// After pasting, auto-select the destination AABB so a
+    /// subsequent Paste (or M3 drag-move) chains naturally without
+    /// re-marqueeing — abuses vengi's `autoSelectSolidVoxels` trick.
+    pub(super) fn paste_clipboard(&mut self, prefer_cursor: bool) {
+        let Some(clipboard) = self.clipboard.as_ref() else {
+            self.ui.set_status("Clipboard is empty — Copy / Cut a selection first");
+            return;
+        };
+        if clipboard.is_empty() {
+            self.ui.set_status("Clipboard is empty");
+            return;
+        }
+
+        let cursor_dest = self
+            .editor
+            .hovered_voxel
+            .map(|h| Self::select_anchor_pos(&h));
+        let dest = if prefer_cursor {
+            cursor_dest
+        } else {
+            self.editor.selection.map(|s| s.min).or(cursor_dest)
+        };
+
+        let Some(dest) = dest else {
+            self.ui.set_status("Move the cursor over the world to paste");
+            return;
+        };
+
+        let changes = build_paste_changes(&self.world, clipboard, dest);
+        let count = changes.len();
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            self.editor.history.execute(cmd, &mut self.world);
+        }
+
+        // Auto-select the destination AABB so the user can chain
+        // Paste→drag→Paste without re-marqueeing.
+        let (sw, sh, sd) = clipboard.size;
+        self.editor.selection = Some(Selection {
+            min: dest,
+            max: (dest.0 + sw - 1, dest.1 + sh - 1, dest.2 + sd - 1),
+        });
+
+        if count == 0 {
+            self.ui.set_status("Pasted (no changes — destination already matched)");
+        } else {
+            self.ui.set_status(format!("Pasted {} voxels", count));
+        }
+    }
+
+    /// Set the selection to the AABB of every non-air voxel in the
+    /// world. Walks loaded chunks, skipping empty ones via
+    /// `Chunk::is_empty`. Surfaces "world is empty" if there's
+    /// nothing to select.
+    pub(super) fn select_all_solid(&mut self) {
+        let mut bounds: Option<((i32, i32, i32), (i32, i32, i32))> = None;
+        for (chunk_pos, chunk) in self.world.chunks() {
+            let chunk = chunk.read();
+            if chunk.is_empty() {
+                continue;
+            }
+            let (ox, oy, oz) = chunk_pos.world_origin();
+            for (lp, _) in chunk.iter_solid() {
+                let p = (
+                    ox + lp.x as i32,
+                    oy + lp.y as i32,
+                    oz + lp.z as i32,
+                );
+                bounds = Some(match bounds {
+                    Some((mn, mx)) => (
+                        (mn.0.min(p.0), mn.1.min(p.1), mn.2.min(p.2)),
+                        (mx.0.max(p.0), mx.1.max(p.1), mx.2.max(p.2)),
+                    ),
+                    None => (p, p),
+                });
+            }
+        }
+        match bounds {
+            Some((min, max)) => {
+                self.editor.selection = Some(Selection { min, max });
+                let (w, h, d) = (max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1);
+                self.ui.set_status(format!("Selected all: {}×{}×{}", w, h, d));
+            }
+            None => {
+                self.editor.selection = None;
+                self.ui.set_status("World is empty — nothing to select");
+            }
+        }
+    }
+
+    /// Handle keyboard shortcuts (tools, undo/redo, file ops,
+    /// selection).
     pub(super) fn handle_tool_shortcut(&mut self, key: KeyCode) {
         match key {
             KeyCode::Digit1 => self.editor.current_tool = Tool::Place,
@@ -188,6 +447,7 @@ impl App {
             KeyCode::Digit7 => self.editor.current_tool = Tool::Box,
             KeyCode::Digit8 => self.editor.current_tool = Tool::Sphere,
             KeyCode::Digit9 => self.editor.current_tool = Tool::Cylinder,
+            KeyCode::Digit0 => self.editor.current_tool = Tool::Select,
             KeyCode::KeyZ if self.modifiers.control_key() => {
                 if self.modifiers.shift_key() {
                     self.editor.redo(&mut self.world);
@@ -210,6 +470,73 @@ impl App {
             }
             KeyCode::KeyN if self.modifiers.control_key() => {
                 self.new_project();
+            }
+            // Esc deselects (Photoshop / image-editor convention).
+            // Ctrl+D matches the same convention for users coming
+            // from PS / vengi (`Ctrl+D` = select none). Both also
+            // abort an in-progress Select drag so the user can bail
+            // mid-gesture without committing a stray AABB.
+            KeyCode::Escape => {
+                self.selection_drag_anchor = None;
+                self.editor.selection = None;
+            }
+            KeyCode::KeyD if self.modifiers.control_key() => {
+                self.selection_drag_anchor = None;
+                self.editor.selection = None;
+            }
+            // Selection clipboard ops. Ctrl+Shift+V forces "paste
+            // at cursor" (vengi-style two-channel paste); plain
+            // Ctrl+V uses the selection's origin if one exists.
+            KeyCode::KeyC if self.modifiers.control_key() => {
+                self.copy_selection();
+            }
+            KeyCode::KeyX if self.modifiers.control_key() => {
+                self.cut_selection();
+            }
+            KeyCode::KeyV if self.modifiers.control_key() => {
+                let prefer_cursor = self.modifiers.shift_key();
+                self.paste_clipboard(prefer_cursor);
+            }
+            KeyCode::Delete => {
+                self.delete_selection();
+            }
+            // Ctrl+A = select-all-solid: AABB of every non-air
+            // voxel in the world. Standard image-editor convention.
+            KeyCode::KeyA if self.modifiers.control_key() => {
+                self.select_all_solid();
+            }
+            // Arrow-key selection nudge. ←→ = X axis, ↑↓ = Z axis
+            // (matches "screen up = away from camera" for the
+            // default camera). Ctrl+↑↓ promotes to the Y axis since
+            // four arrows can't cover six 3D directions; Shift
+            // multiplies the step by 10 for fast travel.
+            //
+            // Skipped (via `step_selection` guards) when there's no
+            // selection or a mouse drag is mid-flight, so the user
+            // can't fight a drag with the keyboard.
+            KeyCode::ArrowLeft => {
+                let step = if self.modifiers.shift_key() { 10 } else { 1 };
+                self.step_selection((-step, 0, 0));
+            }
+            KeyCode::ArrowRight => {
+                let step = if self.modifiers.shift_key() { 10 } else { 1 };
+                self.step_selection((step, 0, 0));
+            }
+            KeyCode::ArrowUp => {
+                let step = if self.modifiers.shift_key() { 10 } else { 1 };
+                if self.modifiers.control_key() {
+                    self.step_selection((0, step, 0));
+                } else {
+                    self.step_selection((0, 0, -step));
+                }
+            }
+            KeyCode::ArrowDown => {
+                let step = if self.modifiers.shift_key() { 10 } else { 1 };
+                if self.modifiers.control_key() {
+                    self.step_selection((0, -step, 0));
+                } else {
+                    self.step_selection((0, 0, step));
+                }
             }
             _ => {}
         }

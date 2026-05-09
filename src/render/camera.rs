@@ -281,7 +281,7 @@ impl CameraController {
         if self.pressed_keys.contains(&KeyCode::KeyQ) || self.pressed_keys.contains(&KeyCode::Space) {
             movement += Vec3::Y;
         }
-        if self.pressed_keys.contains(&KeyCode::KeyE) || self.pressed_keys.contains(&KeyCode::ShiftLeft) {
+        if self.pressed_keys.contains(&KeyCode::KeyE) {
             movement -= Vec3::Y;
         }
 
