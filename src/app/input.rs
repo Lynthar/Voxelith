@@ -13,6 +13,15 @@ use voxelith::editor::{
 
 use super::{build_stroke_plane, App, ShapeDrag, ShapePhase, StrokePlane};
 
+/// Maximum distance (in voxel units) the editor's mouse-hover ray
+/// will travel through the world looking for a hit. Caps DDA work
+/// per cursor move; also implicitly limits how far the user can
+/// place / remove voxels from. Sized to comfortably exceed the
+/// camera's typical zoom-out distance for 256³-ish scenes — fog
+/// (in `voxel.wgsl`) goes to 800, so 500 lets you still click
+/// anything you can clearly see.
+const RAYCAST_MAX_DIST: f32 = 500.0;
+
 impl App {
     /// Update the editor's hovered voxel from the current cursor position.
     ///
@@ -61,9 +70,9 @@ impl App {
         );
 
         self.editor.hovered_voxel = if self.editor.current_tool.uses_ground_plane_fallback() {
-            VoxelRaycast::cast_with_ground_plane(&ray, &self.world, 100.0, 0)
+            VoxelRaycast::cast_with_ground_plane(&ray, &self.world, RAYCAST_MAX_DIST, 0)
         } else {
-            VoxelRaycast::cast(&ray, &self.world, 100.0)
+            VoxelRaycast::cast(&ray, &self.world, RAYCAST_MAX_DIST)
         };
     }
 

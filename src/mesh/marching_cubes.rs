@@ -200,6 +200,22 @@ fn march_one_cube(
 
     // Emit triangles. TRI_TABLE rows are -1-terminated lists of
     // edge indices, three at a time.
+    //
+    // **Winding correction**: the standard Lorensen-Cline TRI_TABLE
+    // produces *mostly* CCW-from-outside triangles, but a few corner-
+    // cell configurations come out with reversed winding. Without
+    // correction, exported smoothed OBJ / GLB meshes import into
+    // Blender / Unity with sporadic "inside-out" facets visible as
+    // dark holes when back-face culling is on.
+    //
+    // Fix at runtime: for each emitted triangle compute the face
+    // cross product `(v1-v0) × (v2-v0)` and dot it against the v0
+    // vertex normal (which is already outward-facing — see
+    // `density_gradient` line ~275). If the dot is negative the
+    // triangle was wound CW from outside; we swap v1 and v2 to flip
+    // the winding to CCW. Triangles where the dot is exactly zero
+    // (or near-zero) are face-edge cases that look the same either
+    // way, so we leave them as-is.
     let row = TRI_TABLE[cube_index];
     let mut i = 0;
     while i < row.len() && row[i] != -1 {
@@ -210,10 +226,37 @@ fn march_one_cube(
         let v1 = Vertex::new(edge_vertices[e1].0 .0, edge_vertices[e1].0 .1, edge_vertices[e1].0 .2);
         let v2 = Vertex::new(edge_vertices[e2].0 .0, edge_vertices[e2].0 .1, edge_vertices[e2].0 .2);
 
+        // Cross product (v1-v0) × (v2-v0).
+        let e_a = [
+            v1.position[0] - v0.position[0],
+            v1.position[1] - v0.position[1],
+            v1.position[2] - v0.position[2],
+        ];
+        let e_b = [
+            v2.position[0] - v0.position[0],
+            v2.position[1] - v0.position[1],
+            v2.position[2] - v0.position[2],
+        ];
+        let cross = [
+            e_a[1] * e_b[2] - e_a[2] * e_b[1],
+            e_a[2] * e_b[0] - e_a[0] * e_b[2],
+            e_a[0] * e_b[1] - e_a[1] * e_b[0],
+        ];
+        let dot = cross[0] * v0.normal[0]
+            + cross[1] * v0.normal[1]
+            + cross[2] * v0.normal[2];
+
         let base = mesh.vertices.len() as u32;
         mesh.vertices.push(v0);
-        mesh.vertices.push(v1);
-        mesh.vertices.push(v2);
+        if dot < 0.0 {
+            // Swap v1 / v2 so cross product comes out parallel to
+            // the outward normal (CCW from outside).
+            mesh.vertices.push(v2);
+            mesh.vertices.push(v1);
+        } else {
+            mesh.vertices.push(v1);
+            mesh.vertices.push(v2);
+        }
         mesh.indices.push(base);
         mesh.indices.push(base + 1);
         mesh.indices.push(base + 2);
@@ -558,8 +601,17 @@ mod tests {
         let mesh = mesh_world_smoothed(&world, false);
         assert!(!mesh.is_empty(), "expected MC mesh for isolated voxel");
 
-        // Voxel center in world coords: (5.5, 5.5, 5.5).
-        let center = [5.5_f32, 5.5, 5.5];
+        // Ground truth for "outward" is each triangle's vertex
+        // normals (computed from the density gradient, already
+        // outward-facing per `density_gradient` impl). The voxel-
+        // center proxy I used in earlier iterations was wrong:
+        // for triangles near a corner, the voxel-outward direction
+        // and the surface-outward normal differ by significant
+        // angles (one is along the diagonal, the other along an
+        // edge of the cell), so a triangle can be correctly wound
+        // for the surface yet seem "inward" relative to the cell
+        // center. The cross-vs-vertex-normal test catches the
+        // actual winding bug without false positives.
         let mut outward_count = 0;
         let mut inward_count = 0;
         let mut zero_count = 0;
@@ -571,10 +623,21 @@ mod tests {
             let v0 = mesh.vertices[i0].position;
             let v1 = mesh.vertices[i1].position;
             let v2 = mesh.vertices[i2].position;
-            let centroid = [
-                (v0[0] + v1[0] + v2[0]) / 3.0,
-                (v0[1] + v1[1] + v2[1]) / 3.0,
-                (v0[2] + v1[2] + v2[2]) / 3.0,
+            // Average vertex normal — represents the surface's
+            // outward direction across the triangle.
+            let avg_normal = [
+                (mesh.vertices[i0].normal[0]
+                    + mesh.vertices[i1].normal[0]
+                    + mesh.vertices[i2].normal[0])
+                    / 3.0,
+                (mesh.vertices[i0].normal[1]
+                    + mesh.vertices[i1].normal[1]
+                    + mesh.vertices[i2].normal[1])
+                    / 3.0,
+                (mesh.vertices[i0].normal[2]
+                    + mesh.vertices[i1].normal[2]
+                    + mesh.vertices[i2].normal[2])
+                    / 3.0,
             ];
             let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
             let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
@@ -583,14 +646,9 @@ mod tests {
                 e1[2] * e2[0] - e1[0] * e2[2],
                 e1[0] * e2[1] - e1[1] * e2[0],
             ];
-            let outward = [
-                centroid[0] - center[0],
-                centroid[1] - center[1],
-                centroid[2] - center[2],
-            ];
-            let dot = cross[0] * outward[0]
-                + cross[1] * outward[1]
-                + cross[2] * outward[2];
+            let dot = cross[0] * avg_normal[0]
+                + cross[1] * avg_normal[1]
+                + cross[2] * avg_normal[2];
             if dot > tol {
                 outward_count += 1;
             } else if dot < -tol {
@@ -599,23 +657,15 @@ mod tests {
                 zero_count += 1;
             }
         }
-        // Diagnostic: report the breakdown. Standard MC (Lorensen-
-        // Cline) should have ALL triangles outward for an isolated
-        // solid voxel; if half are inward, the TRI_TABLE is using a
-        // different convention; if mixed unevenly, something is
-        // broken.
         let total = outward_count + inward_count + zero_count;
         eprintln!(
-            "MC isolated-voxel winding: {} outward, {} inward, {} zero (out of {})",
+            "MC isolated-voxel winding (vs vertex normal): {} outward, {} inward, {} zero (out of {})",
             outward_count, inward_count, zero_count, total
         );
-        // Dominant direction must be outward (matching wgpu / glTF
-        // CCW-from-outside convention). Allow some zero/edge cases.
-        assert!(
-            outward_count > inward_count,
-            "MC winding not predominantly outward: {} outward vs {} inward",
-            outward_count,
-            inward_count
+        assert_eq!(
+            inward_count, 0,
+            "MC winding correction failed: {} inward triangles vs vertex normal (expected 0); {} outward, {} zero out of {}",
+            inward_count, outward_count, zero_count, total
         );
     }
 
