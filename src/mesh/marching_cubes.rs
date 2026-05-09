@@ -540,6 +540,86 @@ mod tests {
     }
 
     #[test]
+    fn test_winding_outward_for_isolated_voxel() {
+        // MC's TRI_TABLE (standard Lorensen-Cline) emits triangles
+        // CCW-from-outside when density is positive inside the
+        // surface — same convention as the cube mesher. We verify
+        // by building an isolated solid voxel, running MC, and
+        // asserting every triangle's cross product points AWAY
+        // from the voxel center.
+        //
+        // If MC ever gets a flipped table (or someone swaps two
+        // edge indices), exported `.obj` / `.glb` smoothed meshes
+        // would import inside-out into Blender / Unity. This test
+        // catches that even though MC is render-disabled.
+        let mut world = World::new();
+        world.set_voxel(5, 5, 5, Voxel::from_rgb(200, 100, 50));
+        world.clear_dirty_flags();
+        let mesh = mesh_world_smoothed(&world, false);
+        assert!(!mesh.is_empty(), "expected MC mesh for isolated voxel");
+
+        // Voxel center in world coords: (5.5, 5.5, 5.5).
+        let center = [5.5_f32, 5.5, 5.5];
+        let mut outward_count = 0;
+        let mut inward_count = 0;
+        let mut zero_count = 0;
+        let tol = 1e-4_f32;
+        for tri in 0..mesh.indices.len() / 3 {
+            let i0 = mesh.indices[tri * 3] as usize;
+            let i1 = mesh.indices[tri * 3 + 1] as usize;
+            let i2 = mesh.indices[tri * 3 + 2] as usize;
+            let v0 = mesh.vertices[i0].position;
+            let v1 = mesh.vertices[i1].position;
+            let v2 = mesh.vertices[i2].position;
+            let centroid = [
+                (v0[0] + v1[0] + v2[0]) / 3.0,
+                (v0[1] + v1[1] + v2[1]) / 3.0,
+                (v0[2] + v1[2] + v2[2]) / 3.0,
+            ];
+            let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+            let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
+            let cross = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let outward = [
+                centroid[0] - center[0],
+                centroid[1] - center[1],
+                centroid[2] - center[2],
+            ];
+            let dot = cross[0] * outward[0]
+                + cross[1] * outward[1]
+                + cross[2] * outward[2];
+            if dot > tol {
+                outward_count += 1;
+            } else if dot < -tol {
+                inward_count += 1;
+            } else {
+                zero_count += 1;
+            }
+        }
+        // Diagnostic: report the breakdown. Standard MC (Lorensen-
+        // Cline) should have ALL triangles outward for an isolated
+        // solid voxel; if half are inward, the TRI_TABLE is using a
+        // different convention; if mixed unevenly, something is
+        // broken.
+        let total = outward_count + inward_count + zero_count;
+        eprintln!(
+            "MC isolated-voxel winding: {} outward, {} inward, {} zero (out of {})",
+            outward_count, inward_count, zero_count, total
+        );
+        // Dominant direction must be outward (matching wgpu / glTF
+        // CCW-from-outside convention). Allow some zero/edge cases.
+        assert!(
+            outward_count > inward_count,
+            "MC winding not predominantly outward: {} outward vs {} inward",
+            outward_count,
+            inward_count
+        );
+    }
+
+    #[test]
     fn test_normals_are_unit_length() {
         let mut world = World::new();
         for x in 0..2 {

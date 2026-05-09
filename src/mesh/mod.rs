@@ -11,9 +11,11 @@
 //! mesh, with internal face culling — used for the procgen preview
 //! overlay.
 
+mod ao;
 mod greedy;
 mod marching_cubes;
 mod naive;
+mod neighbors;
 mod patch;
 mod vertex;
 
@@ -22,6 +24,8 @@ pub use marching_cubes::mesh_world_smoothed;
 pub use naive::NaiveMesher;
 pub use patch::patch_to_mesh;
 pub use vertex::{ChunkMesh, Vertex};
+
+pub(crate) use ao::{ao_to_f32, compute_face_ao, unpack_ao};
 
 use crate::core::{ChunkPos, World};
 
@@ -114,8 +118,14 @@ pub(crate) fn face_quad_vertices(
 /// - `+X` / `-X`: `w` along +Z, `h` along +Y
 /// - `+Z` / `-Z`: `w` along +X, `h` along +Y
 ///
-/// Vertices are emitted CCW from outside, so wgpu's default
-/// `front_face: Ccw` + `cull_mode: Back` works without flips.
+/// Vertices are emitted in walk order around the face perimeter
+/// (CW from outside in world space — verify by computing
+/// `(v1-v0) × (v2-v0)` against the face normal). The triangle
+/// indices in `ChunkMesh::push_quad` are then **reversed** so each
+/// emitted triangle has its cross product parallel to the face
+/// normal, giving CCW-from-outside winding that matches wgpu /
+/// glTF / standard convention. See `test_winding_cross_parallel_to_face_normal`
+/// for the hard verification across all 6 face directions.
 pub(crate) fn face_quad_vertices_sized(
     x: f32,
     y: f32,
@@ -177,4 +187,25 @@ pub(crate) fn apply_face_shading(color: [f32; 4], face: Face) -> [f32; 4] {
         Face::NegY => 0.6,
     };
     [color[0] * shade, color[1] * shade, color[2] * shade, color[3]]
+}
+
+/// Build the 4 vertices of a `w × h` face with explicit per-vertex
+/// AO values. Wraps `face_quad_vertices_sized` and writes
+/// `ao[i]` into `vertices[i].ao`. Per-vertex AO order matches
+/// `face_vertex_signs` (used by `compute_face_ao`).
+pub(crate) fn face_quad_vertices_sized_ao(
+    x: f32,
+    y: f32,
+    z: f32,
+    face: Face,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    ao: [f32; 4],
+) -> [Vertex; 4] {
+    let mut verts = face_quad_vertices_sized(x, y, z, face, w, h, color);
+    for (i, v) in verts.iter_mut().enumerate() {
+        v.ao = ao[i];
+    }
+    verts
 }

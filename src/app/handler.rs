@@ -126,17 +126,18 @@ impl ApplicationHandler for App {
                                 self.editor.hovered_voxel.map(|h| h.voxel_pos);
                             self.stroke_start_screen_pos = Some(self.cursor_pos);
                         } else {
-                            // Run the release action BEFORE clearing
-                            // stroke state. `commit_shape` reads
-                            // `stroke_start_screen_pos` (via
-                            // `shape_end_pos`) to recover the press-
-                            // to-release vertical drag delta — clearing
-                            // it first would zero the delta and the
-                            // committed shape would collapse to a flat
-                            // disk while the live preview (computed
-                            // pre-release) showed the correct 3D shape.
+                            // Shape release no longer commits — it
+                            // transitions to the Height phase. The
+                            // shape's full voxel set is committed by
+                            // a SECOND click while in Height (see
+                            // `apply_tool` shape branch). This is
+                            // vengi-style two-phase drag: footprint
+                            // (W × D) on a locked plane, then
+                            // height (H) along the plane normal,
+                            // splitting screen X / Y and screen Y
+                            // into two unambiguous axes.
                             if tool.is_shape() {
-                                self.commit_shape();
+                                self.transition_shape_to_height();
                             } else if matches!(tool, Tool::Select) {
                                 self.commit_selection();
                             } else {
@@ -147,6 +148,10 @@ impl ApplicationHandler for App {
                             self.left_button_held = false;
                             self.last_stroke_voxel = None;
                             self.stroke_start_screen_pos = None;
+                            // Drop the plane lock so the next stroke
+                            // captures a fresh face. Hover preview
+                            // immediately falls back to ray-vs-voxels.
+                            self.stroke_plane = None;
                         }
                     }
 
