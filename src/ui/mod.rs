@@ -4,7 +4,8 @@ mod panels;
 
 pub use panels::{UiAction, UiState};
 
-use crate::editor::{Editor, Tool};
+use crate::ai::AiJobState;
+use crate::editor::{Axis, Editor, Quarter, Tool};
 use crate::procgen::{
     CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind,
     PerlinTerrain, PipelineGraph, WfcGenerator, WfcTileset,
@@ -106,6 +107,23 @@ pub struct Ui {
     /// gray out the Paste button without `App::clipboard` leaking
     /// across the UI layer boundary. App syncs it before each frame.
     pub has_clipboard: bool,
+
+    /// User-edited prompt for the AI panel. Owned by the UI (rather
+    /// than App) so the input field's state lives next to its widget;
+    /// `App::start_ai_job` reads from `self.ui.ai_prompt` when
+    /// dispatching `UiAction::AiGenerate`.
+    pub ai_prompt: String,
+    /// Voxelization resolution along the longest axis (32 / 64 / 128).
+    /// The panel's slider binds to this; `AiRequest::resolution`
+    /// reads from it at submit time.
+    pub ai_resolution: u32,
+    /// Mirror of `App::ai_job` so the panel can render the active
+    /// stage (Submitting / Polling / Voxelizing / Done / Failed)
+    /// without needing a reference to the App. App syncs each frame.
+    pub ai_job: AiJobState,
+    /// Mirror of `App::ai_has_key` for the same reason. Refreshed by
+    /// the App after every Save / Clear API key action.
+    pub ai_has_key: bool,
 }
 
 impl Ui {
@@ -119,6 +137,10 @@ impl Ui {
             dragging_wire: None,
             recent_files: Vec::new(),
             has_clipboard: false,
+            ai_prompt: String::new(),
+            ai_resolution: 64,
+            ai_job: AiJobState::Idle,
+            ai_has_key: false,
         }
     }
 
@@ -158,6 +180,11 @@ impl Ui {
         // Pipeline graph panel
         if self.state.show_graph {
             self.show_graph_panel(ctx);
+        }
+
+        // AI generation panel
+        if self.state.show_ai {
+            self.show_ai_panel(ctx);
         }
 
         // Help panel
@@ -351,6 +378,135 @@ impl Ui {
                     }
                 });
 
+                ui.menu_button("Selection", |ui| {
+                    let has_sel = editor.selection.is_some();
+                    // Each Rotate submenu hosts CW / CCW / 180°.
+                    // Anchor is selection.min — the rotated AABB
+                    // extends from the same min, so a 4×1×2 region
+                    // becomes 2×1×4 spreading toward +Z.
+                    ui.menu_button("Rotate around X", |ui| {
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("90°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::X,
+                                quarter: Quarter::Cw,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("-90°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::X,
+                                quarter: Quarter::Ccw,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("180°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::X,
+                                quarter: Quarter::Half,
+                            });
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Rotate around Y", |ui| {
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("90°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::Y,
+                                quarter: Quarter::Cw,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("-90°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::Y,
+                                quarter: Quarter::Ccw,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("180°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::Y,
+                                quarter: Quarter::Half,
+                            });
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Rotate around Z", |ui| {
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("90°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::Z,
+                                quarter: Quarter::Cw,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("-90°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::Z,
+                                quarter: Quarter::Ccw,
+                            });
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_sel, egui::Button::new("180°"))
+                            .clicked()
+                        {
+                            self.state.request(UiAction::RotateSelection {
+                                axis: Axis::Z,
+                                quarter: Quarter::Half,
+                            });
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Flip X"))
+                        .clicked()
+                    {
+                        self.state
+                            .request(UiAction::MirrorSelection { axis: Axis::X });
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Flip Y"))
+                        .clicked()
+                    {
+                        self.state
+                            .request(UiAction::MirrorSelection { axis: Axis::Y });
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_sel, egui::Button::new("Flip Z"))
+                        .clicked()
+                    {
+                        self.state
+                            .request(UiAction::MirrorSelection { axis: Axis::Z });
+                        ui.close_menu();
+                    }
+                });
+
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.state.show_stats, "Statistics");
                     ui.checkbox(&mut self.state.show_tools, "Tools Panel");
@@ -358,6 +514,7 @@ impl Ui {
                     ui.checkbox(&mut self.state.show_viewport_settings, "Viewport Settings");
                     ui.checkbox(&mut self.state.show_procgen, "Procedural Generation");
                     ui.checkbox(&mut self.state.show_graph, "Pipeline Graph");
+                    ui.checkbox(&mut self.state.show_ai, "AI Generation");
                     ui.separator();
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
@@ -1036,6 +1193,154 @@ impl Ui {
         }
         if run {
             self.state.request(UiAction::RunGraph);
+        }
+    }
+
+    fn show_ai_panel(&mut self, ctx: &Context) {
+        // Deferred-action pattern (same as `show_procgen_panel`):
+        // `.open(...)` borrows `self.state.show_ai` and the closure
+        // borrows several other `self.*` fields, so we can't request
+        // a `UiAction` (which mutates `self.state`) inside the closure.
+        // Instead, collect intents into local flags and dispatch after
+        // the closure releases the borrow.
+        //
+        // Phase 1 uses `MockProvider` (3 s fake run); Phase 2 swaps in
+        // the real fal.ai client. Layout stays the same — the panel
+        // only reads `self.ai_*` fields and emits provider-agnostic
+        // `UiAction::Ai*`.
+        let mut click_clear_key = false;
+        let mut click_save_key: Option<String> = None;
+        let mut click_generate = false;
+        let mut click_cancel = false;
+
+        let prompt = &mut self.ai_prompt;
+        let resolution = &mut self.ai_resolution;
+        let key_input = &mut self.state.ai_key_input;
+        let job = &self.ai_job;
+        let has_key = self.ai_has_key;
+
+        egui::Window::new("AI Generation")
+            .default_pos([ctx.screen_rect().width() / 2.0 - 200.0, 100.0])
+            .default_width(400.0)
+            .open(&mut self.state.show_ai)
+            .show(ctx, |ui| {
+                let job_idle = job.is_idle();
+                let job_running = job.is_running();
+
+                // --- Provider info ---
+                ui.label(egui::RichText::new("Provider").strong());
+                ui.label("fal.ai · Hunyuan3D V3");
+
+                // --- API key section ---
+                ui.separator();
+                ui.label(egui::RichText::new("API Key").strong());
+                if has_key {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(80, 200, 120),
+                            "✓ saved in OS keychain",
+                        );
+                        if ui.button("Clear").clicked() {
+                            click_clear_key = true;
+                        }
+                    });
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 180, 80),
+                        "Not set — Generate is disabled",
+                    );
+                    ui.horizontal(|ui| {
+                        // Password-masked single-line edit; on Save the
+                        // value is moved out into the action queue and
+                        // the buffer is cleared so the key doesn't
+                        // linger in UI state.
+                        ui.add(
+                            egui::TextEdit::singleline(key_input)
+                                .password(true)
+                                .hint_text("Paste fal.ai API key…"),
+                        );
+                        if ui
+                            .add_enabled(!key_input.is_empty(), egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            click_save_key = Some(std::mem::take(key_input));
+                        }
+                    });
+                }
+
+                // --- Prompt + parameters ---
+                ui.separator();
+                ui.label(egui::RichText::new("Prompt").strong());
+                ui.add(
+                    egui::TextEdit::multiline(prompt)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("e.g. a small wooden treasure chest"),
+                );
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Voxel resolution");
+                    // 32 / 64 / 128 — three reasonable defaults rather
+                    // than a free slider, since each step roughly 8×s
+                    // the voxel count and intermediate values aren't
+                    // useful in practice.
+                    egui::ComboBox::from_id_salt("ai_resolution")
+                        .selected_text(format!("{}³", *resolution))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(resolution, 32, "32³ (icon)");
+                            ui.selectable_value(resolution, 64, "64³ (default)");
+                            ui.selectable_value(resolution, 128, "128³ (detail)");
+                        });
+                });
+
+                // --- Action buttons ---
+                ui.separator();
+                let can_generate = job_idle && has_key && !prompt.trim().is_empty();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_generate, egui::Button::new("Generate"))
+                        .clicked()
+                    {
+                        click_generate = true;
+                    }
+                    if ui
+                        .add_enabled(job_running, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        click_cancel = true;
+                    }
+                });
+
+                // --- Status / progress ---
+                ui.separator();
+                ui.label(egui::RichText::new(job.label()).strong());
+                if let Some(progress) = job.progress() {
+                    ui.add(egui::ProgressBar::new(progress).show_percentage());
+                }
+                match job {
+                    AiJobState::Done { summary } => {
+                        ui.label(summary);
+                    }
+                    AiJobState::Failed { message } => {
+                        ui.colored_label(egui::Color32::from_rgb(220, 80, 80), message);
+                    }
+                    _ => {}
+                }
+            });
+
+        // Closure released; safe to mutate `self.state` now.
+        if click_clear_key {
+            self.state.request(UiAction::AiClearKey);
+        }
+        if let Some(key) = click_save_key {
+            self.state.request(UiAction::AiSaveKey(key));
+        }
+        if click_generate {
+            self.state.request(UiAction::AiGenerate);
+        }
+        if click_cancel {
+            self.state.request(UiAction::AiCancel);
         }
     }
 

@@ -9,7 +9,6 @@ repository = "https://github.com/Lynthar/Voxelith"
 
 [features]
 default = []
-ai = ["dep:reqwest", "dep:tokio"]  # AI features as optional
 
 [dependencies]
 # Graphics & Windowing
@@ -49,9 +48,18 @@ rayon = "1.10"
 noise = "0.9"
 rand = "0.8"
 
-# Optional AI dependencies
-reqwest = { version = "0.12", features = ["json"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+# AI integration: HTTP client for remote 3D-gen APIs (fal.ai, etc.),
+# tokio runtime to run them off the winit main thread, keyring for
+# storing API keys in the OS keychain instead of plaintext prefs.
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+keyring = "3"
+# GLB → voxel conversion for AI output: gltf parses the binary glTF
+# the provider returns; image decodes the PBR base-color texture so we
+# can sample colors at triangle UVs (Hunyuan3D V3 doesn't ship vertex
+# colors, only textures).
+gltf = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [profile.dev]
 opt-level = 1  # Some optimization for faster debug builds

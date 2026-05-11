@@ -23,6 +23,10 @@ impl App {
         // copy) and avoids leaking App::clipboard across the UI
         // boundary.
         self.ui.has_clipboard = self.clipboard.is_some();
+        // Same pattern for AI panel: mirror state owned by App so the
+        // panel reads them off `Ui` without needing a borrow back.
+        self.ui.ai_job = self.ai_job.clone();
+        self.ui.ai_has_key = self.ai_has_key;
         self.ui.show(&egui_ctx, &stats, &mut self.editor);
 
         let full_output = egui_ctx.end_pass();

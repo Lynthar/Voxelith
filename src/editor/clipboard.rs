@@ -6,11 +6,9 @@
 //! `mergeVolumes` semantics) — air cells in the source aren't stored,
 //! so paste doesn't punch holes in the destination.
 
-use std::collections::HashMap;
-
 use crate::core::{Voxel, World};
 
-use super::{Selection, VoxelChange};
+use super::{transform::build_remap_changes, Selection, VoxelChange};
 
 /// Voxel data extracted from a selection, stored relative to its
 /// local origin so it can be pasted anywhere.
@@ -124,6 +122,9 @@ pub fn build_clear_changes(world: &World, selection: Selection) -> Vec<VoxelChan
 /// Caller wraps the result in `Command::set_voxels` for undo support
 /// and updates `editor.selection = Some(selection.translated(delta))`
 /// after executing.
+///
+/// Implemented as a delta-mapping over [`build_remap_changes`], which
+/// shares the overlap bookkeeping with rotate / mirror.
 pub fn build_move_changes(
     world: &World,
     selection: Selection,
@@ -132,54 +133,9 @@ pub fn build_move_changes(
     if delta == (0, 0, 0) {
         return Vec::new();
     }
-
-    // Aggregate by destination cell. Each touched position gets a
-    // `(world_old, final_new)` pair — `final_new` may flip multiple
-    // times during construction but `world_old` is recorded exactly
-    // once (from the world before any change), preserving undo
-    // correctness through overlapping moves.
-    let mut by_pos: HashMap<(i32, i32, i32), (Voxel, Voxel)> = HashMap::new();
-
-    // Collect source voxels first so we can iterate them twice
-    // without re-reading the world.
-    let originals: Vec<((i32, i32, i32), Voxel)> = selection
-        .iter_cells()
-        .filter_map(|(x, y, z)| {
-            let v = world.get_voxel(x, y, z);
-            if v.is_air() {
-                None
-            } else {
-                Some(((x, y, z), v))
-            }
-        })
-        .collect();
-
-    // Step 1: source positions clear to AIR.
-    for &(p, old) in &originals {
-        by_pos.insert(p, (old, Voxel::AIR));
-    }
-
-    // Step 2: destination positions receive the moved voxel.
-    // `entry().or_insert` preserves any pre-existing entry's
-    // `old_voxel` (set by Step 1 for overlap cells); for fresh
-    // destination cells we read `old_voxel` from the world now.
-    for &(src, vox) in &originals {
-        let dest = (src.0 + delta.0, src.1 + delta.1, src.2 + delta.2);
-        let world_old = world.get_voxel(dest.0, dest.1, dest.2);
-        let entry = by_pos.entry(dest).or_insert((world_old, Voxel::AIR));
-        entry.1 = vox;
-    }
-
-    by_pos
-        .into_iter()
-        .filter_map(|(pos, (old_voxel, new_voxel))| {
-            if old_voxel == new_voxel {
-                None
-            } else {
-                Some(VoxelChange { pos, old_voxel, new_voxel })
-            }
-        })
-        .collect()
+    build_remap_changes(world, selection, |p| {
+        (p.0 + delta.0, p.1 + delta.1, p.2 + delta.2)
+    })
 }
 
 #[cfg(test)]

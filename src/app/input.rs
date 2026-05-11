@@ -7,8 +7,9 @@ use std::collections::HashSet;
 use voxelith::editor::{
     box_voxels, build_clear_changes, build_move_changes, build_paste_changes,
     copy_selection_to_clipboard, cylinder_voxels, eyedrop, flood_fill, flood_fill_multi,
-    line_voxels, sphere_voxels, BrushTool, Command, EditorTool, Ray, RaycastHit, Selection,
-    Tool, ToolContext, VoxelChange, VoxelRaycast,
+    line_voxels, mirror_selection_changes, rotate_selection_changes, sphere_voxels, Axis,
+    BrushTool, Command, EditorTool, Quarter, Ray, RaycastHit, Selection, Tool, ToolContext,
+    VoxelChange, VoxelRaycast,
 };
 
 use super::{build_stroke_plane, App, ShapeDrag, ShapePhase, StrokePlane};
@@ -23,6 +24,54 @@ use super::{build_stroke_plane, App, ShapeDrag, ShapePhase, StrokePlane};
 const RAYCAST_MAX_DIST: f32 = 500.0;
 
 impl App {
+    /// Compute the 3D world anchor for a zoom-to-cursor scroll. Tries
+    /// to raycast against world geometry first; if the cursor isn't
+    /// over anything solid, falls back to the cursor ray's intersection
+    /// with the plane through `camera.target` perpendicular to the
+    /// view direction (= same view-depth as the orbit pivot — keeps
+    /// the lateral shift sensible when zooming into empty space).
+    ///
+    /// Returns `None` only when prerequisites (renderer / window)
+    /// aren't initialized; callers should fall back to whatever
+    /// "no anchor" behavior makes sense (typically just no zoom).
+    pub(super) fn compute_zoom_anchor(&self) -> Option<glam::Vec3> {
+        let renderer = self.renderer.as_ref()?;
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        let view_proj_inv = renderer.camera.view_projection_matrix().inverse();
+        let ray = Ray::from_screen(
+            self.cursor_pos,
+            (size.width as f32, size.height as f32),
+            view_proj_inv,
+        );
+
+        // Real-geometry hit takes priority — this is the use case the
+        // user described: "zoom in to inspect this voxel". Use the same
+        // RAYCAST_MAX_DIST as editor picking so the reach is consistent.
+        if let Some(hit) = VoxelRaycast::cast(&ray, &self.world, RAYCAST_MAX_DIST) {
+            return Some(ray.at(hit.distance));
+        }
+
+        // Fallback: project cursor ray onto the plane through
+        // `camera.target` perpendicular to view direction. Keeps the
+        // anchor at the same view-depth as the current orbit pivot so
+        // the resulting target shift is purely lateral, not "into the
+        // distance" (which would feel like an unintended dolly).
+        let camera = &renderer.camera;
+        let view_dir = (camera.target - camera.position).normalize();
+        let denom = ray.direction.dot(view_dir);
+        if denom.abs() > 1e-6 {
+            let t = (camera.target - ray.origin).dot(view_dir) / denom;
+            if t > 0.0 {
+                return Some(ray.at(t));
+            }
+        }
+        // Degenerate (ray parallel to view plane or pointing the wrong
+        // way). Falling back to `target` makes process_scroll behave
+        // exactly like the pre-zoom-to-cursor "scale around target".
+        Some(camera.target)
+    }
+
     /// Update the editor's hovered voxel from the current cursor position.
     ///
     /// Tools that need an "anchor cell" to place new geometry (Place
@@ -349,6 +398,74 @@ impl App {
         });
         self.ui
             .set_status("Drag vertically to set height, click to commit (Esc cancels)");
+    }
+
+    /// Rotate the active selection's contents around `axis` by
+    /// `quarter` (90° / -90° / 180°). The selection's AABB may
+    /// change footprint (Y-rotation swaps W ↔ D, etc.) but its
+    /// `min` corner stays put — see `editor::transform` for the
+    /// anchor convention. Result is one `Command::set_voxels` so
+    /// Ctrl+Z reverses the entire rotation.
+    pub(super) fn rotate_selection(&mut self, axis: Axis, quarter: Quarter) {
+        let Some(sel) = self.editor.selection else {
+            self.ui
+                .set_status("No selection — drag with the Select tool first");
+            return;
+        };
+        let (new_sel, changes) =
+            rotate_selection_changes(&self.world, sel, axis, quarter);
+        let count = changes.len();
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            self.editor.history.execute(cmd, &mut self.world);
+        }
+        // Bump the selection AABB even when empty so a user rotating
+        // an air-only marquee still sees the box reorient.
+        self.editor.selection = Some(new_sel);
+        let label = match (axis, quarter) {
+            (Axis::X, Quarter::Cw) => "Rotate X 90°",
+            (Axis::X, Quarter::Ccw) => "Rotate X -90°",
+            (Axis::X, Quarter::Half) => "Rotate X 180°",
+            (Axis::Y, Quarter::Cw) => "Rotate Y 90°",
+            (Axis::Y, Quarter::Ccw) => "Rotate Y -90°",
+            (Axis::Y, Quarter::Half) => "Rotate Y 180°",
+            (Axis::Z, Quarter::Cw) => "Rotate Z 90°",
+            (Axis::Z, Quarter::Ccw) => "Rotate Z -90°",
+            (Axis::Z, Quarter::Half) => "Rotate Z 180°",
+        };
+        if count == 0 {
+            self.ui.set_status(format!("{} (selection empty)", label));
+        } else {
+            self.ui.set_status(format!("{} ({} cells)", label, count));
+        }
+    }
+
+    /// Mirror the active selection's contents across the midplane
+    /// perpendicular to `axis`. The AABB is unchanged. Single
+    /// `Command::set_voxels` so one Ctrl+Z reverses the flip.
+    pub(super) fn mirror_selection(&mut self, axis: Axis) {
+        let Some(sel) = self.editor.selection else {
+            self.ui
+                .set_status("No selection — drag with the Select tool first");
+            return;
+        };
+        let changes = mirror_selection_changes(&self.world, sel, axis);
+        let count = changes.len();
+        if !changes.is_empty() {
+            let cmd = Command::set_voxels(changes);
+            self.editor.history.execute(cmd, &mut self.world);
+        }
+        let label = match axis {
+            Axis::X => "Flip X",
+            Axis::Y => "Flip Y",
+            Axis::Z => "Flip Z",
+        };
+        if count == 0 {
+            self.ui
+                .set_status(format!("{} (no change — selection is symmetric)", label));
+        } else {
+            self.ui.set_status(format!("{} ({} cells)", label, count));
+        }
     }
 
     /// Step the selection by `delta` in response to an arrow-key
@@ -706,6 +823,27 @@ impl App {
                     self.step_selection((0, -step, 0));
                 } else {
                     self.step_selection((0, 0, step));
+                }
+            }
+            // Recenter the orbit pivot on the scene's AABB center.
+            // Camera position is preserved — only target moves, so
+            // the view direction rotates onto the scene rather than
+            // teleporting. Recovery hatch for: WASD-flying past the
+            // model, panning to look at empty space, etc. — anywhere
+            // `target` has drifted off-scene and middle-orbit feels
+            // disconnected. No-op if the world is empty.
+            KeyCode::KeyF => {
+                if let Some(center) = self.world.scene_center() {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.camera.target = center;
+                        renderer
+                            .camera_controller
+                            .sync_orbit_state_from_camera(&renderer.camera);
+                    }
+                    self.ui.set_status("Recentered camera on scene");
+                } else {
+                    self.ui
+                        .set_status("World is empty — nothing to recenter on");
                 }
             }
             _ => {}

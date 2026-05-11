@@ -146,7 +146,15 @@ impl Renderer {
             glam::Vec3::ZERO,
             size.width as f32 / size.height as f32,
         );
-        let camera_controller = CameraController::new(0.5, 0.003);
+        // Sync the controller's cached orbit state from the camera's
+        // actual pose. `CameraController::new`'s defaults
+        // (yaw=0 / pitch=0.5 / distance=40) don't match the initial
+        // camera position above; without this sync, any path that
+        // reads the cached angles via `update_camera_position` (Reset
+        // Camera, Set Camera View, the first orbit drag's spherical
+        // recompute) would teleport the camera 90° on first use.
+        let mut camera_controller = CameraController::new(0.5, 0.003);
+        camera_controller.sync_orbit_state_from_camera(&camera);
 
         // Create depth texture
         let depth_texture = Self::create_depth_texture(&device, &config);

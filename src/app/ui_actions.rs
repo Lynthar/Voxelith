@@ -39,33 +39,55 @@ impl App {
                     self.selection_move_anchor = None;
                     self.editor.selection = None;
                 }
+                UiAction::RotateSelection { axis, quarter } => {
+                    self.rotate_selection(axis, quarter);
+                }
+                UiAction::MirrorSelection { axis } => {
+                    self.mirror_selection(axis);
+                }
                 UiAction::GenerateTestCube => {
                     self.world.clear();
                     self.editor.history.clear();
                     self.world.create_test_cube((0, 8, 0), 4);
                     self.rebuild_all_meshes();
+                    // World was replaced — re-anchor orbit pivot on
+                    // the new scene so middle-orbit circles it.
+                    self.recenter_camera_on_scene();
                 }
                 UiAction::GenerateGround => {
                     self.world.clear();
                     self.editor.history.clear();
                     self.world.create_test_ground(20, 2);
                     self.rebuild_all_meshes();
+                    self.recenter_camera_on_scene();
                 }
                 UiAction::GenerateSphere => {
                     self.world.clear();
                     self.editor.history.clear();
                     self.create_sphere((0, 10, 0), 6);
                     self.rebuild_all_meshes();
+                    self.recenter_camera_on_scene();
                 }
                 UiAction::GeneratePyramid => {
                     self.world.clear();
                     self.editor.history.clear();
                     self.create_pyramid((0, 0, 0), 10);
                     self.rebuild_all_meshes();
+                    self.recenter_camera_on_scene();
                 }
                 UiAction::ResetCamera => {
+                    // Reset camera target to the scene's AABB center
+                    // (or origin if the world is empty) so the default
+                    // view always faces the model. Pre-fix this set
+                    // target to ZERO unconditionally, which placed the
+                    // orbit pivot underground for any scene whose
+                    // voxels sit above y=0.
+                    let target = self
+                        .world
+                        .scene_center()
+                        .unwrap_or(glam::Vec3::ZERO);
                     if let Some(renderer) = &mut self.renderer {
-                        renderer.camera.target = glam::Vec3::ZERO;
+                        renderer.camera.target = target;
                         renderer.camera_controller.distance = 40.0;
                         renderer.camera_controller.yaw = 0.0;
                         renderer.camera_controller.pitch = 0.5;
@@ -118,6 +140,10 @@ impl App {
                 UiAction::ExportGlbSmoothedHeavy => self.export_glb_smoothed(true),
                 UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
+                UiAction::AiGenerate => self.start_ai_job(),
+                UiAction::AiCancel => self.cancel_ai_job(),
+                UiAction::AiSaveKey(key) => self.save_ai_key(key),
+                UiAction::AiClearKey => self.clear_ai_key(),
             }
         }
     }

@@ -170,10 +170,26 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 if !egui_consumed {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer
-                            .camera_controller
-                            .process_scroll(delta, &mut renderer.camera);
+                    // Compute the zoom anchor (cursor's 3D point on
+                    // geometry, with a target-depth-plane fallback) BEFORE
+                    // taking the mutable renderer borrow. Without zoom-to-
+                    // cursor, scroll-zooming over a voxel of interest
+                    // doesn't keep that voxel under the cursor — the camera
+                    // dollies along the camera→target axis, the voxel
+                    // drifts off-screen, and a subsequent middle-orbit
+                    // pivots around `target` (which is wherever it was
+                    // before, often underground or in mid-air relative to
+                    // the user's actual focus). Scaling around the cursor
+                    // anchor migrates `target` with the zoom so orbit
+                    // naturally circles the inspected feature.
+                    if let Some(anchor) = self.compute_zoom_anchor() {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.camera_controller.process_scroll(
+                                delta,
+                                &mut renderer.camera,
+                                anchor,
+                            );
+                        }
                     }
                 }
             }
@@ -234,6 +250,7 @@ impl ApplicationHandler for App {
                 }
 
                 self.tick_preview();
+                self.tick_ai_job();
                 self.update_brush_preview();
                 self.update_selection_visualization();
                 self.rebuild_all_meshes();

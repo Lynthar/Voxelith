@@ -140,8 +140,14 @@ impl App {
                         editor_state.camera_target[1],
                         editor_state.camera_target[2],
                     );
-                    renderer.camera_controller.distance =
-                        (renderer.camera.position - renderer.camera.target).length();
+                    // Full sync (yaw / pitch / distance) — setting only
+                    // distance here used to leave yaw/pitch stale, so a
+                    // post-load scroll or Reset Camera would teleport
+                    // the camera (same root cause as the startup-state
+                    // mismatch fixed in `Renderer::new`).
+                    renderer
+                        .camera_controller
+                        .sync_orbit_state_from_camera(&renderer.camera);
                 }
 
                 self.rebuild_all_meshes();
@@ -178,6 +184,14 @@ impl App {
                         renderer.chunk_meshes.clear();
                     }
                     self.rebuild_all_meshes();
+                    // Imported world replaces everything; the previous
+                    // camera target is now meaningless. Anchor orbit
+                    // pivot on the imported scene so middle-orbit
+                    // immediately circles the new model. (`do_open_project`
+                    // doesn't do this because it restores the saved
+                    // camera pose verbatim — but .vox files don't carry
+                    // camera state.)
+                    self.recenter_camera_on_scene();
                     self.touch_recent(&path);
                     let filename = path
                         .file_name()
