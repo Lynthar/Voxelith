@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::editor::{Axis, Quarter};
+
 use super::CameraView;
 
 /// One-shot UI actions that need to be processed by the application.
@@ -51,6 +53,14 @@ pub enum UiAction {
     /// Deselect). Mirror of `editor.selection = None` for menu-
     /// bar contexts that don't get `&mut Editor`.
     Deselect,
+    /// Rotate the selection's voxel contents around `axis` by
+    /// `quarter` (90° / -90° / 180°). Anchor is `selection.min`;
+    /// the AABB may swap dimensions but its `min` corner stays put.
+    /// One Ctrl+Z reverses the entire rotation.
+    RotateSelection { axis: Axis, quarter: Quarter },
+    /// Mirror the selection's voxel contents across the midplane
+    /// perpendicular to `axis`. AABB unchanged.
+    MirrorSelection { axis: Axis },
 
     // Generate operations
     GenerateTestCube,
@@ -66,6 +76,20 @@ pub enum UiAction {
     // Camera operations
     ResetCamera,
     SetCameraView(CameraView),
+
+    // AI operations
+    /// Submit a new AI generation job using the current `ai_prompt` /
+    /// `ai_resolution` from `App`. No-op when one is already running.
+    AiGenerate,
+    /// Cooperative cancel of the active job; the worker will emit a
+    /// terminal `Failed { "Cancelled" }` event before stopping.
+    AiCancel,
+    /// Save the carried API key to the OS keychain. The key is moved
+    /// out of the UI state immediately after saving so it doesn't
+    /// linger in memory longer than necessary.
+    AiSaveKey(String),
+    /// Remove the stored API key.
+    AiClearKey,
 }
 
 /// UI state
@@ -80,12 +104,20 @@ pub struct UiState {
     pub show_graph: bool,
     pub show_help: bool,
     pub show_about: bool,
+    pub show_ai: bool,
 
     // One-shot action queue
     pending_actions: Vec<UiAction>,
 
     // Status message for user feedback
     pub status_message: Option<(String, std::time::Instant)>,
+
+    /// Buffer for the API key entry box in the AI panel. Held in UI
+    /// state (not `App`) so it never crosses the main-thread boundary
+    /// into a worker — once the user clicks "Save", the value is
+    /// moved out into a `UiAction::AiSaveKey(_)` and the buffer is
+    /// cleared.
+    pub ai_key_input: String,
 }
 
 impl UiState {
@@ -99,8 +131,10 @@ impl UiState {
             show_graph: false,
             show_help: false,
             show_about: false,
+            show_ai: false,
             pending_actions: Vec::new(),
             status_message: None,
+            ai_key_input: String::new(),
         }
     }
 

@@ -12,6 +12,7 @@
 //! - `render`   — per-frame wgpu pass
 //! - `handler`  — winit `ApplicationHandler`
 
+mod ai_actions;
 mod file_ops;
 mod handler;
 mod input;
@@ -31,6 +32,7 @@ use winit::{keyboard::ModifiersState, window::Window};
 use std::collections::HashSet;
 
 use voxelith::{
+    ai::{AiJobState, AiProvider, AiRuntime, FalHunyuanProvider, JobEvent, JobHandle},
     core::{Voxel, World},
     editor::{
         box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Clipboard, Editor,
@@ -159,6 +161,29 @@ pub struct App {
     /// Persisted user preferences. Loaded at startup, dehydrated and
     /// written back on close. The recent-files MRU lives here.
     prefs: Prefs,
+
+    /// Tokio multi-thread runtime running on its own background OS
+    /// thread. AI jobs run there to keep the winit main thread free.
+    /// Lives the entire app lifetime; no shutdown path needed.
+    pub(super) ai_runtime: AiRuntime,
+    /// Active provider. Phase 1 = mock; Phase 2 swaps in the real
+    /// fal.ai client.
+    pub(super) ai_provider: Arc<dyn AiProvider>,
+    /// Latest job state. Mirrored into `Ui` each frame so the panel
+    /// can render it. Mutated only by `tick_ai_job` (drained from
+    /// the channel) and the action dispatcher (UI button → submit /
+    /// cancel).
+    pub(super) ai_job: AiJobState,
+    /// Receiver half of the worker → main-thread event channel. Set
+    /// when a job is in flight, cleared on terminal event.
+    pub(super) ai_event_rx: Option<std::sync::mpsc::Receiver<JobEvent>>,
+    /// Cancel token for the current job. Held alongside `ai_event_rx`;
+    /// dropping it doesn't cancel — the worker checks the AtomicBool
+    /// at safe points (see `MockProvider`).
+    pub(super) ai_handle: Option<JobHandle>,
+    /// Cached "is an API key in the keychain?" so the UI doesn't hit
+    /// the keyring every frame. Refreshed by save / clear actions.
+    pub(super) ai_has_key: bool,
 }
 
 impl App {
@@ -237,6 +262,12 @@ impl App {
             stroke_plane: None,
             clipboard: None,
             prefs,
+            ai_runtime: AiRuntime::new(),
+            ai_provider: Arc::new(FalHunyuanProvider::new()),
+            ai_job: AiJobState::Idle,
+            ai_event_rx: None,
+            ai_handle: None,
+            ai_has_key: voxelith::ai::has_api_key("fal_ai"),
         }
     }
 
@@ -548,6 +579,18 @@ impl App {
     /// Initialize the application with a window.
     pub(super) fn init(&mut self, window: Window) {
         let window = Arc::new(window);
+        // Default cursor_pos to the screen center so a zoom-to-cursor
+        // scroll BEFORE any cursor movement anchors at the screen
+        // center (≈ camera target) instead of the (0,0) top-left
+        // corner — the latter would shift the orbit pivot toward the
+        // top-left of the world on the first scroll, which is
+        // surprising. CursorMoved overwrites this on the first real
+        // mouse move.
+        let physical = window.inner_size();
+        self.cursor_pos = (
+            physical.width as f32 / 2.0,
+            physical.height as f32 / 2.0,
+        );
         self.window = Some(window.clone());
 
         let renderer = pollster::block_on(Renderer::new(window.clone()))
@@ -587,6 +630,28 @@ impl App {
         self.world.create_test_cube((0, 8, 0), 4);
         self.world.create_test_ground(20, 2);
         self.rebuild_all_meshes();
+        // Anchor the orbit pivot on the actual scene rather than the
+        // hardcoded (0,0,0) target from `Camera::new`. Without this,
+        // middle-mouse orbit circles a point underneath the model and
+        // the visible cube swings through a wide arc each rotation.
+        self.recenter_camera_on_scene();
+    }
+
+    /// Snap `camera.target` to the world's scene-center (AABB of all
+    /// non-air voxels), then re-derive controller yaw / pitch /
+    /// distance from the new pose. Camera position itself is
+    /// untouched — only the orbit pivot moves, so the user's current
+    /// view direction smoothly rotates onto the scene rather than
+    /// jumping.
+    ///
+    /// No-op when the world is empty (nothing meaningful to focus on).
+    pub(super) fn recenter_camera_on_scene(&mut self) {
+        let Some(center) = self.world.scene_center() else { return };
+        let Some(renderer) = &mut self.renderer else { return };
+        renderer.camera.target = center;
+        renderer
+            .camera_controller
+            .sync_orbit_state_from_camera(&renderer.camera);
     }
 
     /// Rebuild meshes for all dirty chunks and upload them to the GPU.

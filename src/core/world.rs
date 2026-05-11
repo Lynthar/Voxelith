@@ -4,6 +4,7 @@
 //! multiple chunks, handling chunk boundaries transparently.
 
 use super::{Chunk, ChunkPos, Voxel, CHUNK_SIZE, CHUNK_SIZE_I32};
+use glam::Vec3;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -226,6 +227,54 @@ impl World {
         self.chunks.len()
     }
 
+    /// Center of the AABB of all non-air voxels, in continuous world
+    /// coordinates. `None` when the world has no non-air voxels.
+    ///
+    /// Cells span `[n, n+1)` in continuous space, so a single voxel at
+    /// integer position `p` has AABB `[p, p+1)` and center `p + 0.5`.
+    /// For multi-voxel scenes the center sits between the corner cell
+    /// centers (in the cell *interior*, never on a cell boundary).
+    ///
+    /// Used as the default orbit pivot — placing `camera.target` here
+    /// at startup / after world replacement makes middle-mouse orbit
+    /// circle the visible model rather than the world origin (which
+    /// is often empty / underground for non-trivial scenes).
+    /// Iterates every solid voxel in every loaded chunk; intended for
+    /// occasional UI events, not per-frame use.
+    pub fn scene_center(&self) -> Option<Vec3> {
+        let mut bounds: Option<((i32, i32, i32), (i32, i32, i32))> = None;
+        for (chunk_pos, chunk) in self.chunks() {
+            let chunk = chunk.read();
+            if chunk.is_empty() {
+                continue;
+            }
+            let (ox, oy, oz) = chunk_pos.world_origin();
+            for (lp, _) in chunk.iter_solid() {
+                let p = (
+                    ox + lp.x as i32,
+                    oy + lp.y as i32,
+                    oz + lp.z as i32,
+                );
+                bounds = Some(match bounds {
+                    Some((mn, mx)) => (
+                        (mn.0.min(p.0), mn.1.min(p.1), mn.2.min(p.2)),
+                        (mx.0.max(p.0), mx.1.max(p.1), mx.2.max(p.2)),
+                    ),
+                    None => (p, p),
+                });
+            }
+        }
+        bounds.map(|(min, max)| {
+            // AABB in continuous space is [min, max+1); center is the
+            // midpoint of that interval per axis.
+            Vec3::new(
+                (min.0 as f32 + max.0 as f32 + 1.0) * 0.5,
+                (min.1 as f32 + max.1 as f32 + 1.0) * 0.5,
+                (min.2 as f32 + max.2 as f32 + 1.0) * 0.5,
+            )
+        })
+    }
+
     /// Check if any chunk needs mesh rebuild
     pub fn has_dirty_chunks(&self) -> bool {
         self.any_dirty
@@ -370,5 +419,71 @@ mod tests {
 
         // Way outside bounds - should return air (not crash)
         assert!(world.get_voxel(1000, 1000, 1000).is_air());
+    }
+
+    #[test]
+    fn scene_center_is_none_for_empty_world() {
+        let world = World::new();
+        assert!(world.scene_center().is_none());
+    }
+
+    #[test]
+    fn scene_center_for_single_voxel_is_cell_center() {
+        // A voxel at integer position `p` occupies the AABB
+        // [p, p+1)^3, whose center is at p + 0.5.
+        let mut world = World::new();
+        world.set_voxel(5, 7, 11, Voxel::from_rgb(255, 0, 0));
+        let center = world.scene_center().expect("non-empty");
+        assert!((center.x - 5.5).abs() < 1e-4);
+        assert!((center.y - 7.5).abs() < 1e-4);
+        assert!((center.z - 11.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn scene_center_spans_aabb_of_all_solid_voxels() {
+        // Two voxels at opposite corners of a 3-cell range. AABB is
+        // [0, 3) ∪ [2, 3) — wait, let me redo: AABB of two cells at
+        // (0,0,0) and (2,2,2) covers integers {0..2} per axis, so
+        // continuous AABB is [0, 3) per axis, center (1.5, 1.5, 1.5).
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
+        world.set_voxel(2, 2, 2, Voxel::from_rgb(0, 255, 0));
+        let center = world.scene_center().expect("non-empty");
+        assert!(
+            (center - Vec3::new(1.5, 1.5, 1.5)).length() < 1e-4,
+            "got {:?}",
+            center
+        );
+    }
+
+    #[test]
+    fn scene_center_ignores_air_writes() {
+        // Writing AIR shouldn't extend the AABB. Set one solid voxel
+        // and one explicit-air write at a far-away position; center
+        // should reflect only the solid voxel.
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
+        world.set_voxel(100, 100, 100, Voxel::AIR);
+        let center = world.scene_center().expect("non-empty");
+        assert!(
+            (center - Vec3::new(0.5, 0.5, 0.5)).length() < 1e-4,
+            "AIR write extended AABB; got {:?}",
+            center
+        );
+    }
+
+    #[test]
+    fn scene_center_handles_negative_coordinates() {
+        // AABB across the origin, including negative coords. Range
+        // (-2..=1) per axis → continuous [-2, 2), center (0, 0, 0).
+        let mut world = World::new();
+        world.set_voxel(-2, -2, -2, Voxel::from_rgb(255, 0, 0));
+        world.set_voxel(1, 1, 1, Voxel::from_rgb(0, 255, 0));
+        let center = world.scene_center().expect("non-empty");
+        assert!(
+            (center - Vec3::ZERO).length() < 1e-4,
+            "got {:?}",
+            center
+        );
     }
 }

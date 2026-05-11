@@ -12,6 +12,7 @@ mod raycast;
 mod selection;
 mod shapes;
 mod tools;
+mod transform;
 
 pub use clipboard::{
     build_clear_changes, build_move_changes, build_paste_changes,
@@ -24,6 +25,10 @@ pub use shapes::{box_voxels, cylinder_voxels, line_voxels, sphere_voxels};
 pub use tools::{
     compute_flood_fill_changes, eyedrop, flood_fill, flood_fill_multi, BrushTool, EditorTool,
     Tool, ToolContext,
+};
+pub use transform::{
+    build_remap_changes, mirror_pos, mirror_selection_changes, rotate_pos,
+    rotate_selection_changes, rotated_aabb, Axis, Quarter,
 };
 
 use crate::core::Voxel;
