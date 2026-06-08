@@ -1,0 +1,53 @@
+name: CI
+
+# Build + test gate. Runs on windows-latest because that is the project's
+# primary/verified platform (Vulkan; see docs/PROGRESS.md) and avoids the
+# Linux system-dependency dance that rfd/winit/wgpu need just to compile.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy/rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # The two blocking gates: it must compile and the tests must pass.
+      - name: Build (all targets)
+        run: cargo build --all-targets --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      # Informational for now. The codebase carries a handful of
+      # pre-existing clippy lints and uses a deliberate narrow manual
+      # format that differs from rustfmt's defaults, so neither is a
+      # hard gate yet. Flip `continue-on-error` to false (and add
+      # `-- -D warnings` to clippy) once a dedicated cleanup pass lands —
+      # see docs/ROADMAP.md P0.2.
+      - name: Clippy (informational)
+        run: cargo clippy --all-targets
+        continue-on-error: true
+
+      - name: Format check (informational)
+        run: cargo fmt --check
+        continue-on-error: true

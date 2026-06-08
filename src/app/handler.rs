@@ -52,12 +52,25 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.save_prefs();
+                // Clean shutdown: drop the crash-recovery autosave so the
+                // next launch doesn't mistake this for a crash.
+                self.delete_autosave();
                 event_loop.exit();
             }
 
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
+                }
+            }
+
+            WindowEvent::Focused(false) => {
+                // Losing focus (alt-tab, or a modal Save/Open dialog
+                // taking over) means key-release events can be delivered
+                // elsewhere. Forget held keys so flight doesn't resume
+                // with a phantom WASD key stuck down when focus returns.
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.camera_controller.clear_keys();
                 }
             }
 
@@ -83,8 +96,27 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if !egui_consumed {
                     if let PhysicalKey::Code(key) = event.physical_key {
-                        if let Some(renderer) = &mut self.renderer {
-                            renderer.camera_controller.process_keyboard(key, event.state);
+                        // Command chords (Ctrl/Super + key) are editor
+                        // shortcuts, not fly-camera input. Feeding the
+                        // chord's letter (e.g. the 'S' in Ctrl+S) to the
+                        // controller would dolly the camera while held —
+                        // and if a modal Save/Open dialog swallows the
+                        // key-release, the camera drifts forever. So drop
+                        // the *press* while a command modifier is held,
+                        // but always forward the *release* so a key pressed
+                        // before the modifier (hold W, then tap Ctrl) can
+                        // never get stuck "down". Sprint lives on Shift
+                        // (see `CameraController::update`), which isn't a
+                        // command modifier, so Shift+WASD is unaffected.
+                        let command_chord =
+                            self.modifiers.control_key() || self.modifiers.super_key();
+                        let skip_camera = command_chord && event.state.is_pressed();
+                        if !skip_camera {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer
+                                    .camera_controller
+                                    .process_keyboard(key, event.state);
+                            }
                         }
 
                         if event.state.is_pressed() {
@@ -254,6 +286,7 @@ impl ApplicationHandler for App {
                 self.update_brush_preview();
                 self.update_selection_visualization();
                 self.rebuild_all_meshes();
+                self.tick_autosave();
                 self.render_frame(dt);
 
                 if let Some(window) = &self.window {

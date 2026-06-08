@@ -100,8 +100,15 @@ impl VoxelGenerator for PerlinTerrain {
         let stone = Voxel::from_rgb(128, 128, 128);
         let dirt_band: i32 = 4;
 
-        for z in -half_d..half_d {
-            for x in -half_w..half_w {
+        // Span exactly width × depth columns, centered on the origin.
+        // Upper bound is `dim - half` (not `half`): for odd sizes the
+        // half-open `-half..half` range would drop the final column/row
+        // (e.g. width 255 → only 254 columns). Even sizes are unchanged
+        // (dim - half == half).
+        let x_end = self.width as i32 - half_w;
+        let z_end = self.depth as i32 - half_d;
+        for z in -half_d..z_end {
+            for x in -half_w..x_end {
                 // FBM: sum octaves with halving amplitude / doubling frequency.
                 // Track total amplitude to normalize the output back to ~[-1, 1].
                 let mut acc = 0.0_f64;
@@ -201,6 +208,33 @@ mod tests {
             ..Default::default()
         };
         assert!(g.generate().is_err());
+    }
+
+    #[test]
+    fn test_odd_dimensions_generate_full_extent() {
+        // Regression: `-half..half` dropped the last column/row for odd
+        // width/depth (e.g. 255 -> 254). The footprint must span the
+        // full requested width × depth. Every column gets at least one
+        // voxel (min_height..=h always includes min_height), so the count
+        // of distinct x / z equals width / depth.
+        let g = PerlinTerrain {
+            seed: 3,
+            width: 9,
+            depth: 7,
+            min_height: 0,
+            max_height: 8,
+            ..Default::default()
+        };
+        let patch = g.generate().unwrap();
+        let xs: std::collections::HashSet<i32> =
+            patch.voxels.iter().map(|((x, _, _), _)| *x).collect();
+        let zs: std::collections::HashSet<i32> =
+            patch.voxels.iter().map(|((_, _, z), _)| *z).collect();
+        assert_eq!(xs.len(), 9, "odd width should yield 9 columns, got {}", xs.len());
+        assert_eq!(zs.len(), 7, "odd depth should yield 7 rows, got {}", zs.len());
+        // Centered span: -half ..= dim-half-1.
+        assert_eq!((*xs.iter().min().unwrap(), *xs.iter().max().unwrap()), (-4, 4));
+        assert_eq!((*zs.iter().min().unwrap(), *zs.iter().max().unwrap()), (-3, 3));
     }
 
     #[test]

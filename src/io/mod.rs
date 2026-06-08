@@ -22,7 +22,47 @@ pub use vox::{
     export_vox, import_vox,
 };
 
+use std::io::{self, Read};
 use std::path::Path;
+
+/// Read exactly `len` bytes from `reader` without trusting `len` enough
+/// to pre-allocate it.
+///
+/// The voxel importers read length / count fields straight out of files
+/// that may be corrupt or hostile. `vec![0u8; len]` would eagerly
+/// reserve whatever the file claims — up to ~4 GiB from one bogus `u32`
+/// — and the process aborts on that allocation before ever discovering
+/// the stream is short. `Read::take(len).read_to_end` instead grows the
+/// buffer only to the bytes actually present, so peak allocation tracks
+/// real data, not the declared length. We still require the full `len`
+/// bytes (matching `read_exact`) and report a short stream as
+/// `UnexpectedEof`.
+pub(super) fn read_exact_vec<R: Read>(reader: &mut R, len: usize) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let read = reader.take(len as u64).read_to_end(&mut buf)?;
+    if read != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "declared length exceeds available data",
+        ));
+    }
+    Ok(buf)
+}
+
+/// Skip exactly `n` bytes of `reader` by streaming them to a sink, so a
+/// huge declared length can't trigger a huge allocation (unlike
+/// `vec![0u8; n]` + `read_exact`). Errors as `UnexpectedEof` if the
+/// stream ends early.
+pub(super) fn skip_bytes<R: Read>(reader: &mut R, n: u64) -> io::Result<()> {
+    let copied = io::copy(&mut reader.take(n), &mut io::sink())?;
+    if copied != n {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "declared chunk length exceeds available data",
+        ));
+    }
+    Ok(())
+}
 
 /// Supported file formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,4 +134,40 @@ pub fn export_formats() -> Vec<FileFormat> {
         FileFormat::Obj,
         FileFormat::Glb,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn read_exact_vec_reads_full_len() {
+        let mut c = Cursor::new(vec![1u8, 2, 3, 4, 5]);
+        assert_eq!(read_exact_vec(&mut c, 3).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn read_exact_vec_errors_on_short_stream_without_huge_alloc() {
+        // Declares 4 GiB but only 4 bytes exist. Must surface
+        // UnexpectedEof rather than attempt a 4 GiB allocation — this
+        // is the whole point of routing importer reads through here.
+        let mut c = Cursor::new(vec![0u8; 4]);
+        let err = read_exact_vec(&mut c, 4 * 1024 * 1024 * 1024).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn skip_bytes_advances_then_reads() {
+        let mut c = Cursor::new(vec![1u8, 2, 3, 4, 5]);
+        skip_bytes(&mut c, 2).unwrap();
+        assert_eq!(read_exact_vec(&mut c, 3).unwrap(), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn skip_bytes_errors_on_short_stream() {
+        let mut c = Cursor::new(vec![0u8; 4]);
+        let err = skip_bytes(&mut c, 9_999_999_999).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
 }

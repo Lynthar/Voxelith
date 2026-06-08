@@ -10,13 +10,19 @@
 //! 2. **Poll** — GET the status URL every 2 s until status is
 //!    `COMPLETED` (translate `IN_QUEUE` / `IN_PROGRESS` to indeterminate
 //!    progress events for the UI).
-//! 3. **Fetch result** — GET the response URL, parse out
-//!    `model_mesh.url`.
+//! 3. **Fetch result** — GET the response URL, parse out the GLB URL
+//!    (`model_glb.url`, falling back to `model_urls.glb.url`).
 //! 4. **Download GLB** — GET that url, return bytes.
 //!
-//! The whole pipeline runs as a single async task on `App::ai_runtime`;
-//! cancellation checkpoints sit between each stage so the worst-case
-//! cancel latency is one poll interval (≈ 2 s).
+//! The whole pipeline runs as a single async task on `App::ai_runtime`.
+//! Cancellation is cooperative, checked between stages. During the poll
+//! phase — where the remote GPU job actually runs and bills — a Cancel
+//! is observed within one poll interval (≈ 2 s) and also fires a
+//! best-effort `PUT` to the queue `cancel_url`, so fal.ai drops/stops
+//! the job instead of finishing it for nothing. After the job has
+//! COMPLETED (result fetch → GLB download → voxelize) a Cancel just
+//! discards local work at the next checkpoint; those stages aren't
+//! interrupted mid-flight, but there's no remote cost left to save.
 //!
 //! API keys come from the OS keychain at submit time (so a user
 //! who clicks Save in the panel doesn't need to restart). The key
@@ -133,13 +139,21 @@ async fn run_pipeline(
     let queue = fal_submit(http, &api_key, &request.prompt).await?;
     let _ = events_tx.send(JobEvent::Submitted);
 
-    fal_poll_until_done(http, &api_key, &queue.status_url, cancel, events_tx).await?;
+    fal_poll_until_done(
+        http,
+        &api_key,
+        &queue.status_url,
+        queue.cancel_url.as_deref(),
+        cancel,
+        events_tx,
+    )
+    .await?;
 
     check_cancel(cancel)?;
-    let result = fal_fetch_result(http, &api_key, &queue.response_url).await?;
+    let glb_url = fal_fetch_result(http, &api_key, &queue.response_url).await?;
 
     check_cancel(cancel)?;
-    let glb_bytes = fal_download_glb(http, &result.model_mesh.url).await?;
+    let glb_bytes = fal_download_glb(http, &glb_url).await?;
     let byte_count = glb_bytes.len();
     let _ = events_tx.send(JobEvent::GlbReady { byte_count });
 
@@ -185,6 +199,12 @@ struct QueueSubmitResponse {
     request_id: String,
     status_url: String,
     response_url: String,
+    /// Queue cancel endpoint — `PUT` here to drop a queued job or
+    /// signal an in-progress runner to stop, freeing the user's quota.
+    /// `Option` so a response without it still parses (remote cancel
+    /// then degrades to a local-only cancel).
+    #[serde(default)]
+    cancel_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,11 +214,38 @@ struct QueueStatusResponse {
     queue_position: Option<u32>,
 }
 
-/// Hunyuan3D V3 result envelope. The model returns a single GLB mesh;
-/// we ignore the other fields (seed, intermediate previews) for now.
+/// Hunyuan3D V3 result envelope. The textured mesh comes back in
+/// `model_glb` (a File object); the same GLB is also reachable via the
+/// per-format map `model_urls.glb`. Other fields (thumbnail, seed) are
+/// ignored.
+///
+/// Both are `Option` so a minor provider-side schema change (one
+/// present but not the other) still resolves a URL via `glb_url`
+/// instead of hard-failing at deserialization. Verified against the
+/// fal.ai docs example: top-level field is `model_glb`, NOT
+/// `model_mesh` (an earlier mismatch silently broke the fetch stage).
 #[derive(Debug, Deserialize)]
 struct HunyuanResult {
-    model_mesh: ModelFile,
+    #[serde(default)]
+    model_glb: Option<ModelFile>,
+    #[serde(default)]
+    model_urls: Option<ModelUrls>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelUrls {
+    #[serde(default)]
+    glb: Option<ModelFile>,
+}
+
+impl HunyuanResult {
+    /// Resolve the GLB download URL, preferring the top-level
+    /// `model_glb` and falling back to `model_urls.glb`.
+    fn glb_url(self) -> Option<String> {
+        self.model_glb
+            .or_else(|| self.model_urls.and_then(|u| u.glb))
+            .map(|f| f.url)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,8 +271,16 @@ async fn fal_submit(
         .context("HTTP submit")?;
     let status = resp.status();
     if !status.is_success() {
+        let code = status.as_u16();
         let body_text = resp.text().await.unwrap_or_default();
-        bail!("Submit {}: {}", status.as_u16(), short(&body_text, 200));
+        // 401/403 is almost always a missing/invalid key — point the
+        // user straight at the fix instead of a bare status code.
+        let hint = if code == 401 || code == 403 {
+            " (check your fal.ai API key in the AI panel)"
+        } else {
+            ""
+        };
+        bail!("Submit {}: {}{}", code, short(&body_text, 200), hint);
     }
     resp.json::<QueueSubmitResponse>()
         .await
@@ -236,11 +291,20 @@ async fn fal_poll_until_done(
     http: &Client,
     api_key: &str,
     status_url: &str,
+    cancel_url: Option<&str>,
     cancel: &AtomicBool,
     events_tx: &mpsc::Sender<JobEvent>,
 ) -> Result<()> {
     for attempt in 0..MAX_POLL_ATTEMPTS {
-        check_cancel(cancel)?;
+        if cancel.load(Ordering::Acquire) {
+            // User cancelled while the remote job is queued/running.
+            // Tell fal.ai to stop it (best-effort) so it doesn't keep
+            // burning the user's quota after we walk away.
+            if let Some(url) = cancel_url {
+                fal_cancel(http, api_key, url).await;
+            }
+            bail!("Cancelled");
+        }
         sleep(POLL_INTERVAL).await;
 
         let resp = match http
@@ -296,7 +360,7 @@ async fn fal_fetch_result(
     http: &Client,
     api_key: &str,
     response_url: &str,
-) -> Result<HunyuanResult> {
+) -> Result<String> {
     let resp = http
         .get(response_url)
         .header("Authorization", format!("Key {}", api_key))
@@ -312,9 +376,13 @@ async fn fal_fetch_result(
             short(&body_text, 200)
         );
     }
-    resp.json::<HunyuanResult>()
+    let result = resp
+        .json::<HunyuanResult>()
         .await
-        .context("Parsing result JSON")
+        .context("Parsing result JSON")?;
+    result.glb_url().ok_or_else(|| {
+        anyhow!("Result JSON had no GLB URL (model_glb / model_urls.glb)")
+    })
 }
 
 async fn fal_download_glb(http: &Client, url: &str) -> Result<Vec<u8>> {
@@ -327,6 +395,23 @@ async fn fal_download_glb(http: &Client, url: &str) -> Result<Vec<u8>> {
     }
     let bytes = resp.bytes().await.context("Reading GLB body")?;
     Ok(bytes.to_vec())
+}
+
+/// Best-effort remote cancel: `PUT` the queue cancel URL so fal.ai drops
+/// a queued job or signals an in-progress runner to stop. Errors are
+/// logged and swallowed — by the time we call this the local job is
+/// already being torn down, and a failed cancel (e.g. the job just
+/// completed: `400 ALREADY_COMPLETED`) shouldn't surface as a job error.
+async fn fal_cancel(http: &Client, api_key: &str, cancel_url: &str) {
+    match http
+        .put(cancel_url)
+        .header("Authorization", format!("Key {}", api_key))
+        .send()
+        .await
+    {
+        Ok(resp) => log::info!("fal.ai cancel requested -> {}", resp.status().as_u16()),
+        Err(e) => log::warn!("fal.ai remote cancel failed: {}", e),
+    }
 }
 
 /// Truncate `s` to `max` chars, appending an ellipsis when truncated.
@@ -363,5 +448,54 @@ mod tests {
         let out = short(s, 5);
         assert!(out.starts_with("héllo"));
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn result_resolves_top_level_model_glb() {
+        // Mirrors the documented fal.ai Hunyuan3D V3 output: the GLB
+        // lives in `model_glb` (NOT `model_mesh`). Extra fields
+        // (thumbnail / seed / file metadata) must be ignored.
+        let json = r#"{
+            "model_glb": {
+                "file_size": 64724836,
+                "file_name": "model.glb",
+                "content_type": "model/gltf-binary",
+                "url": "https://v3b.fal.media/files/b/abc/model.glb"
+            },
+            "thumbnail": { "url": "https://v3b.fal.media/files/b/abc/preview.png" },
+            "model_urls": {
+                "glb": { "url": "https://v3b.fal.media/files/b/abc/model.glb" },
+                "obj": { "url": "https://v3b.fal.media/files/b/abc/model.obj" }
+            },
+            "seed": 42
+        }"#;
+        let result: HunyuanResult = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result.glb_url().as_deref(),
+            Some("https://v3b.fal.media/files/b/abc/model.glb")
+        );
+    }
+
+    #[test]
+    fn result_falls_back_to_model_urls_glb() {
+        // If only the per-format map is present, resolve via
+        // model_urls.glb rather than failing.
+        let json = r#"{
+            "model_urls": {
+                "glb": { "url": "https://cdn/alt.glb" },
+                "obj": { "url": "https://cdn/alt.obj" }
+            }
+        }"#;
+        let result: HunyuanResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.glb_url().as_deref(), Some("https://cdn/alt.glb"));
+    }
+
+    #[test]
+    fn result_without_any_glb_yields_none() {
+        // No GLB anywhere -> None, so the caller surfaces a clean
+        // "no GLB URL" error instead of downloading garbage.
+        let json = r#"{ "thumbnail": { "url": "https://cdn/preview.png" }, "seed": 7 }"#;
+        let result: HunyuanResult = serde_json::from_str(json).unwrap();
+        assert!(result.glb_url().is_none());
     }
 }

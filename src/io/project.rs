@@ -17,6 +17,13 @@ use thiserror::Error;
 const PROJECT_MAGIC: [u8; 4] = [b'V', b'X', b'L', b'T'];
 /// Current project format version
 const PROJECT_VERSION: u32 = 1;
+/// Cap for the chunk-vector capacity *hint* read from the file header.
+/// `chunk_count` is untrusted; the hint is only a preallocation
+/// optimization, so bounding it stops a corrupt file from requesting a
+/// giant eager allocation. The read loop still consumes the full
+/// declared count and errors cleanly if the stream is short. 4096 chunks
+/// covers a 512³ world; larger ones just grow the Vec a few times.
+const MAX_CHUNK_HINT: usize = 4096;
 
 /// Errors that can occur when reading/writing project files
 #[derive(Debug, Error)]
@@ -214,8 +221,7 @@ impl Project {
         let mut len_buf = [0u8; 4];
         decoder.read_exact(&mut len_buf)?;
         let header_len = u32::from_le_bytes(len_buf) as usize;
-        let mut header_bytes = vec![0u8; header_len];
-        decoder.read_exact(&mut header_bytes)?;
+        let header_bytes = super::read_exact_vec(&mut decoder, header_len)?;
 
         let (metadata, editor_state): (ProjectMetadata, EditorState) =
             serde_json::from_slice(&header_bytes)?;
@@ -224,8 +230,11 @@ impl Project {
         decoder.read_exact(&mut len_buf)?;
         let chunk_count = u32::from_le_bytes(len_buf) as usize;
 
-        // Read chunks
-        let mut chunks = Vec::with_capacity(chunk_count);
+        // Read chunks. Cap the capacity hint so a bogus chunk_count from
+        // a corrupt file can't request a huge eager allocation; the loop
+        // below still reads the full count and fails via read_exact if
+        // the data runs short.
+        let mut chunks = Vec::with_capacity(chunk_count.min(MAX_CHUNK_HINT));
         for _ in 0..chunk_count {
             // Read position
             let mut pos_buf = [0u8; 4];
@@ -239,8 +248,7 @@ impl Project {
             // Read RLE data
             decoder.read_exact(&mut len_buf)?;
             let rle_len = u32::from_le_bytes(len_buf) as usize;
-            let mut rle_data = vec![0u8; rle_len];
-            decoder.read_exact(&mut rle_data)?;
+            let rle_data = super::read_exact_vec(&mut decoder, rle_len)?;
 
             chunks.push(ChunkData {
                 pos: ChunkPos::new(x, y, z),
@@ -405,6 +413,59 @@ mod tests {
         assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
         assert!(loaded_world.get_voxel(1, 1, 1).is_solid());
         assert_eq!(loaded_world.get_voxel(1, 1, 1).g, 255);
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_editor_state_and_cross_chunk_voxels() {
+        // `test_project_roundtrip` checks a couple of voxels in one chunk.
+        // This pins the two things most likely to regress if RLE / chunk-
+        // index / header handling drifts: (a) full EditorState equality,
+        // and (b) exact voxel round-trip across negative coordinates and
+        // several chunks (incl. alpha).
+        let mut world = World::new();
+        let samples = [
+            ((0, 0, 0), Voxel::from_rgb(255, 0, 0)),
+            ((-1, -1, -1), Voxel::from_rgb(0, 255, 0)), // chunk (-1,-1,-1)
+            ((31, 31, 31), Voxel::from_rgb(0, 0, 255)), // far corner of (0,0,0)
+            ((32, 5, -33), Voxel::from_rgba(10, 20, 30, 200)), // chunk (1,0,-2)
+        ];
+        for ((x, y, z), v) in samples {
+            world.set_voxel(x, y, z, v);
+        }
+
+        let state = EditorState {
+            camera_position: [1.5, -2.0, 3.25],
+            camera_target: [0.0, 4.0, -1.0],
+            brush_color: [12, 34, 56, 200],
+            palette: vec![[1, 2, 3, 4], [255, 254, 253, 252]],
+            selected_tool: 4,
+        };
+
+        let project = Project::from_world_with_state(&world, state.clone());
+        let mut buffer = Vec::new();
+        project.save(&mut buffer).unwrap();
+        let loaded = Project::load(&mut buffer.as_slice()).unwrap();
+
+        // EditorState round-trips field-for-field.
+        let es = &loaded.editor_state;
+        assert_eq!(es.camera_position, state.camera_position);
+        assert_eq!(es.camera_target, state.camera_target);
+        assert_eq!(es.brush_color, state.brush_color);
+        assert_eq!(es.palette, state.palette);
+        assert_eq!(es.selected_tool, state.selected_tool);
+
+        // Every set voxel survives — negatives, far chunks, exact rgba.
+        let loaded_world = loaded.to_world();
+        for ((x, y, z), v) in samples {
+            assert_eq!(
+                loaded_world.get_voxel(x, y, z),
+                v,
+                "voxel ({}, {}, {}) did not round-trip",
+                x,
+                y,
+                z
+            );
+        }
     }
 
     #[test]
