@@ -23,6 +23,14 @@ use thiserror::Error;
 
 /// VOX file magic number: "VOX "
 const VOX_MAGIC: [u8; 4] = [b'V', b'O', b'X', b' '];
+/// Caps for `Vec`/`HashMap` capacity *hints* taken from file-declared
+/// counts. Those counts come from untrusted files; the hint is only a
+/// preallocation optimization, so capping it prevents a bogus count
+/// from requesting a multi-gigabyte eager allocation. The read loops
+/// still consume the full declared count and fail cleanly via
+/// `read_exact` on a short stream. Real models / dicts are far smaller.
+const MAX_VOXEL_HINT: usize = 1 << 20;
+const MAX_DICT_HINT: usize = 256;
 /// Version we write for export. v150 is the universal reader format.
 const VOX_VERSION_WRITE: i32 = 150;
 /// Versions we accept on read. v150 = basic format, v200 = extended
@@ -94,8 +102,7 @@ fn read_vox_string<R: Read>(reader: &mut R) -> io::Result<String> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
     let len = i32::from_le_bytes(buf).max(0) as usize;
-    let mut bytes = vec![0u8; len];
-    reader.read_exact(&mut bytes)?;
+    let bytes = super::read_exact_vec(reader, len)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -106,7 +113,10 @@ fn read_vox_dict<R: Read>(reader: &mut R) -> io::Result<HashMap<String, String>>
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
     let n = i32::from_le_bytes(buf).max(0) as usize;
-    let mut out = HashMap::with_capacity(n);
+    // Cap the capacity hint — `n` is attacker-controlled. Dicts are
+    // tiny in practice; the loop reads exactly `n` pairs and fails via
+    // read_exact if the stream is short.
+    let mut out = HashMap::with_capacity(n.min(MAX_DICT_HINT));
     for _ in 0..n {
         let key = read_vox_string(reader)?;
         let value = read_vox_string(reader)?;
@@ -320,8 +330,10 @@ impl VoxScene {
                 b"XYZI" => {
                     let mut buf = [0u8; 4];
                     reader.read_exact(&mut buf)?;
-                    let num_voxels = i32::from_le_bytes(buf) as usize;
-                    let mut voxels = Vec::with_capacity(num_voxels);
+                    // `.max(0)` first: a negative count would sign-extend
+                    // to a colossal usize and make `with_capacity` abort.
+                    let num_voxels = i32::from_le_bytes(buf).max(0) as usize;
+                    let mut voxels = Vec::with_capacity(num_voxels.min(MAX_VOXEL_HINT));
                     for _ in 0..num_voxels {
                         let mut voxel_data = [0u8; 4];
                         reader.read_exact(&mut voxel_data)?;
@@ -367,12 +379,10 @@ impl VoxScene {
                 }
                 _ => {
                     // Skip MATL / LAYR / IMAP / rOBJ / rCAM / NOTE /
-                    // INFO / PACK / MATT / unknowns by reading
-                    // exactly `content_size` bytes — the spec
-                    // guarantees the header tells the truth.
-                    let to_skip = chunk_header.content_size.max(0) as usize;
-                    let mut skip_buf = vec![0u8; to_skip];
-                    reader.read_exact(&mut skip_buf)?;
+                    // INFO / PACK / MATT / unknowns by streaming past
+                    // exactly `content_size` bytes — no big buffer
+                    // allocation even if a corrupt header inflates it.
+                    super::skip_bytes(reader, chunk_header.content_size.max(0) as u64)?;
                 }
             }
 
@@ -380,9 +390,7 @@ impl VoxScene {
             // all declare children_size = 0; v150 also doesn't use
             // nested chunks under MAIN's children. Skip defensively.
             if chunk_header.children_size > 0 {
-                let mut skip_buf =
-                    vec![0u8; chunk_header.children_size as usize];
-                reader.read_exact(&mut skip_buf)?;
+                super::skip_bytes(reader, chunk_header.children_size as u64)?;
             }
         }
 
@@ -600,7 +608,9 @@ fn read_ngrp_chunk<R: Read>(
     let _attrs = read_vox_dict(reader)?;
     reader.read_exact(&mut i32buf)?;
     let num_children = i32::from_le_bytes(i32buf).max(0) as usize;
-    let mut children = Vec::with_capacity(num_children);
+    // Cap the hint — count is untrusted; 64K node ids already dwarfs any
+    // real scene graph. The loop still reads the full count.
+    let mut children = Vec::with_capacity(num_children.min(1 << 16));
     for _ in 0..num_children {
         reader.read_exact(&mut i32buf)?;
         children.push(i32::from_le_bytes(i32buf));
@@ -620,7 +630,8 @@ fn read_nshp_chunk<R: Read>(
     let _attrs = read_vox_dict(reader)?;
     reader.read_exact(&mut i32buf)?;
     let num_models = i32::from_le_bytes(i32buf).max(0) as usize;
-    let mut model_ids = Vec::with_capacity(num_models);
+    // Cap the hint — count is untrusted (same rationale as nGRP).
+    let mut model_ids = Vec::with_capacity(num_models.min(1 << 16));
     for _ in 0..num_models {
         reader.read_exact(&mut i32buf)?;
         model_ids.push(i32::from_le_bytes(i32buf));

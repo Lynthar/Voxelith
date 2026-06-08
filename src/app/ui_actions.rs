@@ -14,6 +14,7 @@ impl App {
             match action {
                 UiAction::Exit => {
                     self.save_prefs();
+                    self.delete_autosave();
                     std::process::exit(0)
                 }
                 UiAction::Undo => {
@@ -45,35 +46,21 @@ impl App {
                 UiAction::MirrorSelection { axis } => {
                     self.mirror_selection(axis);
                 }
+                // Each Generate* replaces the whole scene. `replace_scene`
+                // wipes world + history + stale GPU meshes before building
+                // the new geometry (see its doc comment for why the mesh
+                // wipe matters).
                 UiAction::GenerateTestCube => {
-                    self.world.clear();
-                    self.editor.history.clear();
-                    self.world.create_test_cube((0, 8, 0), 4);
-                    self.rebuild_all_meshes();
-                    // World was replaced — re-anchor orbit pivot on
-                    // the new scene so middle-orbit circles it.
-                    self.recenter_camera_on_scene();
+                    self.replace_scene(|app| app.world.create_test_cube((0, 8, 0), 4));
                 }
                 UiAction::GenerateGround => {
-                    self.world.clear();
-                    self.editor.history.clear();
-                    self.world.create_test_ground(20, 2);
-                    self.rebuild_all_meshes();
-                    self.recenter_camera_on_scene();
+                    self.replace_scene(|app| app.world.create_test_ground(20, 2));
                 }
                 UiAction::GenerateSphere => {
-                    self.world.clear();
-                    self.editor.history.clear();
-                    self.create_sphere((0, 10, 0), 6);
-                    self.rebuild_all_meshes();
-                    self.recenter_camera_on_scene();
+                    self.replace_scene(|app| app.create_sphere((0, 10, 0), 6));
                 }
                 UiAction::GeneratePyramid => {
-                    self.world.clear();
-                    self.editor.history.clear();
-                    self.create_pyramid((0, 0, 0), 10);
-                    self.rebuild_all_meshes();
-                    self.recenter_camera_on_scene();
+                    self.replace_scene(|app| app.create_pyramid((0, 0, 0), 10));
                 }
                 UiAction::ResetCamera => {
                     // Reset camera target to the scene's AABB center
@@ -146,6 +133,30 @@ impl App {
                 UiAction::AiClearKey => self.clear_ai_key(),
             }
         }
+    }
+
+    /// Wholesale-replace the scene with freshly-built geometry: wipe
+    /// the world, undo history, **and the stale GPU chunk meshes**,
+    /// run `build`, re-mesh the new chunks, and re-anchor the orbit
+    /// pivot on the new scene.
+    ///
+    /// The `chunk_meshes.clear()` is the load-bearing step. `World::
+    /// clear()` only drops the chunks; `rebuild_all_meshes()` then
+    /// re-meshes the *new* world's dirty chunks. Any chunk position the
+    /// previous scene occupied but the new one doesn't is never visited
+    /// again, so without this wipe its GPU mesh lingers and renders as
+    /// ghost geometry over an otherwise-correct world. The file-ops
+    /// paths (new/open/import) and ClearAll already do this; the
+    /// Generate* menu items used to skip it.
+    fn replace_scene(&mut self, build: impl FnOnce(&mut Self)) {
+        self.world.clear();
+        self.editor.history.clear();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.chunk_meshes.clear();
+        }
+        build(self);
+        self.rebuild_all_meshes();
+        self.recenter_camera_on_scene();
     }
 
     /// Evaluate the pipeline graph and apply its output through

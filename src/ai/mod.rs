@@ -6,8 +6,8 @@
 //! dedicated background thread, started in `App::new`). UI gestures
 //! ("Generate") spawn an async task on the runtime via the runtime's
 //! [`tokio::runtime::Handle`]. The task talks to a remote provider
-//! (currently a [`MockProvider`] for Phase 1; Phase 2 adds the real
-//! fal.ai client) and emits [`JobEvent`]s through a `std::sync::mpsc`
+//! (the real [`FalHunyuanProvider`] by default; [`MockProvider`] is
+//! used in tests) and emits [`JobEvent`]s through a `std::sync::mpsc`
 //! channel back to the main thread, which drains them every frame in
 //! `App::tick_ai_job` to advance an [`AiJobState`] machine.
 //!
@@ -21,9 +21,9 @@
 //! - [`provider`]: `AiProvider` trait + `AiRequest` / `JobHandle` types
 //! - [`runtime`]: `AiRuntime` (tokio thread + handle)
 //! - [`keyring_store`]: load/save/clear API key
-//! - [`mock`]: a `MockProvider` for Phase 1 wiring tests
-//! - [`client`]: real fal.ai HTTP client (Phase 2 — currently empty stub)
-//! - [`voxelize`]: mesh → voxel conversion (Phase 3 — currently empty stub)
+//! - [`mock`]: a `MockProvider` for tests / offline wiring
+//! - [`client`]: real fal.ai HTTP client (Hunyuan3D V3 text-to-3D, queue API)
+//! - [`voxelize`]: mesh → voxel conversion (GLB → `VoxelPatch`)
 
 mod client;
 mod job;

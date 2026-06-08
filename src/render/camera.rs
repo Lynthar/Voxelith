@@ -140,6 +140,14 @@ impl CameraController {
         }
     }
 
+    /// Forget all currently-held keys. Called on window focus loss so a
+    /// key whose release was delivered to another window (alt-tab, a
+    /// modal file dialog) can't leave the fly-camera drifting when focus
+    /// returns.
+    pub fn clear_keys(&mut self) {
+        self.pressed_keys.clear();
+    }
+
     /// Handle mouse button input.
     ///
     /// Takes `&mut Camera` so middle-press can sync orbit state from
@@ -345,7 +353,14 @@ impl CameraController {
         }
 
         if movement != Vec3::ZERO {
-            let speed = if self.pressed_keys.contains(&KeyCode::ControlLeft) {
+            // Hold Shift to fly 3× faster (FPS convention). Sprint moved
+            // off Ctrl: Ctrl is the editor's command modifier (Ctrl+S,
+            // Ctrl+A, …) and the window handler now drops Ctrl-chord key
+            // presses before they reach the controller, so a Ctrl-based
+            // sprint could never fire anyway.
+            let sprint = self.pressed_keys.contains(&KeyCode::ShiftLeft)
+                || self.pressed_keys.contains(&KeyCode::ShiftRight);
+            let speed = if sprint {
                 self.speed * 3.0
             } else {
                 self.speed

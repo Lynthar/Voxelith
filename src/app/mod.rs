@@ -24,7 +24,7 @@ mod ui_actions;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use winit::{keyboard::ModifiersState, window::Window};
@@ -50,6 +50,11 @@ use preview::PreviewState;
 /// preview (0.5) so the brush hint stays legible against existing
 /// voxels of similar color.
 const BRUSH_PREVIEW_ALPHA: f32 = 0.75;
+
+/// How often `tick_autosave` writes the crash-recovery file while there
+/// are unsaved changes. Long enough that saving a big world doesn't
+/// hitch editing, short enough that a crash loses little work.
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Main application state.
 pub struct App {
@@ -184,6 +189,16 @@ pub struct App {
     /// Cached "is an API key in the keychain?" so the UI doesn't hit
     /// the keyring every frame. Refreshed by save / clear actions.
     pub(super) ai_has_key: bool,
+
+    /// Voxel data changed since the last time anything was persisted
+    /// (manual save *or* autosave). Set from `rebuild_all_meshes` (dirty
+    /// chunks ⟺ a voxel changed) and cleared by save / autosave / open /
+    /// new / import / initial-scene. Drives whether `tick_autosave`
+    /// bothers to write.
+    pub(super) unsaved_changes: bool,
+    /// When the last autosave ran. `tick_autosave` rate-limits writes to
+    /// `AUTOSAVE_INTERVAL`.
+    pub(super) last_autosave: Instant,
 }
 
 impl App {
@@ -268,6 +283,8 @@ impl App {
             ai_event_rx: None,
             ai_handle: None,
             ai_has_key: voxelith::ai::has_api_key("fal_ai"),
+            unsaved_changes: false,
+            last_autosave: Instant::now(),
         }
     }
 
@@ -622,7 +639,41 @@ impl App {
         self.egui_state = Some(egui_state);
         self.egui_renderer = Some(egui_renderer);
 
+        self.try_recover_or_initial_scene();
+    }
+
+    /// Startup branch: if a crash-recovery autosave is sitting on disk
+    /// (i.e. the last session didn't exit cleanly — a clean exit deletes
+    /// it), offer to recover it; otherwise show the default scene. Either
+    /// way the document starts "clean" so we don't immediately re-autosave
+    /// or prompt to recover the test scene.
+    fn try_recover_or_initial_scene(&mut self) {
+        if let Some(path) = Self::autosave_path() {
+            if path.exists() {
+                let choice = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Recover unsaved work?")
+                    .set_description(
+                        "Voxelith may have closed unexpectedly last time.\n\n\
+                         Recover your last auto-saved work? Choosing No discards \
+                         it and starts with a fresh scene.",
+                    )
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
+                if choice == rfd::MessageDialogResult::Yes
+                    && self.recover_from_autosave(&path)
+                {
+                    self.unsaved_changes = false;
+                    self.last_autosave = Instant::now();
+                    return;
+                }
+                // No, or the recovery file was unreadable — drop the stale
+                // autosave so it can't haunt the next launch, start fresh.
+                self.delete_autosave();
+            }
+        }
         self.create_initial_scene();
+        self.unsaved_changes = false;
     }
 
     /// Create the initial test scene shown on startup.
@@ -635,6 +686,59 @@ impl App {
         // middle-mouse orbit circles a point underneath the model and
         // the visible cube swings through a wide arc each rotation.
         self.recenter_camera_on_scene();
+    }
+
+    /// Path of the crash-recovery autosave, next to `prefs.ron` in the
+    /// platform config dir. `None` if the OS exposes no config dir.
+    fn autosave_path() -> Option<PathBuf> {
+        Prefs::config_path()
+            .and_then(|p| p.parent().map(|d| d.join("autosave.vxlt")))
+    }
+
+    /// Per-frame autosave tick. Cheap when idle (one bool + one elapsed
+    /// check). Writes at most once per `AUTOSAVE_INTERVAL`, and only when
+    /// there are unsaved changes to a non-empty world. Clears
+    /// `unsaved_changes` on a successful write so we don't rewrite an
+    /// unchanged world every interval; a failed write is logged and
+    /// retried next interval.
+    pub(super) fn tick_autosave(&mut self) {
+        if !self.unsaved_changes || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+            return;
+        }
+        // Don't autosave (or offer to recover) an empty scene — e.g. just
+        // after Clear All. Reset the timer so we don't re-check every frame.
+        if self.world.scene_center().is_none() {
+            self.unsaved_changes = false;
+            self.last_autosave = Instant::now();
+            return;
+        }
+        let Some(path) = Self::autosave_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let state = self.current_editor_state();
+        match voxelith::io::save_world_with_state(&self.world, state, &path) {
+            Ok(()) => {
+                log::info!("Autosaved to {}", path.display());
+                self.unsaved_changes = false;
+            }
+            Err(e) => log::warn!("Autosave failed: {}", e),
+        }
+        self.last_autosave = Instant::now();
+    }
+
+    /// Remove the crash-recovery autosave. Called on a clean exit (so the
+    /// next launch starts fresh) and when the user declines recovery.
+    pub(super) fn delete_autosave(&self) {
+        if let Some(path) = Self::autosave_path() {
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    log::warn!("Failed to remove autosave {}: {}", path.display(), e);
+                }
+            }
+        }
     }
 
     /// Snap `camera.target` to the world's scene-center (AABB of all
@@ -669,6 +773,14 @@ impl App {
         if dirty.is_empty() {
             return;
         }
+
+        // Dirty chunks this frame ⟺ voxel data changed (a write marks its
+        // chunk dirty; boundary writes also mark neighbors). This is the
+        // single chokepoint every edit / generation / AI / paste funnels
+        // through, so it's where we flag the document for autosave. The
+        // load / new / initial-scene paths clear the flag again after
+        // their own rebuild.
+        self.unsaved_changes = true;
 
         // Concurrent reads only: mesher acquires read locks on the
         // dirty chunk + 6 neighbors. Multiple workers operating on
