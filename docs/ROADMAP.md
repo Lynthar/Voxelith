@@ -47,11 +47,12 @@ When an item ships: check it off here and fold a one-line summary into
 - [ ] **new · S** Clippy/format cleanup pass → flip CI clippy to `-D warnings` and make `cargo fmt --check` a gate (both informational today; codebase has ~6 pre-existing lints + a deliberate narrow manual format)
 
 ### 0.3 Errors: "it failed" → "why + recovery action" — **done**
-- [x] Import failure: specific reason (wrong file / unsupported version / too large / truncated / corrupt-chunk) + recovery action in a native dialog, concise status one-liner — `describe_vox_import_error` (`src/app/file_ops.rs`)
+- [x] Import failure: specific reason (wrong file / unsupported version / too large / truncated / corrupt-chunk) + recovery action in an in-app egui dialog, concise status one-liner — `describe_vox_import_error` (`src/app/file_ops.rs`)
 - [x] Open failure: same treatment for .vxlt (`describe_project_open_error`)
-- [x] Save / export failure: native write-error dialog (permission / disk / path + try-different-location); save status says "your work is NOT saved" — `show_write_error`
+- [x] Save / export failure: in-app write-error dialog (permission / disk / path + try-different-location); save status says "your work is NOT saved" — `App::show_write_error`
 - [x] AI failure: messages already carry the stage (Submit / Fetch result / Parsing result / …); added a 401/403 "check your API key" hint — `src/ai/client.rs`
-- note: full per-field forensic detail (exact chunk offset / length field) is deferred to **2.1 pre-import inspection**, its natural home; native dialogs avoid overflowing the single-line status bar
+- note: full per-field forensic detail (exact chunk offset / length field) is deferred to **2.1 pre-import inspection**, its natural home; the dialogs avoid overflowing the single-line status bar
+- note: these dialogs (and the crash-recovery prompt) are **in-app egui windows, not `rfd::MessageDialog`** — calling the latter exits the process on the dev's winit+wgpu+Windows setup, which would crash exactly on a file-op failure (`rfd::FileDialog` is unaffected; see CLAUDE.md)
 
 ---
 
@@ -61,10 +62,11 @@ When an item ships: check it off here and fold a one-line summary into
 - [x] AABB + live status readout `Sel: W×H×D (N cells)`
 - [x] Move-drag wireframe ghost (`selection.translated`)
 - [x] Paste auto-selects the destination AABB
-- [ ] **new · S** Center + pivot markers on the selection wireframe
+- [x] Center + pivot markers on the selection wireframe (cyan center crosshair + orange `min`-corner anchor — `render/selection.rs`)
 - [ ] **new · M** Voxel-content ghost during move-drag (not just the wireframe) · needs: transparent overlay slot (exists)
 - [ ] **new · S** Selection follows moved content (parity with paste auto-select)
-- [ ] **new · S** Frame-selected camera · needs: 5.1 fit-distance
+- [x] Frame-selected camera (`F` with a selection, or the "Frame Sel." button)
+- [x] *(extra)* Rotate / mirror the selection from the keyboard (`R` / `Shift+R` / `M`); the menu items show the keys
 
 ### 1.2 Low-interference viewport HUD — **surface**
 - [ ] **surface · M** Edge HUD: active tool, mode, locked plane, shape phase, brush size, symmetry, selection size · all state already lives on `editor` / `App`; just an egui overlay
@@ -156,9 +158,9 @@ When an item ships: check it off here and fold a one-line summary into
 
 ## P5 — Viewport & feedback
 
-### 5.1 Framing — **partial**
-- [x] Recenter on scene (F key) + Top / Front / Side presets — `recenter_camera_on_scene`, `SetCameraView`
-- [ ] **new · S** Fit-distance framing: frame-all / frame-generated / frame-selected (adjusts distance to the AABB, not just the target) · enables: 1.1 frame-selected
+### 5.1 Framing — **done**
+- [x] Top / Front / Side presets — `SetCameraView` (the `recenter_camera_on_scene` helper is still used on world replacement)
+- [x] Fit-distance framing: frame-all / frame-selected / frame-generated — fits the camera *distance* to the AABB along the current view direction (`Camera::fit_distance`, `App::frame_camera_on_aabb`). `F` frames the selection or, with none, the whole scene; buttons in the viewport menu. `last_generated_bounds` tracks the most recent procgen/graph/AI footprint for "frame generated"
 
 ### 5.2 Viewport settings — **new**
 - [ ] **new · M** Grid / axis / fog / clip distance / background / light intensity panel · note: keep clip-distance & fog co-tuned (see CLAUDE.md "reach ↔ fog")
