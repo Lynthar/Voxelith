@@ -19,7 +19,7 @@ For coding-agent guidance (commands, invariants, conventions) see
 
 | | |
 |---|---|
-| **Tests** | 252 passing (`cargo test`) |
+| **Tests** | 263 passing (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Binary entry** | `src/main.rs` (~20 lines) → `src/app/` (App + winit `ApplicationHandler`) |
 
@@ -35,6 +35,8 @@ For coding-agent guidance (commands, invariants, conventions) see
 - 4 shape tools: Line (3D Bresenham) / Box (filled AABB) / Sphere (ellipsoid fitting drag bbox) / Cylinder (axis = bbox's longest dimension). **vengi-style two-phase drag**: first click + drag lays a footprint W × D on a locked face plane (ray-vs-plane projection — no 透视歧义, no "flat shape" bug), release transitions to height phase, cursor's vertical screen movement defines extruded H along the plane normal (~8 px / voxel), second click commits. Esc cancels. The full shape is one undo entry; symmetry expands shape voxels with mirrors before commit
 - **Brush drag-paint plane lock**: Place / Remove / Paint hold-and-drag stays on the first hit's face plane (vengi-style) — paint doesn't stack toward the camera as new voxels would otherwise occlude the next ray-vs-voxels hit. Works in empty world too (locks to y=0 ground plane)
 - **Box select + clipboard** (`Tool::Select`, shortcut `0`): drag corner-to-corner to mark an AABB region; status-bar live readout `Sel: W×H×D (N cells)`; bright-yellow line-pipeline wireframe occluded correctly by intervening voxels. **Inside-selection drag = move** (single `SetVoxels` Command — overlap-safe via `build_move_changes`, `Ctrl+Z` reverses the entire move including the overlap region). **Outside-selection drag = create new selection**. Arrow keys nudge X / Z (`Shift` × 10), `Ctrl+↑↓` nudges Y axis. **Clipboard**: `Ctrl+C/X/V`, `Ctrl+Shift+V` for paste-at-cursor (vengi-style two-channel paste), `Del` to clear non-air voxels in selection, `Ctrl+A` selects the AABB of every non-air voxel in the world, `Esc` / `Ctrl+D` deselect. Cut is a single Command (not Copy + Delete) so one undo restores everything. Paste auto-selects the destination AABB so Paste→drag→Paste chains naturally (vengi `autoSelectSolidVoxels` trick). Selection state itself is *not* on the undo stack — ephemeral marquee, like image editors
+- **Selection transforms + markers**: rotate (`R` / `Shift+R` around Y, full axis set in the `Selection` menu) and mirror (`M` across X, menu for Y / Z) the selection's voxels — each one undoable `SetVoxels`, `min`-corner-anchored so the AABB reshapes from a fixed corner. The wireframe carries a **cyan center crosshair** (mirror-plane center / `Frame Sel.` target) and an **orange `min`-corner anchor** (the corner a 90° rotation pins) so transforms are predictable
+- **Mouse release always clears in-flight state**: a button let go over an egui panel (e.g. dragging a selection out of the viewport onto one) still ends the stroke / commits the selection / uncaptures the orbit cursor. Press is gated by `egui_consumed`; release is **not** — otherwise the latch sticks and tools "stack" (an old box-select keeps tracking while a freshly-picked brush also paints)
 - Spherical brush (radius 1–10)
 - Drag-paint with 8 px dead-zone (click ≠ accidental streak)
 - Stroke merging undo: consecutive `SetVoxels` within 200 ms collapse into one undo entry; `end_stroke()` on mouse-up
@@ -44,7 +46,7 @@ For coding-agent guidance (commands, invariants, conventions) see
 - `flood_fill` capped by both voxel count and chebyshev distance from start; Fill tool guards air to avoid flooding empty regions
 - Alt-key transient eyedropper
 - Color palette panel with custom additions
-- Standard shortcuts: `1-5` brush tools, `6-9` shape tools (Line/Box/Sphere/Cylinder), `0` box-select tool, `Ctrl+Z/Y` undo/redo, `Ctrl+C/X/V/A/D` selection clipboard ops, `Del` delete selection, arrow keys nudge selection, `Ctrl+S/O/N` file ops, `WASD/Q/E` camera, middle-mouse orbit, right-mouse pan, scroll zoom. Orbit angles re-derive from the camera's actual position+target on every middle-press, so Reset Camera / Set Camera View / pan / WASD never cause "first orbit drag teleports" desync
+- Standard shortcuts: `1-5` brush tools, `6-9` shape tools (Line/Box/Sphere/Cylinder), `0` box-select tool, `R`/`Shift+R` rotate selection (±90° around Y), `M` mirror selection (across X), `F` frame selection or whole scene, `Ctrl+Z/Y` undo/redo, `Ctrl+C/X/V/A/D` selection clipboard ops, `Del` delete selection, arrow keys nudge selection, `Ctrl+S/O/N` file ops, `WASD/Q/E` camera, middle-mouse orbit, right-mouse pan, scroll zoom. Orbit angles re-derive from the camera's actual position+target on every middle-press, so Reset Camera / Set Camera View / pan / WASD never cause "first orbit drag teleports" desync
 
 ### Core
 
@@ -67,8 +69,8 @@ For coding-agent guidance (commands, invariants, conventions) see
 
 - wgpu pipeline: opaque triangle pipeline, optional wireframe (feature-gated on `POLYGON_MODE_LINE`), transparent pipeline (alpha-blend, depth-test on, depth-write off)
 - Two overlay slots on `Renderer`: `preview_mesh` (procgen, alpha 0.5) and `brush_preview_mesh` (brush hover, alpha 0.75)
-- Grid + axes line meshes
-- Orbital camera with WASD movement, mouse orbit/pan, scroll zoom
+- Grid + axes line meshes; selection wireframe + center/anchor markers share the `LinePipeline`
+- Orbital camera: WASD fly, scroll zoom-to-cursor, right-mouse pan, and **middle-mouse orbit re-anchored on the voxel under the cursor** (forward-ray hit → surface point, else the `y=0` ground, else the current target — the hit is on the view ray so re-anchoring never jumps the image). **Fit-distance framing** (`F`, or Frame All / Selected / Generated) moves the target to an AABB's center and pulls back to a bounding-sphere fit, keeping the current angle
 - Simple lighting (ambient + directional) + distance fog in `voxel.wgsl`
 
 ### Procgen
@@ -118,9 +120,15 @@ Both UIs route their output through `CommandHistory::execute(Command::set_voxels
 
 `#[serde(default)]` everywhere → older prefs files with missing fields still load. Saved on `WindowEvent::CloseRequested` and `UiAction::Exit`. Hard-crash exits would lose changes (acceptable trade-off for now).
 
+### Autosave & crash recovery
+
+- Timed autosave every 60 s while the world is non-empty and dirty, written **atomically** (to `autosave.tmp`, then renamed over `autosave.vxlt` next to `prefs.ron`) so an interrupted write never leaves a half-file
+- A clean exit deletes the autosave; its presence at the next launch ⟹ the last session crashed → an in-app recovery prompt (Recover / Discard) offers to load it. A corrupt / truncated autosave is rejected by the loader and falls back to the default scene — never bricks startup (`load_truncated_never_panics` guards this)
+- The recovery prompt and every file-op error report are **in-app egui dialogs, NOT `rfd::MessageDialog`**: calling the native message dialog exits the process on the dev's winit+wgpu+Windows setup (it was the real cause of an "autosave bricks startup" crash, not the file). `rfd::FileDialog` (open / save / import / export) is unaffected — different OS API. See CLAUDE.md
+
 ### UI
 
-egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current tool + preview indicator), Stats, Tools, Palette, Viewport Settings, Help, About, Procedural Generation, Pipeline Graph.
+egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current tool + preview indicator), Stats, Tools, Palette, Viewport Settings, Help, About, Procedural Generation, Pipeline Graph. In-app modal-style dialogs for crash recovery and file-operation errors (replacing native `rfd::MessageDialog`).
 
 ---
 
@@ -300,6 +308,6 @@ When picking this back up after time away:
 
 1. `cargo run --release` — verify it still launches and the cube + ground show
 2. Skim `CLAUDE.md` "Cross-file invariants worth knowing" — the gotchas accumulate fast in a 6 k-line codebase
-3. Run `cargo test` — should be 189 passing
+3. Run `cargo test` — should be 263 passing
 4. Pick from the "Next-step menu" above, or reopen `ARCHITECTURE.md` if the long-term direction needs revisiting
 5. Open `git log --oneline` to see what was last committed and what the recent direction was
