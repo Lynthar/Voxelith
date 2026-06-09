@@ -89,6 +89,26 @@ impl Camera {
     pub fn right(&self) -> Vec3 {
         self.forward().cross(self.up).normalize()
     }
+
+    /// Distance from an AABB's center at which a bounding sphere
+    /// enclosing the box just fills the view, scaled by `margin`
+    /// (`1.0` = sphere touches the frame edge, `1.15` ≈ 15% padding).
+    ///
+    /// `extent` is the AABB's world-space size (each axis ≥ 0). A
+    /// bounding sphere is used so the fit holds at any viewing angle
+    /// (rotation-invariant) — `frame_camera_on_aabb` keeps the current
+    /// orbit direction, so we don't know which face we'll look at. The
+    /// binding constraint is the *tighter* of the vertical / horizontal
+    /// half-FOV: a wide viewport is limited by its height, a tall one by
+    /// its width.
+    pub fn fit_distance(&self, extent: Vec3, margin: f32) -> f32 {
+        let radius = extent.length() * 0.5;
+        let half_v = self.fov * 0.5;
+        // Horizontal half-angle derived from the vertical FOV + aspect.
+        let half_h = (half_v.tan() * self.aspect).atan();
+        let half = half_v.min(half_h).max(1e-3);
+        radius / half.sin() * margin
+    }
 }
 
 /// Camera controller for mouse/keyboard input
@@ -722,5 +742,50 @@ mod tests {
         assert!((controller.distance - 1.0).abs() < 1e-6);
         assert!((camera.position - original_pos).length() < 1e-4);
         assert!((camera.target - original_target).length() < 1e-4);
+    }
+
+    // -------- fit-distance framing --------
+
+    #[test]
+    fn fit_distance_subtends_half_fov_at_square_aspect() {
+        // At aspect 1 the vertical and horizontal FOV are equal, so a
+        // bounding sphere of radius r placed at the fit distance (margin
+        // 1) subtends exactly the half-FOV: asin(r / d) == fov / 2.
+        let cam = Camera::new(Vec3::ZERO, Vec3::ZERO, 1.0);
+        let extent = Vec3::splat(10.0);
+        let r = extent.length() * 0.5;
+        let d = cam.fit_distance(extent, 1.0);
+        assert!(
+            ((r / d).asin() - cam.fov * 0.5).abs() < 1e-4,
+            "asin(r/d)={} expected half-fov={}",
+            (r / d).asin(),
+            cam.fov * 0.5
+        );
+    }
+
+    #[test]
+    fn fit_distance_scales_linearly_with_size() {
+        let cam = Camera::new(Vec3::ZERO, Vec3::ZERO, 1.6);
+        let d1 = cam.fit_distance(Vec3::splat(4.0), 1.1);
+        let d2 = cam.fit_distance(Vec3::splat(8.0), 1.1);
+        assert!((d2 - 2.0 * d1).abs() < 1e-3, "d1={} d2={}", d1, d2);
+    }
+
+    #[test]
+    fn fit_distance_margin_scales_distance() {
+        let cam = Camera::new(Vec3::ZERO, Vec3::ZERO, 1.0);
+        let tight = cam.fit_distance(Vec3::splat(10.0), 1.0);
+        let padded = cam.fit_distance(Vec3::splat(10.0), 1.25);
+        assert!((padded - tight * 1.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fit_distance_portrait_pulls_back_more_than_landscape() {
+        // A narrow (portrait) viewport is horizontally tighter, so it
+        // must sit further back than a wide one to fit the same box.
+        let landscape = Camera::new(Vec3::ZERO, Vec3::ZERO, 1.78);
+        let portrait = Camera::new(Vec3::ZERO, Vec3::ZERO, 0.56);
+        let e = Vec3::splat(10.0);
+        assert!(portrait.fit_distance(e, 1.0) > landscape.fit_distance(e, 1.0));
     }
 }

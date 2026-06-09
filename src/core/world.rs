@@ -227,21 +227,15 @@ impl World {
         self.chunks.len()
     }
 
-    /// Center of the AABB of all non-air voxels, in continuous world
-    /// coordinates. `None` when the world has no non-air voxels.
+    /// Inclusive world-space AABB `(min, max)` cell coordinates of every
+    /// solid (non-air) voxel. `None` when the world has no non-air
+    /// voxels. The box spans `[min, max + 1)` in continuous space (each
+    /// cell occupies `[n, n+1)`).
     ///
-    /// Cells span `[n, n+1)` in continuous space, so a single voxel at
-    /// integer position `p` has AABB `[p, p+1)` and center `p + 0.5`.
-    /// For multi-voxel scenes the center sits between the corner cell
-    /// centers (in the cell *interior*, never on a cell boundary).
-    ///
-    /// Used as the default orbit pivot — placing `camera.target` here
-    /// at startup / after world replacement makes middle-mouse orbit
-    /// circle the visible model rather than the world origin (which
-    /// is often empty / underground for non-trivial scenes).
     /// Iterates every solid voxel in every loaded chunk; intended for
-    /// occasional UI events, not per-frame use.
-    pub fn scene_center(&self) -> Option<Vec3> {
+    /// occasional UI events (recenter, frame, select-all), not per-frame
+    /// use. Shared by [`Self::scene_center`] and the camera-framing path.
+    pub fn scene_aabb(&self) -> Option<((i32, i32, i32), (i32, i32, i32))> {
         let mut bounds: Option<((i32, i32, i32), (i32, i32, i32))> = None;
         for (chunk_pos, chunk) in self.chunks() {
             let chunk = chunk.read();
@@ -264,7 +258,23 @@ impl World {
                 });
             }
         }
-        bounds.map(|(min, max)| {
+        bounds
+    }
+
+    /// Center of the AABB of all non-air voxels, in continuous world
+    /// coordinates. `None` when the world has no non-air voxels.
+    ///
+    /// Cells span `[n, n+1)` in continuous space, so a single voxel at
+    /// integer position `p` has AABB `[p, p+1)` and center `p + 0.5`.
+    /// For multi-voxel scenes the center sits between the corner cell
+    /// centers (in the cell *interior*, never on a cell boundary).
+    ///
+    /// Used as the default orbit pivot — placing `camera.target` here
+    /// at startup / after world replacement makes middle-mouse orbit
+    /// circle the visible model rather than the world origin (which
+    /// is often empty / underground for non-trivial scenes).
+    pub fn scene_center(&self) -> Option<Vec3> {
+        self.scene_aabb().map(|(min, max)| {
             // AABB in continuous space is [min, max+1); center is the
             // midpoint of that interval per axis.
             Vec3::new(

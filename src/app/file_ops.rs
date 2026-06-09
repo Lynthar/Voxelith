@@ -148,7 +148,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to save project {:?}: {}", path, e);
-                show_write_error("Save failed", &path, "save", &e);
+                self.show_write_error("Save failed", &path, "save", &e);
                 self.ui.set_status(format!(
                     "Save failed: {} — your work is NOT saved",
                     file_label(&path)
@@ -233,7 +233,7 @@ impl App {
             Err(e) => {
                 log::error!("Failed to open project {:?}: {}", path, e);
                 let (short, detail) = describe_project_open_error(&e, &path);
-                show_error_dialog("Open failed", &detail);
+                self.show_error_dialog("Open failed", &detail);
                 self.ui.set_status(short);
             }
         }
@@ -277,7 +277,7 @@ impl App {
                 Err(e) => {
                     log::error!("Failed to import VOX from {:?}: {}", path, e);
                     let (short, detail) = describe_vox_import_error(&e, &path);
-                    show_error_dialog("Import failed", &detail);
+                    self.show_error_dialog("Import failed", &detail);
                     self.ui.set_status(short);
                 }
             },
@@ -289,7 +289,7 @@ impl App {
                     file_label(&path),
                     e
                 );
-                show_error_dialog("Import failed", &detail);
+                self.show_error_dialog("Import failed", &detail);
                 self.ui.set_status(format!("Import failed: {}", e));
             }
         }
@@ -334,7 +334,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export smoothed OBJ: {}", e);
-                show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -379,7 +379,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export smoothed GLB: {}", e);
-                show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -421,7 +421,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export GLB: {}", e);
-                show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -461,7 +461,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export OBJ: {}", e);
-                show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -498,14 +498,14 @@ impl App {
                 }
                 Err(e) => {
                     log::error!("Failed to export VOX: {}", e);
-                    show_write_error("Export failed", &path, "export", &e);
+                    self.show_write_error("Export failed", &path, "export", &e);
                     self.ui
                         .set_status(format!("Export failed: {}", file_label(&path)));
                 }
             },
             Err(e) => {
                 log::error!("Failed to create file {:?}: {}", path, e);
-                show_write_error("Export failed", &path, "create", &e);
+                self.show_write_error("Export failed", &path, "create", &e);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -521,31 +521,36 @@ fn file_label(path: &Path) -> String {
         .to_string()
 }
 
-/// Native OS error dialog (no egui layout to overflow / clip). Used for
-/// user-initiated file operations that fail — the single-line status bar
-/// only has room for a one-liner, so the actionable detail goes here.
-/// Blocks the event loop briefly, like the file dialogs already do.
-fn show_error_dialog(title: &str, detail: &str) {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Error)
-        .set_title(title)
-        .set_description(detail)
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
-}
+impl App {
+    /// Raise the in-app error dialog for a failed file operation. This is
+    /// an egui window (see `Ui::show`), NOT a native `rfd::MessageDialog`
+    /// — the latter exits the process on this winit + wgpu setup, which
+    /// would turn every save/open/import error into a hard crash exactly
+    /// when the user most needs the message. The `detail` carries the
+    /// "why + recovery action"; callers also set a status-bar one-liner.
+    pub(super) fn show_error_dialog(&mut self, title: &str, detail: &str) {
+        self.ui.state.error_dialog = Some((title.to_string(), detail.to_string()));
+    }
 
-/// Generic "couldn't write the file" dialog for save / export failures
-/// (usually permission / disk / path, not bad content). `verb` is the
-/// action word, e.g. "save" or "export".
-fn show_write_error(title: &str, path: &Path, verb: &str, err: &dyn std::fmt::Display) {
-    let detail = format!(
-        "Couldn't {} \"{}\" — {}.\n\nCheck you have write permission and free \
-         disk space, then try a different location.",
-        verb,
-        file_label(path),
-        err
-    );
-    show_error_dialog(title, &detail);
+    /// Generic "couldn't write the file" error for save / export failures
+    /// (usually permission / disk / path, not bad content). `verb` is the
+    /// action word, e.g. "save" or "export".
+    pub(super) fn show_write_error(
+        &mut self,
+        title: &str,
+        path: &Path,
+        verb: &str,
+        err: &dyn std::fmt::Display,
+    ) {
+        let detail = format!(
+            "Couldn't {} \"{}\" — {}.\n\nCheck you have write permission and free \
+             disk space, then try a different location.",
+            verb,
+            file_label(path),
+            err
+        );
+        self.show_error_dialog(title, &detail);
+    }
 }
 
 /// Map a `VoxError` to (status-bar one-liner, dialog detail + recovery

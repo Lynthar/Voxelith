@@ -8,7 +8,7 @@
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -134,7 +134,34 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { button, state, .. } => {
-                if !egui_consumed {
+                let pressed = state == ElementState::Pressed;
+
+                // A *press* only acts when egui didn't take it — clicking a
+                // panel must not start an orbit / pan / brush stroke. A
+                // *release* always runs, even when egui consumed it: a button
+                // let go over a panel (after dragging out of the viewport
+                // onto one) must still tear down in-progress state, or the
+                // latches stick — orbit/pan wedged on, `cursor_captured`
+                // stuck (the raw-motion orbit in `device_event` ignores egui
+                // entirely), a phantom selection anchor, or `left_button_held`
+                // jammed true so the next tool drag-paints while the old
+                // selection still tracks. That stranded release is exactly
+                // the "tool states stack and can't be cancelled" bug.
+                if pressed && !egui_consumed {
+                    // Middle-press re-anchors the orbit pivot onto whatever
+                    // the camera's forward ray hits (voxel surface, else the
+                    // y=0 ground, else the current target). The hit lies on
+                    // the view ray, so re-anchoring never jumps the image —
+                    // only the orbit distance changes. Must precede
+                    // `process_mouse_button`, whose middle-press
+                    // `sync_orbit_state_from_camera` reads the new target.
+                    if button == MouseButton::Middle {
+                        if let Some(pivot) = self.compute_orbit_pivot() {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.target = pivot;
+                            }
+                        }
+                    }
                     if let Some(renderer) = &mut self.renderer {
                         renderer.camera_controller.process_mouse_button(
                             button,
@@ -142,59 +169,67 @@ impl ApplicationHandler for App {
                             &mut renderer.camera,
                         );
                     }
-
-                    if button == winit::event::MouseButton::Left {
-                        let tool = self.editor.current_tool;
-                        if state == ElementState::Pressed {
-                            // Brush tools: apply on press, then drag-paint
-                            // re-applies on motion. Shape tools / Select:
-                            // latch the anchor on press and commit on
-                            // release — the in-between motion only
-                            // refreshes the translucent preview / AABB
-                            // wireframe.
-                            self.apply_tool();
-                            self.left_button_held = true;
-                            self.last_stroke_voxel =
-                                self.editor.hovered_voxel.map(|h| h.voxel_pos);
-                            self.stroke_start_screen_pos = Some(self.cursor_pos);
-                        } else {
-                            // Shape release no longer commits — it
-                            // transitions to the Height phase. The
-                            // shape's full voxel set is committed by
-                            // a SECOND click while in Height (see
-                            // `apply_tool` shape branch). This is
-                            // vengi-style two-phase drag: footprint
-                            // (W × D) on a locked plane, then
-                            // height (H) along the plane normal,
-                            // splitting screen X / Y and screen Y
-                            // into two unambiguous axes.
+                    if button == MouseButton::Left {
+                        // Brush tools apply on press, then drag-paint
+                        // re-applies on motion. Shape / Select latch an
+                        // anchor here and commit on release.
+                        self.apply_tool();
+                        self.left_button_held = true;
+                        self.last_stroke_voxel =
+                            self.editor.hovered_voxel.map(|h| h.voxel_pos);
+                        self.stroke_start_screen_pos = Some(self.cursor_pos);
+                    }
+                    if button == MouseButton::Middle {
+                        // Capture the cursor for orbit; the release branch
+                        // uncaptures unconditionally.
+                        self.cursor_captured = true;
+                        if let Some(window) = &self.window {
+                            window.set_cursor_visible(false);
+                        }
+                    }
+                } else if !pressed {
+                    // Always let the controller see the release so its
+                    // middle / right pressed-flags and `last_mouse_pos` reset
+                    // even when the cursor is over a panel.
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.camera_controller.process_mouse_button(
+                            button,
+                            state,
+                            &mut renderer.camera,
+                        );
+                    }
+                    if button == MouseButton::Left {
+                        // Finalize an in-progress interaction only if a press
+                        // actually started one in the viewport; either way,
+                        // clear every latch so nothing carries into the next
+                        // click. Shape release transitions to the Height
+                        // phase (committed by a second click — vengi-style
+                        // two-phase drag); Select commits the AABB; a brush
+                        // seals its merged undo entry.
+                        if self.left_button_held {
+                            let tool = self.editor.current_tool;
                             if tool.is_shape() {
                                 self.transition_shape_to_height();
                             } else if matches!(tool, Tool::Select) {
                                 self.commit_selection();
                             } else {
-                                // Brush end: finalize the merged command
-                                // so the next click starts a fresh undo.
                                 self.editor.history.end_stroke();
                             }
-                            self.left_button_held = false;
-                            self.last_stroke_voxel = None;
-                            self.stroke_start_screen_pos = None;
-                            // Drop the plane lock so the next stroke
-                            // captures a fresh face. Hover preview
-                            // immediately falls back to ray-vs-voxels.
-                            self.stroke_plane = None;
                         }
+                        self.left_button_held = false;
+                        self.last_stroke_voxel = None;
+                        self.stroke_start_screen_pos = None;
+                        self.stroke_plane = None;
+                        // Defensive: drop any select drag/move anchors in
+                        // case a press latched one but egui swallowed the
+                        // release before `commit_selection` could take it.
+                        self.selection_drag_anchor = None;
+                        self.selection_move_anchor = None;
                     }
-
-                    if button == winit::event::MouseButton::Middle {
-                        // Middle-drag captures the cursor for orbit; release
-                        // must explicitly uncapture or `device_event` keeps
-                        // consuming MouseMotion as orbit input forever.
-                        let pressed = state == ElementState::Pressed;
-                        self.cursor_captured = pressed;
+                    if button == MouseButton::Middle {
+                        self.cursor_captured = false;
                         if let Some(window) = &self.window {
-                            window.set_cursor_visible(!pressed);
+                            window.set_cursor_visible(true);
                         }
                     }
                 }

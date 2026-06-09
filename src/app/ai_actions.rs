@@ -138,6 +138,9 @@ impl App {
         if changes.is_empty() {
             return;
         }
+        // Remember the generated footprint for the "Frame Generated"
+        // camera action.
+        self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
         let cmd = Command::set_voxels(changes);
         self.editor.history.execute(cmd, &mut self.world);
     }

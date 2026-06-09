@@ -72,6 +72,110 @@ impl App {
         Some(camera.target)
     }
 
+    /// Compute the orbit pivot for a middle-mouse press, Unity-style:
+    /// cast a ray straight out of the camera (screen center = camera
+    /// forward) and pivot around whatever it hits — a voxel surface,
+    /// else the `y = 0` ground plane, else the current target (see
+    /// [`VoxelRaycast::orbit_pivot`] for the fallback rationale).
+    ///
+    /// Casting along the *forward* direction (not the cursor) is
+    /// deliberate: the hit lies on the view ray, so re-anchoring
+    /// `camera.target` onto it leaves the view direction untouched —
+    /// the press only changes the orbit distance, never jumps the
+    /// image. `handler.rs` writes the result to `camera.target` before
+    /// `process_mouse_button`'s `sync_orbit_state_from_camera` runs, so
+    /// the orbit drag immediately rotates around the new pivot.
+    ///
+    /// Returns `None` only when the renderer isn't initialized yet.
+    pub(super) fn compute_orbit_pivot(&self) -> Option<glam::Vec3> {
+        let renderer = self.renderer.as_ref()?;
+        let camera = &renderer.camera;
+        let ray = Ray::new(camera.position, camera.forward());
+        Some(VoxelRaycast::orbit_pivot(
+            &ray,
+            &self.world,
+            RAYCAST_MAX_DIST,
+            camera.target,
+        ))
+    }
+
+    /// Move the camera to frame an inclusive cell-coord AABB: put the
+    /// orbit target on the box center, then pull back along the *current*
+    /// view direction to the fit distance. Framing keeps the user's
+    /// viewing angle — only target + distance change (Blender / Unity
+    /// "frame" convention), so it never disorients by snapping to a new
+    /// orientation.
+    ///
+    /// Distance is clamped to the orbit zoom range `[2, 500]` so a
+    /// following scroll behaves; a scene larger than that hits the cap
+    /// (consistent with the reach/fog tuning noted in `CLAUDE.md`).
+    pub(super) fn frame_camera_on_aabb(
+        &mut self,
+        min: (i32, i32, i32),
+        max: (i32, i32, i32),
+    ) {
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        // Cells occupy [n, n+1), so the box spans min .. max+1 in world.
+        let wmin = glam::Vec3::new(min.0 as f32, min.1 as f32, min.2 as f32);
+        let wmax =
+            glam::Vec3::new(max.0 as f32 + 1.0, max.1 as f32 + 1.0, max.2 as f32 + 1.0);
+        let center = (wmin + wmax) * 0.5;
+        let extent = wmax - wmin;
+
+        let camera = &mut renderer.camera;
+        // Preserve the current orbit direction; fall back to a 3/4 view
+        // when the camera sits on the target (direction undefined).
+        let mut dir = camera.position - camera.target;
+        if !dir.is_finite() || dir.length() < 1e-4 {
+            dir = glam::Vec3::new(1.0, 0.8, 1.0);
+        }
+        let dir = dir.normalize();
+        let dist = camera.fit_distance(extent, 1.15).clamp(2.0, 500.0);
+        camera.target = center;
+        camera.position = center + dir * dist;
+        renderer
+            .camera_controller
+            .sync_orbit_state_from_camera(camera);
+    }
+
+    /// Frame the whole scene (AABB of every non-air voxel).
+    pub(super) fn frame_all(&mut self) {
+        match self.world.scene_aabb() {
+            Some((min, max)) => {
+                self.frame_camera_on_aabb(min, max);
+                self.ui.set_status("Framed scene");
+            }
+            None => self.ui.set_status("World is empty — nothing to frame"),
+        }
+    }
+
+    /// Frame the active selection's AABB.
+    pub(super) fn frame_selected(&mut self) {
+        match self.editor.selection {
+            Some(sel) => {
+                self.frame_camera_on_aabb(sel.min, sel.max);
+                self.ui.set_status("Framed selection");
+            }
+            None => self
+                .ui
+                .set_status("No selection — drag with the Select tool first"),
+        }
+    }
+
+    /// Frame the footprint of the most recent generation (procgen /
+    /// graph / AI), if any.
+    pub(super) fn frame_generated(&mut self) {
+        match self.last_generated_bounds {
+            Some((min, max)) => {
+                self.frame_camera_on_aabb(min, max);
+                self.ui.set_status("Framed last generation");
+            }
+            None => self.ui.set_status("Nothing generated yet to frame"),
+        }
+    }
+
     /// Update the editor's hovered voxel from the current cursor position.
     ///
     /// Tools that need an "anchor cell" to place new geometry (Place
@@ -792,6 +896,22 @@ impl App {
             KeyCode::KeyA if self.modifiers.control_key() => {
                 self.select_all_solid();
             }
+            // Rotate / mirror the active selection (no-op with a status
+            // hint if there's none). R spins around Y — the common
+            // "turn it around" — and Shift+R reverses; M flips
+            // left-right across X. The full axis × angle set lives in
+            // the Selection menu. Guarded against Ctrl so a stray
+            // Ctrl+R / Ctrl+M can't silently transform geometry.
+            KeyCode::KeyR if !self.modifiers.control_key() => {
+                if self.modifiers.shift_key() {
+                    self.rotate_selection(Axis::Y, Quarter::Ccw);
+                } else {
+                    self.rotate_selection(Axis::Y, Quarter::Cw);
+                }
+            }
+            KeyCode::KeyM if !self.modifiers.control_key() => {
+                self.mirror_selection(Axis::X);
+            }
             // Arrow-key selection nudge. ←→ = X axis, ↑↓ = Z axis
             // (matches "screen up = away from camera" for the
             // default camera). Ctrl+↑↓ promotes to the Y axis since
@@ -825,25 +945,17 @@ impl App {
                     self.step_selection((0, 0, step));
                 }
             }
-            // Recenter the orbit pivot on the scene's AABB center.
-            // Camera position is preserved — only target moves, so
-            // the view direction rotates onto the scene rather than
-            // teleporting. Recovery hatch for: WASD-flying past the
-            // model, panning to look at empty space, etc. — anywhere
-            // `target` has drifted off-scene and middle-orbit feels
-            // disconnected. No-op if the world is empty.
+            // F frames the view: the selection's AABB if one exists,
+            // else the whole scene. Beyond a bare recenter it also fits
+            // the camera *distance* to the box (frame-selected /
+            // frame-all) while keeping the current viewing angle — only
+            // target + distance move, the orientation doesn't snap.
+            // Recovery hatch for WASD-flying / panning off the model.
             KeyCode::KeyF => {
-                if let Some(center) = self.world.scene_center() {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.camera.target = center;
-                        renderer
-                            .camera_controller
-                            .sync_orbit_state_from_camera(&renderer.camera);
-                    }
-                    self.ui.set_status("Recentered camera on scene");
+                if self.editor.selection.is_some() {
+                    self.frame_selected();
                 } else {
-                    self.ui
-                        .set_status("World is empty — nothing to recenter on");
+                    self.frame_all();
                 }
             }
             _ => {}

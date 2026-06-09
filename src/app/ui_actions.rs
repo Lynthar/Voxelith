@@ -112,6 +112,27 @@ impl App {
                             .update_camera_position(&mut renderer.camera);
                     }
                 }
+                UiAction::FrameAll => self.frame_all(),
+                UiAction::FrameSelected => self.frame_selected(),
+                UiAction::FrameGenerated => self.frame_generated(),
+                UiAction::RecoverAutosave => {
+                    if let Some(path) = Self::autosave_path() {
+                        if self.recover_from_autosave(&path) {
+                            self.unsaved_changes = false;
+                            self.last_autosave = std::time::Instant::now();
+                        } else {
+                            // Corrupt / unreadable: drop it, keep the
+                            // default scene already on screen.
+                            self.delete_autosave();
+                            self.ui
+                                .set_status("Couldn't recover autosave — starting fresh");
+                        }
+                    }
+                }
+                UiAction::DiscardAutosave => {
+                    self.delete_autosave();
+                    self.ui.set_status("Discarded recovered work");
+                }
                 UiAction::NewProject => self.new_project(),
                 UiAction::OpenProject => self.open_project(),
                 UiAction::OpenRecent(path) => self.do_open_project(path),
@@ -202,6 +223,9 @@ impl App {
         }
 
         let count = changes.len();
+        // Remember the generated footprint for the "Frame Generated"
+        // camera action (uses the full patch, not just changed cells).
+        self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
         let cmd = Command::set_voxels(changes);
         self.editor.history.execute(cmd, &mut self.world);
 
@@ -271,6 +295,9 @@ impl App {
         }
 
         let count = changes.len();
+        // Remember the generated footprint for the "Frame Generated"
+        // camera action (uses the full patch, not just changed cells).
+        self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
         // Capture the static label before set_status takes &mut self.ui.
         let label = self.ui.procgen.selected.label();
         // `changes` was built by cloning out of patch.voxels, so patch
