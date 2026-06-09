@@ -258,6 +258,44 @@ impl VoxelRaycast {
         })
     }
 
+    /// Resolve an orbit pivot from a camera-forward `ray` (origin =
+    /// camera position, direction = camera forward), Unity-style:
+    ///
+    /// 1. **Voxel surface** — first solid voxel the ray hits.
+    /// 2. **Ground plane** — else the `y = 0` (XZ) intersection, but
+    ///    only when it lies ahead (`t > 0`) and within `max_distance`.
+    ///    A near-horizontal ray crosses `y = 0` only at a huge `t` (or
+    ///    never), which the reach cap rejects so we don't pivot around a
+    ///    point off at the horizon.
+    /// 3. **`fallback`** — else the caller's current camera target. For
+    ///    a forward ray the view-depth plane through the target meets
+    ///    the ray exactly at the target, so this *is* the "view-depth
+    ///    plane" fallback; returning the target leaves the pivot depth
+    ///    unchanged and, crucially, keeps the press jump-free.
+    ///
+    /// The result (cases 1–2) always lies on `ray`, so moving the
+    /// camera target onto it preserves the view direction — the orbit
+    /// re-anchors without any visible camera jump, only `distance`
+    /// changes. Returns a continuous world point, not a grid cell.
+    pub fn orbit_pivot(ray: &Ray, world: &World, max_distance: f32, fallback: Vec3) -> Vec3 {
+        if let Some(hit) = Self::cast(ray, world, max_distance) {
+            return ray.at(hit.distance);
+        }
+        // Ground-plane intersection. `1e-4` rejects rays parallel
+        // enough to y=0 that `t` would explode; the reach cap rejects
+        // distant grazing hits. Both directions (looking down from
+        // above, or up from below) are valid as long as the crossing is
+        // ahead and within reach — unlike `cast_with_ground_plane`,
+        // which is placement-oriented and only fires looking down.
+        if ray.direction.y.abs() > 1e-4 {
+            let t = -ray.origin.y / ray.direction.y;
+            if t > 0.0 && t <= max_distance {
+                return ray.at(t);
+            }
+        }
+        fallback
+    }
+
     /// Check if a voxel position is visible from camera
     pub fn is_visible(pos: (i32, i32, i32), camera_pos: Vec3, world: &World) -> bool {
         let voxel_center = Vec3::new(
@@ -351,5 +389,62 @@ mod tests {
         let hit = VoxelRaycast::cast_with_ground_plane(&ray, &world, 100.0, 0).unwrap();
         // Real voxel hit, not the plane fallback.
         assert_eq!(hit.voxel_pos, (0, 5, 0));
+    }
+
+    // -------- orbit pivot (middle-mouse orbit re-anchor) --------
+
+    #[test]
+    fn orbit_pivot_returns_surface_point_on_voxel_hit() {
+        let mut world = World::new();
+        world.set_voxel(10, 0, 0, Voxel::from_rgb(1, 2, 3));
+        // Forward ray straight down +X from origin; hits the voxel's
+        // near (-X) face at x = 10, so the pivot sits on that face.
+        let ray = Ray::new(Vec3::ZERO, Vec3::X);
+        let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 100.0, Vec3::splat(999.0));
+        assert!(
+            (pivot.x - 10.0).abs() < 1e-3,
+            "pivot should land on the hit face at x=10, got {:?}",
+            pivot
+        );
+        // Pivot lies on the ray (key property: no view-direction jump).
+        assert!((pivot.y).abs() < 1e-3 && (pivot.z).abs() < 1e-3);
+    }
+
+    #[test]
+    fn orbit_pivot_falls_back_to_ground_plane_when_empty() {
+        let world = World::new();
+        // Camera at y=10 looking down-forward; no voxels, so the pivot
+        // is the y=0 crossing.
+        let ray = Ray::new(Vec3::new(0.0, 10.0, 0.0), Vec3::new(1.0, -1.0, 0.0));
+        let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 100.0, Vec3::splat(999.0));
+        assert!(
+            pivot.y.abs() < 1e-3,
+            "ground fallback should land on y=0, got {:?}",
+            pivot
+        );
+        // 45° down over 10 units of height → x = 10 at the crossing.
+        assert!((pivot.x - 10.0).abs() < 1e-3, "got {:?}", pivot);
+    }
+
+    #[test]
+    fn orbit_pivot_keeps_target_when_ray_horizontal() {
+        let world = World::new();
+        // Perfectly horizontal forward ray never usefully meets y=0 →
+        // fall back to the supplied target (no-jump view-depth plane).
+        let fallback = Vec3::new(3.0, 4.0, 5.0);
+        let ray = Ray::new(Vec3::new(0.0, 8.0, 0.0), Vec3::X);
+        let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 100.0, fallback);
+        assert_eq!(pivot, fallback);
+    }
+
+    #[test]
+    fn orbit_pivot_keeps_target_when_ground_beyond_reach() {
+        let world = World::new();
+        // Shallow downward ray crosses y=0 far past `max_distance`; the
+        // reach cap rejects it so we don't pivot around the horizon.
+        let fallback = Vec3::new(-1.0, -2.0, -3.0);
+        let ray = Ray::new(Vec3::new(0.0, 5.0, 0.0), Vec3::new(1.0, -0.01, 0.0));
+        let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 50.0, fallback);
+        assert_eq!(pivot, fallback);
     }
 }

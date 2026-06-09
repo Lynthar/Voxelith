@@ -469,6 +469,40 @@ mod tests {
     }
 
     #[test]
+    fn load_truncated_never_panics() {
+        // A crash (or force-kill) mid-write can leave a `.vxlt` truncated
+        // at any offset. Loading ANY prefix of a valid file must return
+        // Ok or Err — never panic — so a damaged autosave falls back to
+        // the default scene instead of bricking startup.
+        let mut world = World::new();
+        for i in 0..40 {
+            world.set_voxel(i, i % 8, (i * 2) % 16, Voxel::from_rgb((i * 6) as u8, 100, 200));
+        }
+        world.set_voxel(40, 0, -40, Voxel::from_rgb(1, 2, 3)); // forces a 2nd chunk
+        let project = Project::from_world(&world);
+        let mut buf = Vec::new();
+        project.save(&mut buf).unwrap();
+        assert!(buf.len() > 16);
+
+        // Every prefix loads without panicking (the loop itself is the
+        // assertion — a panic here fails the test).
+        for len in 0..=buf.len() {
+            let mut r = &buf[..len];
+            let _ = Project::load(&mut r);
+        }
+
+        // Header-only (magic + version, no gzip stream) errors cleanly.
+        let mut r8 = &buf[..8];
+        assert!(Project::load(&mut r8).is_err());
+        // A cut deep in the compressed body also errors, not loads garbage.
+        let mut rmid = &buf[..(8 + (buf.len() - 8) / 2)];
+        assert!(Project::load(&mut rmid).is_err());
+        // The intact buffer still round-trips.
+        let mut rfull = buf.as_slice();
+        assert!(Project::load(&mut rfull).is_ok());
+    }
+
+    #[test]
     fn test_rle_encoding() {
         let mut chunk = Chunk::new();
         // Fill with same color to test RLE efficiency

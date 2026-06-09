@@ -199,6 +199,71 @@ impl Ui {
 
         // Status bar
         self.show_status_bar(ctx, editor);
+
+        // Crash-recovery prompt, rendered last so it sits on top. This
+        // is an in-app egui dialog, NOT a native `rfd::MessageDialog` —
+        // the latter exits the process on this winit + wgpu setup
+        // (regardless of whether it's shown during `resumed` or a later
+        // frame), so the recovery flow can't use it.
+        if self.state.show_recovery_prompt {
+            self.show_recovery_prompt(ctx);
+        }
+
+        // File-operation error dialog (also in-app egui, not native rfd
+        // — same crash reason; see `show_recovery_prompt`).
+        if self.state.error_dialog.is_some() {
+            self.show_error_dialog(ctx);
+        }
+    }
+
+    /// In-app error dialog for failed file operations: centered window
+    /// with the actionable detail and an OK button that dismisses it.
+    fn show_error_dialog(&mut self, ctx: &Context) {
+        let Some((title, detail)) = self.state.error_dialog.clone() else {
+            return;
+        };
+        let mut dismiss = false;
+        egui::Window::new(&title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(&detail);
+                ui.add_space(8.0);
+                if ui.button("OK").clicked() {
+                    dismiss = true;
+                }
+            });
+        if dismiss {
+            self.state.error_dialog = None;
+        }
+    }
+
+    /// In-app crash-recovery prompt: a centered, non-closable window with
+    /// Recover / Discard. Both dispatch a `UiAction` and clear the flag.
+    fn show_recovery_prompt(&mut self, ctx: &Context) {
+        egui::Window::new("Recover unsaved work?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "Voxelith may have closed unexpectedly last time.\n\
+                     Recover your last auto-saved work, or discard it and \
+                     start fresh?",
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Recover").clicked() {
+                        self.state.request(UiAction::RecoverAutosave);
+                        self.state.show_recovery_prompt = false;
+                    }
+                    if ui.button("Discard").clicked() {
+                        self.state.request(UiAction::DiscardAutosave);
+                        self.state.show_recovery_prompt = false;
+                    }
+                });
+            });
     }
 
     fn show_menu_bar(&mut self, ctx: &Context, editor: &Editor) {
@@ -418,7 +483,7 @@ impl Ui {
                     });
                     ui.menu_button("Rotate around Y", |ui| {
                         if ui
-                            .add_enabled(has_sel, egui::Button::new("90°"))
+                            .add_enabled(has_sel, egui::Button::new("90° (R)"))
                             .clicked()
                         {
                             self.state.request(UiAction::RotateSelection {
@@ -428,7 +493,7 @@ impl Ui {
                             ui.close_menu();
                         }
                         if ui
-                            .add_enabled(has_sel, egui::Button::new("-90°"))
+                            .add_enabled(has_sel, egui::Button::new("-90° (Shift+R)"))
                             .clicked()
                         {
                             self.state.request(UiAction::RotateSelection {
@@ -482,7 +547,7 @@ impl Ui {
                     });
                     ui.separator();
                     if ui
-                        .add_enabled(has_sel, egui::Button::new("Flip X"))
+                        .add_enabled(has_sel, egui::Button::new("Flip X (M)"))
                         .clicked()
                     {
                         self.state
@@ -999,6 +1064,30 @@ impl Ui {
                         self.state.request(UiAction::SetCameraView(CameraView::Side));
                     }
                 });
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Frame All")
+                        .on_hover_text("Fit the whole scene in view (F with no selection)")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::FrameAll);
+                    }
+                    if ui
+                        .button("Frame Sel.")
+                        .on_hover_text("Fit the selection in view (F with a selection)")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::FrameSelected);
+                    }
+                    if ui
+                        .button("Frame Gen.")
+                        .on_hover_text("Fit the most recent generation in view")
+                        .clicked()
+                    {
+                        self.state.request(UiAction::FrameGenerated);
+                    }
+                });
             });
     }
 
@@ -1490,6 +1579,14 @@ impl Ui {
                         ui.label("Nudge selection on Y axis");
                         ui.end_row();
 
+                        ui.label("R / Shift+R");
+                        ui.label("Rotate 90° around Y (CW / CCW)");
+                        ui.end_row();
+
+                        ui.label("M");
+                        ui.label("Mirror across X (full axis set: Selection menu)");
+                        ui.end_row();
+
                         ui.end_row();
                         ui.heading("Camera");
                         ui.end_row();
@@ -1504,6 +1601,14 @@ impl Ui {
 
                         ui.label("E");
                         ui.label("Move down");
+                        ui.end_row();
+
+                        ui.label("Shift");
+                        ui.label("Fly faster (×3) while moving");
+                        ui.end_row();
+
+                        ui.label("F");
+                        ui.label("Frame selection (or whole scene)");
                         ui.end_row();
 
                         ui.label("Middle Mouse");

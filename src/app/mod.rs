@@ -56,6 +56,22 @@ const BRUSH_PREVIEW_ALPHA: f32 = 0.75;
 /// hitch editing, short enough that a crash loses little work.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Inclusive AABB `(min, max)` enclosing a set of cell positions, or
+/// `None` for an empty set. Used to remember a generation's footprint
+/// for the "Frame Generated" camera action.
+pub(super) fn bounds_of(
+    positions: impl IntoIterator<Item = (i32, i32, i32)>,
+) -> Option<((i32, i32, i32), (i32, i32, i32))> {
+    let mut it = positions.into_iter();
+    let first = it.next()?;
+    let (mut min, mut max) = (first, first);
+    for p in it {
+        min = (min.0.min(p.0), min.1.min(p.1), min.2.min(p.2));
+        max = (max.0.max(p.0), max.1.max(p.1), max.2.max(p.2));
+    }
+    Some((min, max))
+}
+
 /// Main application state.
 pub struct App {
     window: Option<Arc<Window>>,
@@ -199,6 +215,14 @@ pub struct App {
     /// When the last autosave ran. `tick_autosave` rate-limits writes to
     /// `AUTOSAVE_INTERVAL`.
     pub(super) last_autosave: Instant,
+
+    /// World-space AABB (inclusive cell coords) of the most recent
+    /// procgen / graph / AI generation, powering the "Frame Generated"
+    /// camera action. `None` until something is generated this session;
+    /// set at each generation chokepoint. Not cleared on undo — framing
+    /// stale bounds just frames where the geometry was, and the action
+    /// guards on `None`.
+    pub(super) last_generated_bounds: Option<((i32, i32, i32), (i32, i32, i32))>,
 }
 
 impl App {
@@ -285,6 +309,7 @@ impl App {
             ai_has_key: voxelith::ai::has_api_key("fal_ai"),
             unsaved_changes: false,
             last_autosave: Instant::now(),
+            last_generated_bounds: None,
         }
     }
 
@@ -639,41 +664,27 @@ impl App {
         self.egui_state = Some(egui_state);
         self.egui_renderer = Some(egui_renderer);
 
-        self.try_recover_or_initial_scene();
-    }
-
-    /// Startup branch: if a crash-recovery autosave is sitting on disk
-    /// (i.e. the last session didn't exit cleanly — a clean exit deletes
-    /// it), offer to recover it; otherwise show the default scene. Either
-    /// way the document starts "clean" so we don't immediately re-autosave
-    /// or prompt to recover the test scene.
-    fn try_recover_or_initial_scene(&mut self) {
-        if let Some(path) = Self::autosave_path() {
-            if path.exists() {
-                let choice = rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Warning)
-                    .set_title("Recover unsaved work?")
-                    .set_description(
-                        "Voxelith may have closed unexpectedly last time.\n\n\
-                         Recover your last auto-saved work? Choosing No discards \
-                         it and starts with a fresh scene.",
-                    )
-                    .set_buttons(rfd::MessageButtons::YesNo)
-                    .show();
-                if choice == rfd::MessageDialogResult::Yes
-                    && self.recover_from_autosave(&path)
-                {
-                    self.unsaved_changes = false;
-                    self.last_autosave = Instant::now();
-                    return;
-                }
-                // No, or the recovery file was unreadable — drop the stale
-                // autosave so it can't haunt the next launch, start fresh.
-                self.delete_autosave();
-            }
-        }
+        // Always start on the default scene so the first frame has
+        // something to draw, then defer any crash-recovery PROMPT to the
+        // first `RedrawRequested`. Showing a native modal (rfd) here —
+        // inside winit's `resumed` callback — exits the process with
+        // code 1 on Windows (no Rust panic; confirmed it's the modal's
+        // timing, not the file or its loading). By the first frame the
+        // event loop is running and the window has presented, so the
+        // dialog behaves like the in-loop file dialogs that already work.
         self.create_initial_scene();
         self.unsaved_changes = false;
+        // If a crash-recovery autosave is on disk, the last session
+        // didn't exit cleanly (a clean exit deletes it) — raise the
+        // in-app recovery prompt. The default scene is already up behind
+        // it. The prompt is egui, NOT a native `rfd::MessageDialog`:
+        // showing one of those exits the process on this winit + wgpu
+        // setup (it was the real cause of the "autosave bricks startup"
+        // crash, not the file). See `Ui::show_recovery_prompt` and the
+        // `RecoverAutosave` / `DiscardAutosave` actions.
+        if Self::autosave_path().is_some_and(|p| p.exists()) {
+            self.ui.state.show_recovery_prompt = true;
+        }
     }
 
     /// Create the initial test scene shown on startup.
@@ -719,12 +730,24 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
         let state = self.current_editor_state();
-        match voxelith::io::save_world_with_state(&self.world, state, &path) {
+        // Atomic write: serialize to a temp file, then rename it over the
+        // real autosave. A crash mid-write then leaves at most a stale
+        // `autosave.tmp`, never a half-written `autosave.vxlt` — so
+        // recovery always loads a COMPLETE last state. `fs::rename`
+        // replaces the destination on Windows (MoveFileEx) as on POSIX,
+        // and both files share the dir so it's a same-volume move.
+        let tmp = path.with_extension("tmp");
+        let result = voxelith::io::save_world_with_state(&self.world, state, &tmp)
+            .and_then(|()| std::fs::rename(&tmp, &path).map_err(Into::into));
+        match result {
             Ok(()) => {
                 log::info!("Autosaved to {}", path.display());
                 self.unsaved_changes = false;
             }
-            Err(e) => log::warn!("Autosave failed: {}", e),
+            Err(e) => {
+                log::warn!("Autosave failed: {}", e);
+                let _ = std::fs::remove_file(&tmp); // drop a partial temp
+            }
         }
         self.last_autosave = Instant::now();
     }

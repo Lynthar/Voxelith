@@ -76,6 +76,19 @@ pub enum UiAction {
     // Camera operations
     ResetCamera,
     SetCameraView(CameraView),
+    /// Fit the camera to an AABB — center the target and pull back to
+    /// the fit distance, keeping the current viewing angle. Three
+    /// targets: the whole scene, the active selection, or the most
+    /// recent generation.
+    FrameAll,
+    FrameSelected,
+    FrameGenerated,
+
+    // Crash recovery (in-app egui prompt; see `show_recovery_prompt`)
+    /// Load the on-disk autosave into the editor.
+    RecoverAutosave,
+    /// Discard the on-disk autosave and keep the fresh default scene.
+    DiscardAutosave,
 
     // AI operations
     /// Submit a new AI generation job using the current `ai_prompt` /
@@ -106,6 +119,18 @@ pub struct UiState {
     pub show_about: bool,
     pub show_ai: bool,
 
+    /// Crash-recovery prompt: an in-app egui dialog (NOT a native rfd
+    /// modal — `rfd::MessageDialog` exits the process on this winit+wgpu
+    /// setup). Set true at startup when an autosave is on disk; cleared
+    /// when the user picks Recover or Discard.
+    pub show_recovery_prompt: bool,
+
+    /// Active file-operation error, shown as an in-app egui dialog
+    /// (`(title, detail)`). Same reason as `show_recovery_prompt`: a
+    /// native modal would crash the process on the very failure it's
+    /// trying to report. `Some` while shown; cleared by the OK button.
+    pub error_dialog: Option<(String, String)>,
+
     // One-shot action queue
     pending_actions: Vec<UiAction>,
 
@@ -132,6 +157,8 @@ impl UiState {
             show_help: false,
             show_about: false,
             show_ai: false,
+            show_recovery_prompt: false,
+            error_dialog: None,
             pending_actions: Vec::new(),
             status_message: None,
             ai_key_input: String::new(),
