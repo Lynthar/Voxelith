@@ -58,13 +58,13 @@ When an item ships: check it off here and fold a one-line summary into
 
 ## P1 — Editing experience
 
-### 1.1 Selection / move polish — *the mainline* — **partial**
+### 1.1 Selection / move polish — *the mainline* — **done**
 - [x] AABB + live status readout `Sel: W×H×D (N cells)`
 - [x] Move-drag wireframe ghost (`selection.translated`)
 - [x] Paste auto-selects the destination AABB
 - [x] Center + pivot markers on the selection wireframe (cyan center crosshair + orange `min`-corner anchor — `render/selection.rs`)
-- [ ] **new · M** Voxel-content ghost during move-drag (not just the wireframe) · needs: transparent overlay slot (exists)
-- [ ] **new · S** Selection follows moved content (parity with paste auto-select)
+- [x] Voxel-content ghost during move-drag (not just the wireframe) — translucent snapshot of the picked-up voxels on its own `move_ghost_mesh` overlay slot, re-translated by the live drag delta each frame (`App::update_selection_visualization` / `begin_move_ghost`)
+- [x] Selection follows moved content (parity with paste auto-select) — already satisfied by `move_selection` (`src/app/input.rs`, shared by drag-commit + arrow-nudge): it ends with `editor.selection = sel.translated(delta)`, so the marquee lands on the moved voxels
 - [x] Frame-selected camera (`F` with a selection, or the "Frame Sel." button)
 - [x] *(extra)* Rotate / mirror the selection from the keyboard (`R` / `Shift+R` / `M`); the menu items show the keys
 

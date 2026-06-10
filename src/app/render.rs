@@ -153,6 +153,12 @@ impl App {
             // Brush hover overlay — shows where the next click will
             // land. Same transparent-pipeline rules.
             renderer.draw_brush_preview(&mut render_pass);
+
+            // Move-drag voxel ghost — the selection's content trailing
+            // the cursor while it's relocated. Same transparent rules;
+            // during a move drag the brush hover slot above is empty
+            // (Select tool), so the two never fight for the frame.
+            renderer.draw_move_ghost(&mut render_pass);
         }
 
         // egui overlay pass

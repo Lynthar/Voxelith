@@ -396,6 +396,7 @@ impl App {
                 if let Some(sel) = self.editor.selection {
                     if sel.contains(cell) {
                         self.selection_move_anchor = Some(cell);
+                        self.begin_move_ghost(sel);
                         return;
                     }
                 }
@@ -417,6 +418,12 @@ impl App {
     /// — the marquee is ephemeral, like in image editors. Move's
     /// voxel writes *are* undoable through their `SetVoxels`.
     pub(super) fn commit_selection(&mut self) {
+        // A release always ends any in-flight move drag — drop the
+        // ghost snapshot so a large moved region doesn't linger in
+        // memory (the renderer slot itself clears once the anchor is
+        // gone).
+        self.move_ghost_voxels.clear();
+
         // Move mode wins if both anchors happen to be set (defensive
         // — they shouldn't both be set at once).
         if let Some(move_anchor) = self.selection_move_anchor.take() {
