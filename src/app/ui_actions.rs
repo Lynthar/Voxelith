@@ -38,6 +38,7 @@ impl App {
                 UiAction::Deselect => {
                     self.selection_drag_anchor = None;
                     self.selection_move_anchor = None;
+                    self.move_ghost_voxels.clear();
                     self.editor.selection = None;
                 }
                 UiAction::RotateSelection { axis, quarter } => {

@@ -51,6 +51,12 @@ pub struct Renderer {
     /// `LinePipeline` as the grid/axes — bright yellow, 12 edges.
     /// `None` when no selection is active and no drag is in progress.
     pub selection_mesh: Option<SelectionMesh>,
+    /// Translucent voxel-content ghost shown while dragging a box
+    /// selection to a new location — the picked-up voxels following
+    /// the cursor, alpha-blended through `transparent_pipeline` like
+    /// the brush hover overlay. `None` unless a move drag is in
+    /// progress. Owned solely by `App::update_selection_visualization`.
+    pub move_ghost_mesh: Option<GpuMesh>,
     /// Whether wireframe mode is supported
     pub wireframe_supported: bool,
 }
@@ -179,6 +185,7 @@ impl Renderer {
             preview_mesh: None,
             brush_preview_mesh: None,
             selection_mesh: None,
+            move_ghost_mesh: None,
             wireframe_supported,
         })
     }
@@ -286,6 +293,31 @@ impl Renderer {
             render_pass.set_pipeline(&self.pipeline.transparent_pipeline);
             render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
             preview.draw(render_pass);
+        }
+    }
+
+    /// Replace the move-drag voxel ghost overlay. Empty mesh -> clear.
+    pub fn set_move_ghost_mesh(&mut self, mesh: &ChunkMesh) {
+        if mesh.is_empty() {
+            self.move_ghost_mesh = None;
+        } else {
+            self.move_ghost_mesh = Some(GpuMesh::new(&self.device, mesh));
+        }
+    }
+
+    /// Clear the move-drag voxel ghost overlay.
+    pub fn clear_move_ghost(&mut self) {
+        self.move_ghost_mesh = None;
+    }
+
+    /// Draw the move-drag voxel ghost. Same depth/blend rules as
+    /// `draw_brush_preview` — call after opaque geometry so the depth
+    /// buffer already gates it.
+    pub fn draw_move_ghost<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        if let Some(ghost) = &self.move_ghost_mesh {
+            render_pass.set_pipeline(&self.pipeline.transparent_pipeline);
+            render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+            ghost.draw(render_pass);
         }
     }
 

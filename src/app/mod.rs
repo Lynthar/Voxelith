@@ -51,6 +51,13 @@ use preview::PreviewState;
 /// voxels of similar color.
 const BRUSH_PREVIEW_ALPHA: f32 = 0.75;
 
+/// Alpha applied to the move-drag voxel ghost — the translucent copy
+/// of a selection's content that follows the cursor while it's being
+/// relocated. A touch lighter than the brush hint (0.75) so it reads
+/// as "in transit" rather than already placed, while staying clearly
+/// visible against the voxels it slides over.
+const MOVE_GHOST_ALPHA: f32 = 0.55;
+
 /// How often `tick_autosave` writes the crash-recovery file while there
 /// are unsaved changes. Long enough that saving a big world doesn't
 /// hitch editing, short enough that a crash loses little work.
@@ -158,10 +165,27 @@ pub struct App {
     /// translate as one undoable Command.
     pub(super) selection_move_anchor: Option<(i32, i32, i32)>,
 
+    /// Snapshot of the selection's non-air voxels (world-space)
+    /// captured when a move drag begins, so the per-frame ghost just
+    /// translates this set by the live delta instead of re-reading the
+    /// world each time the cursor crosses a cell. Empty when no move
+    /// drag is active; only read while `selection_move_anchor` is
+    /// `Some` and overwritten at the next pickup, so leftover data
+    /// between drags is harmless.
+    pub(super) move_ghost_voxels: Vec<((i32, i32, i32), Voxel)>,
+
     /// Cache key for the selection wireframe so we don't rebuild the
     /// 24-vertex line buffer on every `CursorMoved` when the AABB
     /// hasn't changed.
     last_selection_box: Option<Selection>,
+
+    /// Companion cache discriminant to `last_selection_box` for the
+    /// move-drag voxel ghost: `Some(delta)` while ghosting, `None`
+    /// otherwise. Load-bearing on the commit frame — the drag's final
+    /// box equals the committed selection box, so a box-only cache
+    /// would early-out and strand the ghost mesh on screen after the
+    /// move lands.
+    last_ghost_delta: Option<(i32, i32, i32)>,
 
     /// Locked face plane for drag-paint. Captured on the first
     /// `apply_tool` of a brush stroke (Place / Remove / Paint) and
@@ -297,7 +321,9 @@ impl App {
             shape_drag: None,
             selection_drag_anchor: None,
             selection_move_anchor: None,
+            move_ghost_voxels: Vec::new(),
             last_selection_box: None,
+            last_ghost_delta: None,
             stroke_plane: None,
             clipboard: None,
             prefs,
@@ -966,25 +992,32 @@ impl App {
         }
     }
 
-    /// Refresh the box-selection wireframe overlay. Four states feed
-    /// the same renderer slot:
+    /// Refresh the box-selection wireframe **and** the move-drag voxel
+    /// ghost. Both overlays are driven from the same four states and
+    /// share one cache gate:
     ///
     /// 1. **New-selection drag** (`selection_drag_anchor` set):
-    ///    live AABB from anchor → current cell.
+    ///    live AABB from anchor → current cell. No ghost.
     /// 2. **Move-selection drag** (`selection_move_anchor` set):
-    ///    existing AABB translated by `current - anchor`.
-    /// 3. **Idle with a committed selection**: static AABB.
-    /// 4. **Nothing**: clear the slot.
+    ///    existing AABB translated by `current - anchor`, plus a
+    ///    translucent ghost of the picked-up voxels at the same delta.
+    /// 3. **Idle with a committed selection**: static AABB, no ghost.
+    /// 4. **Nothing**: clear both slots.
     ///
-    /// Cached against `last_selection_box` so dragging the cursor
-    /// inside the same cell doesn't rebuild the vertex buffer every
-    /// `CursorMoved`.
+    /// Cached against `(last_selection_box, last_ghost_delta)` so
+    /// dragging inside the same cell doesn't rebuild either buffer.
+    /// The delta half of the key is what clears the ghost on the
+    /// commit frame, where the wireframe box alone is unchanged.
     pub(super) fn update_selection_visualization(&mut self) {
-        let preview = if let Some(anchor) = self.selection_drag_anchor {
+        // Resolve the wireframe box and, for a move drag, the live
+        // translation delta the ghost follows.
+        let (preview, ghost_delta) = if let Some(anchor) = self.selection_drag_anchor {
             // New-selection drag — anchor → current end cell.
-            self.editor
+            let box_ = self
+                .editor
                 .hovered_voxel
-                .map(|hit| Selection::from_corners(anchor, Self::select_anchor_pos(&hit)))
+                .map(|hit| Selection::from_corners(anchor, Self::select_anchor_pos(&hit)));
+            (box_, None)
         } else if let Some(move_anchor) = self.selection_move_anchor {
             // Move drag — existing selection translated by the cursor
             // delta. Falls back to the un-translated selection if
@@ -998,25 +1031,61 @@ impl App {
                         cur.1 - move_anchor.1,
                         cur.2 - move_anchor.2,
                     );
-                    Some(sel.translated(delta))
+                    (Some(sel.translated(delta)), Some(delta))
                 }
-                _ => self.editor.selection,
+                _ => (self.editor.selection, Some((0, 0, 0))),
             }
         } else {
-            self.editor.selection
+            (self.editor.selection, None)
         };
 
-        if preview == self.last_selection_box {
+        if (preview, ghost_delta) == (self.last_selection_box, self.last_ghost_delta) {
             return;
         }
         self.last_selection_box = preview;
+        self.last_ghost_delta = ghost_delta;
+
+        // Build the translated ghost mesh (move drag only) before
+        // borrowing the renderer, so reading `move_ghost_voxels`
+        // doesn't tangle with the `&mut renderer` borrow.
+        let ghost_mesh = match ghost_delta {
+            Some(delta) if !self.move_ghost_voxels.is_empty() => {
+                let voxels: Vec<((i32, i32, i32), Voxel)> = self
+                    .move_ghost_voxels
+                    .iter()
+                    .map(|&((x, y, z), v)| ((x + delta.0, y + delta.1, z + delta.2), v))
+                    .collect();
+                Some(patch_to_mesh(&voxels, MOVE_GHOST_ALPHA))
+            }
+            _ => None,
+        };
 
         if let Some(r) = &mut self.renderer {
             match preview {
                 Some(sel) => r.set_selection_mesh(sel.min, sel.max),
                 None => r.clear_selection(),
             }
+            match &ghost_mesh {
+                Some(mesh) => r.set_move_ghost_mesh(mesh),
+                None => r.clear_move_ghost(),
+            }
         }
+    }
+
+    /// Snapshot the selection's non-air voxels (world-space) at the
+    /// start of a move drag, so the per-frame ghost just translates
+    /// the captured set by the live delta rather than re-reading the
+    /// world every time the cursor crosses a cell. Extracts the same
+    /// content as `copy_selection_to_clipboard`, but keeps absolute
+    /// positions since the ghost renders in world space.
+    pub(super) fn begin_move_ghost(&mut self, sel: Selection) {
+        self.move_ghost_voxels = sel
+            .iter_cells()
+            .filter_map(|(x, y, z)| {
+                let v = self.world.get_voxel(x, y, z);
+                (!v.is_air()).then_some(((x, y, z), v))
+            })
+            .collect();
     }
 
     /// Resolve the cell a Select-tool gesture should anchor at for a
