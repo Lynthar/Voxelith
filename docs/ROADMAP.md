@@ -68,8 +68,8 @@ When an item ships: check it off here and fold a one-line summary into
 - [x] Frame-selected camera (`F` with a selection, or the "Frame Sel." button)
 - [x] *(extra)* Rotate / mirror the selection from the keyboard (`R` / `Shift+R` / `M`); the menu items show the keys
 
-### 1.2 Low-interference viewport HUD — **surface**
-- [ ] **surface · M** Edge HUD: active tool, mode, locked plane, shape phase, brush size, symmetry, selection size · all state already lives on `editor` / `App`; just an egui overlay
+### 1.2 Low-interference viewport HUD — **done**
+- [x] Edge HUD: bottom-left translucent **click-through** block (vengi-BrushHud-style) showing active tool, gesture phase + live numbers (shape footprint/height dims, move delta, marquee size), locked plane, symmetry, selection size (Select tool only — the status bar keeps the always-on copy), and modal key hints — `src/ui/hud.rs` + `src/app/hud.rs`; toggle in View menu + Viewport Settings, persisted. Brush *size* deliberately left out: the hover preview already visualizes the radius in-scene and the number stays in the status bar
 
 ### 1.3 Keybindings & camera presets — **scope-split**
 - [ ] **new · S** Camera navigation presets (Blender / MagicaVoxel / Goxel) — *do this half first*
@@ -171,8 +171,8 @@ When an item ships: check it off here and fold a one-line summary into
 ### 5.4 Turntable / screenshot — **deferred**
 - [ ] **new · M** *(after editing + file trust)* Screenshot export + turntable preview
 
-### 5.5 Perf HUD — **surface**
-- [ ] **surface · S** chunk count, tris, mesh-rebuild ms, GPU frame ms · `frame_times` ring buffer already exists; add the rebuild-timing sample
+### 5.5 Perf HUD — **done**
+- [x] Bottom-right click-through overlay (same `Area` contract as the 1.2 HUD, default **off**): FPS + frame ms (CPU frame interval off the `frame_times` ring — true GPU timestamp queries stay out of scope), compact tris + chunk count, and the new mesh-rebuild sample (`rebuild 4.2 ms (3 chunks)`, timed in `rebuild_all_meshes` over generation + upload) — `ui/hud.rs::show_perf_overlay`, toggles beside the viewport HUD, persisted
 
 ---
 
