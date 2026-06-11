@@ -1,7 +1,9 @@
 //! User interface components using egui.
 
+pub mod hud;
 mod panels;
 
+pub use hud::HudState;
 pub use panels::{UiAction, UiState};
 
 use crate::ai::AiJobState;
@@ -14,12 +16,19 @@ use egui::Context;
 
 /// Viewport display settings
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ViewportSettings {
     pub show_grid: bool,
     pub show_axes: bool,
     pub wireframe_mode: bool,
     pub grid_size: i32,
     pub grid_spacing: f32,
+    /// Viewport HUD (bottom-left tool / gesture readout).
+    pub show_hud: bool,
+    /// Performance HUD (bottom-right FPS / tris / rebuild readout).
+    /// Default off — stats overlays are opt-in everywhere (Blender /
+    /// Unreal / Maya all ship them disabled).
+    pub show_perf_hud: bool,
 }
 
 impl Default for ViewportSettings {
@@ -30,6 +39,8 @@ impl Default for ViewportSettings {
             wireframe_mode: false,
             grid_size: 20,
             grid_spacing: 1.0,
+            show_hud: true,
+            show_perf_hud: false,
         }
     }
 }
@@ -144,8 +155,15 @@ impl Ui {
         }
     }
 
-    /// Render the UI
-    pub fn show(&mut self, ctx: &Context, stats: &RenderStats, editor: &mut Editor) {
+    /// Render the UI. `hud` is the App-built per-frame snapshot for
+    /// the viewport HUD overlay (gesture phase, locked plane, …).
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        stats: &RenderStats,
+        editor: &mut Editor,
+        hud: &HudState,
+    ) {
         // Top menu bar
         self.show_menu_bar(ctx, editor);
 
@@ -199,6 +217,18 @@ impl Ui {
 
         // Status bar
         self.show_status_bar(ctx, editor);
+
+        // Viewport HUD — after the status bar so every panel has
+        // claimed its screen edge and `ctx.available_rect()` is the
+        // true viewport rect the HUD anchors inside.
+        if self.viewport.show_hud {
+            hud::show_hud_overlay(ctx, hud);
+        }
+
+        // Performance HUD — bottom-right counterpart, same rules.
+        if self.viewport.show_perf_hud {
+            hud::show_perf_overlay(ctx, stats);
+        }
 
         // Crash-recovery prompt, rendered last so it sits on top. This
         // is an in-app egui dialog, NOT a native `rfd::MessageDialog` —
@@ -584,6 +614,8 @@ impl Ui {
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
                     ui.checkbox(&mut self.viewport.wireframe_mode, "Wireframe Mode");
+                    ui.checkbox(&mut self.viewport.show_hud, "Viewport HUD");
+                    ui.checkbox(&mut self.viewport.show_perf_hud, "Performance HUD");
                 });
 
                 ui.menu_button("Generate", |ui| {
@@ -1039,6 +1071,14 @@ impl Ui {
                 ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                 ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
                 ui.checkbox(&mut self.viewport.wireframe_mode, "Wireframe Mode");
+                ui.checkbox(&mut self.viewport.show_hud, "Viewport HUD")
+                    .on_hover_text(
+                        "Tool & gesture readout in the bottom-left corner of the viewport",
+                    );
+                ui.checkbox(&mut self.viewport.show_perf_hud, "Performance HUD")
+                    .on_hover_text(
+                        "FPS, triangles, and re-mesh time in the bottom-right corner",
+                    );
 
                 ui.separator();
 
@@ -1797,6 +1837,9 @@ pub struct RenderStats {
     pub triangles: usize,
     pub chunks: usize,
     pub camera_pos: (f32, f32, f32),
+    /// `(milliseconds, chunk count)` of the most recent dirty-chunk
+    /// re-mesh (generation + upload). `None` until the first rebuild.
+    pub last_rebuild: Option<(f32, usize)>,
 }
 
 /// Preset camera views

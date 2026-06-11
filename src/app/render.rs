@@ -27,7 +27,11 @@ impl App {
         // panel reads them off `Ui` without needing a borrow back.
         self.ui.ai_job = self.ai_job.clone();
         self.ui.ai_has_key = self.ai_has_key;
-        self.ui.show(&egui_ctx, &stats, &mut self.editor);
+        // Viewport-HUD snapshot: gesture state (shape drag, move
+        // anchors, stroke plane) lives on App, so condense it here
+        // and hand the display-ready struct across the UI boundary.
+        let hud = self.build_hud_state();
+        self.ui.show(&egui_ctx, &stats, &mut self.editor, &hud);
 
         let full_output = egui_ctx.end_pass();
 

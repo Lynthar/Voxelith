@@ -19,7 +19,7 @@ For coding-agent guidance (commands, invariants, conventions) see
 
 | | |
 |---|---|
-| **Tests** | 263 passing (`cargo test`) |
+| **Tests** | 269 passing (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Binary entry** | `src/main.rs` (~20 lines) → `src/app/` (App + winit `ApplicationHandler`) |
 
@@ -128,7 +128,11 @@ Both UIs route their output through `CommandHistory::execute(Command::set_voxels
 
 ### UI
 
-egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current tool + preview indicator), Stats, Tools, Palette, Viewport Settings, Help, About, Procedural Generation, Pipeline Graph. In-app modal-style dialogs for crash recovery and file-operation errors (replacing native `rfd::MessageDialog`).
+egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current tool + preview indicator), Stats, Tools, Palette, Viewport Settings, Help, About, Procedural Generation, Pipeline Graph, AI Generation. In-app modal-style dialogs for crash recovery and file-operation errors (replacing native `rfd::MessageDialog`).
+
+**Viewport HUD** (bottom-left, vengi-BrushHud-style): translucent, click-through overlay showing the active tool, gesture phase with live numbers (shape footprint / height dims through the same `extruded_end` math the commit uses, move-drag delta, marquee size), the locked stroke plane, symmetry axes (only for tools symmetry affects), selection size (Select tool only — the status bar keeps the always-on copy), and modal key hints ("click: commit · Esc: cancel"). Toggle in the View menu + Viewport Settings panel; persisted as `ViewportSettings::show_hud` (default on).
+
+**Performance HUD** (bottom-right, default **off** — stats overlays are opt-in in every surveyed editor): FPS + frame ms, compact triangle count (`1.23M tris`) + chunk count, and the most recent dirty-chunk rebuild sample (`rebuild 4.2 ms (3 chunks)` — mesh generation + GPU upload, timed in `rebuild_all_meshes`). Frame time is the CPU frame interval (60-frame average), not a GPU timestamp query. Same click-through `Area` contract as the viewport HUD; toggles sit next to it; persisted as `show_perf_hud`. The Statistics window stays the detailed view (exact numbers, undo depth, camera).
 
 ---
 
@@ -308,6 +312,6 @@ When picking this back up after time away:
 
 1. `cargo run --release` — verify it still launches and the cube + ground show
 2. Skim `CLAUDE.md` "Cross-file invariants worth knowing" — the gotchas accumulate fast in a 6 k-line codebase
-3. Run `cargo test` — should be 263 passing
+3. Run `cargo test` — should be 269 passing
 4. Pick from the "Next-step menu" above, or reopen `ARCHITECTURE.md` if the long-term direction needs revisiting
 5. Open `git log --oneline` to see what was last committed and what the recent direction was

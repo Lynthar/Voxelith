@@ -15,6 +15,7 @@
 mod ai_actions;
 mod file_ops;
 mod handler;
+mod hud;
 mod input;
 mod preview;
 mod render;
@@ -93,6 +94,13 @@ pub struct App {
 
     last_frame: Instant,
     frame_times: VecDeque<f32>,
+
+    /// `(milliseconds, chunks)` of the most recent non-empty
+    /// dirty-chunk rebuild — mesh generation + GPU upload + dirty-flag
+    /// clear, i.e. the cost a big edit adds to its frame. `None` until
+    /// the first rebuild. Surfaced by the perf HUD via
+    /// `calculate_stats`.
+    last_rebuild: Option<(f32, usize)>,
 
     cursor_captured: bool,
     cursor_pos: (f32, f32),
@@ -307,6 +315,7 @@ impl App {
             ui,
             last_frame: Instant::now(),
             frame_times: VecDeque::with_capacity(60),
+            last_rebuild: None,
             cursor_captured: false,
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
@@ -822,6 +831,7 @@ impl App {
         if dirty.is_empty() {
             return;
         }
+        let started = Instant::now();
 
         // Dirty chunks this frame ⟺ voxel data changed (a write marks its
         // chunk dirty; boundary writes also mark neighbors). This is the
@@ -846,6 +856,11 @@ impl App {
         }
 
         self.world.clear_dirty_flags();
+
+        self.last_rebuild = Some((
+            started.elapsed().as_secs_f32() * 1000.0,
+            dirty.len(),
+        ));
     }
 
     /// Refresh the translucent brush/shape hover overlay. Called every
@@ -1119,6 +1134,7 @@ impl App {
             triangles: renderer.total_triangles(),
             chunks: self.world.chunk_count(),
             camera_pos: (camera_pos.x, camera_pos.y, camera_pos.z),
+            last_rebuild: self.last_rebuild,
         }
     }
 }
