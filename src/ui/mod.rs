@@ -4,7 +4,7 @@ pub mod hud;
 mod panels;
 
 pub use hud::HudState;
-pub use panels::{UiAction, UiState};
+pub use panels::{ExportReport, UiAction, UiState};
 
 use crate::ai::AiJobState;
 use crate::editor::{Axis, Editor, Quarter, Tool};
@@ -244,6 +244,13 @@ impl Ui {
         if self.state.error_dialog.is_some() {
             self.show_error_dialog(ctx);
         }
+
+        // Export report (in-app egui, same dismiss contract) — shown
+        // after a successful export so the user can sanity-check the
+        // triangle budget / file size without chasing the status bar.
+        if self.state.export_report.is_some() {
+            self.show_export_report(ctx);
+        }
     }
 
     /// In-app error dialog for failed file operations: centered window
@@ -266,6 +273,87 @@ impl Ui {
             });
         if dismiss {
             self.state.error_dialog = None;
+        }
+    }
+
+    /// In-app export report: a centered, dismissable summary shown after
+    /// a successful export. Mirrors `show_error_dialog`'s structure (one
+    /// Close button clears the state). Rows for counts the format doesn't
+    /// carry are skipped — VOX has no triangle / vertex / chunk numbers,
+    /// so only its file size, colors, and quantization note show.
+    fn show_export_report(&mut self, ctx: &Context) {
+        let Some(report) = self.state.export_report.clone() else {
+            return;
+        };
+        let mut dismiss = false;
+        egui::Window::new("Export complete")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::Grid::new("export_report_grid")
+                    .num_columns(2)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("File");
+                        ui.label(&report.filename);
+                        ui.end_row();
+
+                        ui.label("Format");
+                        ui.label(&report.format);
+                        ui.end_row();
+
+                        if !report.mesh_source.is_empty() {
+                            ui.label("Geometry");
+                            ui.label(&report.mesh_source);
+                            ui.end_row();
+                        }
+                        if let Some(t) = report.triangles {
+                            ui.label("Triangles");
+                            ui.label(panels::group_thousands(t));
+                            ui.end_row();
+                        }
+                        if let Some(v) = report.vertices {
+                            ui.label("Vertices");
+                            ui.label(panels::group_thousands(v));
+                            ui.end_row();
+                        }
+                        if let Some(c) = report.chunks {
+                            ui.label("Chunks");
+                            ui.label(panels::group_thousands(c));
+                            ui.end_row();
+                        }
+                        if let Some(sz) = report.file_size {
+                            ui.label("File size");
+                            ui.label(panels::format_bytes(sz));
+                            ui.end_row();
+                        }
+                        if !report.color_model.is_empty() {
+                            ui.label("Colors");
+                            ui.label(&report.color_model);
+                            ui.end_row();
+                        }
+                    });
+
+                // Lost-info / quantization notes in amber, like the
+                // status bar's warning coding.
+                if !report.notes.is_empty() {
+                    ui.add_space(6.0);
+                    for note in &report.notes {
+                        ui.label(
+                            egui::RichText::new(note)
+                                .color(egui::Color32::from_rgb(255, 200, 80)),
+                        );
+                    }
+                }
+
+                ui.add_space(8.0);
+                if ui.button("Close").clicked() {
+                    dismiss = true;
+                }
+            });
+        if dismiss {
+            self.state.export_report = None;
         }
     }
 

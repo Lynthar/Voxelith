@@ -105,6 +105,74 @@ pub enum UiAction {
     AiClearKey,
 }
 
+/// Display-ready summary of a completed export, shown in an in-app
+/// dialog after a successful OBJ / GLB / VOX write so the user can
+/// sanity-check a large export (triangle budget, file size, lost color
+/// info) without digging through the transient status bar. `App` builds
+/// it from the format's `*Stats` plus the written file's on-disk size;
+/// the UI only lays it out. Optional fields are skipped in the dialog
+/// when `None` — VOX has no triangle / chunk concept, so those stay
+/// empty and only its palette / quantization lines show.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ExportReport {
+    /// Human format name, e.g. "glTF Binary (.glb)".
+    pub format: String,
+    /// Written file's name (not the full path).
+    pub filename: String,
+    /// How the geometry was produced: "Greedy mesh", "Marching Cubes
+    /// (light)", "Marching Cubes (heavy)", or "—" for formats with no
+    /// meshing step (VOX).
+    pub mesh_source: String,
+    /// Triangle / vertex / chunk counts when the format meshes; all
+    /// `None` for VOX.
+    pub triangles: Option<usize>,
+    pub vertices: Option<usize>,
+    pub chunks: Option<usize>,
+    /// On-disk size in bytes, read back after writing.
+    pub file_size: Option<u64>,
+    /// How colors are carried, e.g. "Per-vertex RGBA" or "254-color
+    /// palette".
+    pub color_model: String,
+    /// Non-fatal notes worth surfacing, e.g. a palette-quantization
+    /// count. One label per line in the dialog.
+    pub notes: Vec<String>,
+}
+
+/// Human-readable byte size for the export report: `820` → `"820 B"`,
+/// `4_096` → `"4.0 KiB"`, `5_242_880` → `"5.0 MiB"`. Binary units
+/// (1024-based) since these are file sizes on disk.
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{} B", bytes)
+    } else if b < MIB {
+        format!("{:.1} KiB", b / KIB)
+    } else if b < GIB {
+        format!("{:.1} MiB", b / MIB)
+    } else {
+        format!("{:.2} GiB", b / GIB)
+    }
+}
+
+/// Group a count with thousands separators for the detailed export
+/// report (the perf HUD uses the coarser `hud::compact_count`):
+/// `1_234_567` → `"1,234,567"`, `999` → `"999"`.
+pub fn group_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let len = s.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// UI state
 #[derive(Default)]
 pub struct UiState {
@@ -130,6 +198,11 @@ pub struct UiState {
     /// native modal would crash the process on the very failure it's
     /// trying to report. `Some` while shown; cleared by the OK button.
     pub error_dialog: Option<(String, String)>,
+
+    /// Report from the last successful export, shown as an in-app egui
+    /// dialog (same click-to-dismiss contract as `error_dialog`). `Some`
+    /// while shown; cleared by the dialog's Close button.
+    pub export_report: Option<ExportReport>,
 
     // One-shot action queue
     pending_actions: Vec<UiAction>,
@@ -159,6 +232,7 @@ impl UiState {
             show_ai: false,
             show_recovery_prompt: false,
             error_dialog: None,
+            export_report: None,
             pending_actions: Vec::new(),
             status_message: None,
             ai_key_input: String::new(),
@@ -180,5 +254,30 @@ impl UiState {
     /// Clear all pending actions
     pub fn clear_actions(&mut self) {
         self.pending_actions.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_bytes, group_thousands};
+
+    #[test]
+    fn format_bytes_scales_binary_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(820), "820 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.00 GiB");
+    }
+
+    #[test]
+    fn group_thousands_inserts_separators() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(7), "7");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(12_345), "12,345");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
     }
 }

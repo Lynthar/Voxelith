@@ -19,7 +19,7 @@ For coding-agent guidance (commands, invariants, conventions) see
 
 | | |
 |---|---|
-| **Tests** | 269 passing (`cargo test`) |
+| **Tests** | 271 passing (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Binary entry** | `src/main.rs` (~20 lines) → `src/app/` (App + winit `ApplicationHandler`) |
 
@@ -128,7 +128,7 @@ Both UIs route their output through `CommandHistory::execute(Command::set_voxels
 
 ### UI
 
-egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current tool + preview indicator), Stats, Tools, Palette, Viewport Settings, Help, About, Procedural Generation, Pipeline Graph, AI Generation. In-app modal-style dialogs for crash recovery and file-operation errors (replacing native `rfd::MessageDialog`).
+egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current tool + preview indicator), Stats, Tools, Palette, Viewport Settings, Help, About, Procedural Generation, Pipeline Graph, AI Generation. In-app modal-style dialogs for crash recovery and file-operation errors (replacing native `rfd::MessageDialog`), plus a post-export report dialog summarizing format / geometry source (greedy vs Marching Cubes) / triangle-vertex-chunk counts / file size / lost-color notes.
 
 **Viewport HUD** (bottom-left, vengi-BrushHud-style): translucent, click-through overlay showing the active tool, gesture phase with live numbers (shape footprint / height dims through the same `extruded_end` math the commit uses, move-drag delta, marquee size), the locked stroke plane, symmetry axes (only for tools symmetry affects), selection size (Select tool only — the status bar keeps the always-on copy), and modal key hints ("click: commit · Esc: cancel"). Toggle in the View menu + Viewport Settings panel; persisted as `ViewportSettings::show_hud` (default on).
 
@@ -312,6 +312,6 @@ When picking this back up after time away:
 
 1. `cargo run --release` — verify it still launches and the cube + ground show
 2. Skim `CLAUDE.md` "Cross-file invariants worth knowing" — the gotchas accumulate fast in a 6 k-line codebase
-3. Run `cargo test` — should be 269 passing
+3. Run `cargo test` — should be 271 passing
 4. Pick from the "Next-step menu" above, or reopen `ARCHITECTURE.md` if the long-term direction needs revisiting
 5. Open `git log --oneline` to see what was last committed and what the recent direction was
