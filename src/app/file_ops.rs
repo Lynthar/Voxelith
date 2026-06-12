@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use voxelith::{core::Voxel, editor::Tool, io};
+use voxelith::{core::Voxel, editor::Tool, io, ui::ExportReport};
 
 use super::App;
 
@@ -331,6 +331,20 @@ impl App {
                     )
                 };
                 self.ui.set_status(msg);
+                if stats.triangle_count > 0 {
+                    self.set_export_report(
+                        &path,
+                        ExportReport {
+                            format: "Wavefront OBJ (.obj)".into(),
+                            mesh_source: smoothed_mesh_source(blur).into(),
+                            triangles: Some(stats.triangle_count),
+                            vertices: Some(stats.vertex_count),
+                            chunks: Some(stats.chunk_count),
+                            color_model: "Per-vertex RGBA".into(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
             Err(e) => {
                 log::error!("Failed to export smoothed OBJ: {}", e);
@@ -376,6 +390,20 @@ impl App {
                     )
                 };
                 self.ui.set_status(msg);
+                if stats.triangle_count > 0 {
+                    self.set_export_report(
+                        &path,
+                        ExportReport {
+                            format: "glTF Binary (.glb)".into(),
+                            mesh_source: smoothed_mesh_source(blur).into(),
+                            triangles: Some(stats.triangle_count),
+                            vertices: Some(stats.vertex_count),
+                            chunks: Some(stats.chunk_count),
+                            color_model: "Per-vertex RGBA".into(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
             Err(e) => {
                 log::error!("Failed to export smoothed GLB: {}", e);
@@ -418,6 +446,20 @@ impl App {
                     )
                 };
                 self.ui.set_status(msg);
+                if stats.triangle_count > 0 {
+                    self.set_export_report(
+                        &path,
+                        ExportReport {
+                            format: "glTF Binary (.glb)".into(),
+                            mesh_source: "Greedy mesh".into(),
+                            triangles: Some(stats.triangle_count),
+                            vertices: Some(stats.vertex_count),
+                            chunks: Some(stats.chunk_count),
+                            color_model: "Per-vertex RGBA".into(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
             Err(e) => {
                 log::error!("Failed to export GLB: {}", e);
@@ -458,6 +500,20 @@ impl App {
                     )
                 };
                 self.ui.set_status(msg);
+                if stats.triangle_count > 0 {
+                    self.set_export_report(
+                        &path,
+                        ExportReport {
+                            format: "Wavefront OBJ (.obj)".into(),
+                            mesh_source: "Greedy mesh".into(),
+                            triangles: Some(stats.triangle_count),
+                            vertices: Some(stats.vertex_count),
+                            chunks: Some(stats.chunk_count),
+                            color_model: "Per-vertex RGBA".into(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
             Err(e) => {
                 log::error!("Failed to export OBJ: {}", e);
@@ -495,6 +551,23 @@ impl App {
                         format!("Exported: {}", filename)
                     };
                     self.ui.set_status(msg);
+                    let mut notes = Vec::new();
+                    if overflow > 0 {
+                        notes.push(format!(
+                            "{} colors quantized to the nearest of 254 \
+                             palette slots",
+                            overflow
+                        ));
+                    }
+                    self.set_export_report(
+                        &path,
+                        ExportReport {
+                            format: "MagicaVoxel (.vox)".into(),
+                            color_model: "254-color palette".into(),
+                            notes,
+                            ..Default::default()
+                        },
+                    );
                 }
                 Err(e) => {
                     log::error!("Failed to export VOX: {}", e);
@@ -510,6 +583,16 @@ impl App {
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
         }
+    }
+}
+
+/// Geometry-source label for the export report's smoothed (Marching
+/// Cubes) variants; `blur` is the heavy-vs-light flag the menu passes.
+fn smoothed_mesh_source(blur: bool) -> &'static str {
+    if blur {
+        "Marching Cubes (heavy)"
+    } else {
+        "Marching Cubes (light)"
     }
 }
 
@@ -550,6 +633,17 @@ impl App {
             err
         );
         self.show_error_dialog(title, &detail);
+    }
+
+    /// Stash an [`ExportReport`] for the post-export dialog, filling in
+    /// the bits every caller shares: the file name and the on-disk size
+    /// (read back so it reflects what's actually on disk). Callers pass
+    /// the format-specific fields and leave `filename` / `file_size` at
+    /// their `Default` via `..Default::default()`.
+    pub(super) fn set_export_report(&mut self, path: &Path, mut report: ExportReport) {
+        report.filename = file_label(path);
+        report.file_size = std::fs::metadata(path).ok().map(|m| m.len());
+        self.ui.state.export_report = Some(report);
     }
 }
 

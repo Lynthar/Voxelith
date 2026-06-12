@@ -96,8 +96,8 @@ When an item ships: check it off here and fold a one-line summary into
 ### 2.2 Export presets — **new (data exists)**
 - [ ] **new · M** Godot / Unity / Blender / Web / MagicaVoxel presets (format + axis + scale + smoothing baked into one click) · needs: 2.3 data
 
-### 2.3 Export report — **surface**
-- [ ] **surface · S** Report dialog: tris, materials, file size, greedy vs MC, any lost material info · data already in `GlbStats` (`src/io/gltf.rs`) / `ObjStats` (`src/io/obj.rs`)
+### 2.3 Export report — **done**
+- [x] **surface · S** Report dialog after a successful export — format, geometry source (greedy vs Marching Cubes light/heavy), triangle / vertex / chunk counts, on-disk file size, color model, and lost-info notes (VOX palette quantization). In-app egui dialog (`Ui::show_export_report`), built by `App::set_export_report` from `GlbStats` / `ObjStats` + the written file's size. OBJ/GLB report only when non-empty; VOX always (carries file size + quantization)
 
 ### 2.4 Autosave + crash recovery — **done**
 - [x] Timed autosave (60 s) to `…/voxelith/autosave.vxlt` while dirty + non-empty — `App::tick_autosave`; dirty detected via the single `rebuild_all_meshes` chokepoint (dirty chunks ⟺ voxels changed)
