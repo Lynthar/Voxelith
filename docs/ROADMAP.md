@@ -143,12 +143,12 @@ When an item ships: check it off here and fold a one-line summary into
 ### 4.2 Cost / time expectations — **new**
 - [ ] **new · S** Show expected cost + ETA before submit (matters for a paid remote API)
 
-### 4.3 Prompt history + GLB cache — **new**
-- [ ] **new · M** Prompt MRU + favorites + seed · uses existing prefs
+### 4.3 Prompt history + GLB cache — **partial**
+- [x] **new · S** Prompt MRU — recent prompts persisted in prefs (`recent_ai_prompts`, cap 10, dedup), recorded at submit time, surfaced as a History dropdown in the AI panel (`Prefs::touch_recent_prompt` / `App::touch_recent_prompt`). Favorites + seed still open
 - [ ] **new · M** Cache the raw GLB; re-voxelize without re-charging · enables: 4.1 (try resolutions for free)
 
-### 4.4 Auto-select the AI result — **new**
-- [ ] **new · S** Select the result AABB on apply so it's immediately move/copy/delete-able · needs: 1.1, 4.1
+### 4.4 Auto-select the AI result — **done**
+- [x] **new · S** On apply, select the result's AABB (immediately move/copy/delete-able, mirrors Paste's auto-select) and frame it — `apply_ai_patch` via `Selection::from_corners` + `frame_generated`. Landed without staging (4.1): the direct-apply path selects fine
 
 ### 4.5 Remote cancel as a UX contract — **done; surface remaining**
 - [x] `PUT cancel_url` on cancel — `fal_cancel`

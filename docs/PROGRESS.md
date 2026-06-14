@@ -19,7 +19,7 @@ For coding-agent guidance (commands, invariants, conventions) see
 
 | | |
 |---|---|
-| **Tests** | 271 passing (`cargo test`) |
+| **Tests** | 272 passing (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Binary entry** | `src/main.rs` (~20 lines) → `src/app/` (App + winit `ApplicationHandler`) |
 
@@ -146,7 +146,7 @@ egui-based. Panels: menu bar, side toolbar, status bar (with highlighted current
 | **2 — Procgen basics** | Perlin/Simplex terrain, basic WFC, parameter UI, mesh→voxel framework | ✅ Done — `PerlinTerrain`, WFC with two tilesets (19-tile Dungeon + 13-tile City), `procgen panel`, `patch_to_mesh` |
 | **3 — Advanced procgen** | full WFC + backtracking, L-system, shape grammar, node graph editor | 🟡 Partial — L-system done, visual node graph done; **WFC has no backtracking** (forward-only with empty fallback), **shape grammar not started** |
 | **(extra)** | box select + clipboard / move (MagicaVoxel/Goxel/vengi parity) | ✅ Done — `Selection` AABB, `Clipboard`, single-Command move with overlap-safe `build_move_changes`, paste auto-select-destination |
-| **4 — AI alpha** | generator registry + orchestrator, remote API, text-to-voxel, model adapters, UI | 🟡 Phase 1–3 of 4 done (single fal.ai provider end-to-end). Phase 4 polish next. See "AI integration — status" below |
+| **4 — AI alpha** | generator registry + orchestrator, remote API, text-to-voxel, model adapters, UI | 🟡 Phase 1–3 of 4 done (single fal.ai provider end-to-end). Phase 4 polish in progress (prompt MRU + result auto-select/frame done; GLB cache + staging next). See "AI integration — status" below |
 | **5 — AI beta** | local inference, model manager, hybrid pipeline, AI nodes, variation | ❌ Not started — likely skipped: 2026-05 research found no viable Rust local-inference path for TRELLIS / Hunyuan3D (Candle / ort don't have these models, ONNX export of the full diffusion + VAE pipeline is non-trivial). Local inference re-evaluated when the Rust ML ecosystem catches up |
 | **6 — Optimization** | greedy meshing, multi-thread/GPU procgen, more export formats, asset library | 🟡 Partial — re-mesh is rayon-parallel; greedy mesher landed (default render + OBJ + GLB); OBJ + GLB export landed (each with greedy + smoothed Marching Cubes variants); marching cubes is export-only for now |
 | **7 — Extension** | WASM, scripting, plugin API, custom AI | ❌ Not started |
@@ -199,7 +199,7 @@ deferred — see "Decision: route A vs route B" below).
 | **1 — Foundation** | ✅ | `src/ai/` module (`mod` / `job` / `provider` / `runtime` / `keyring_store` / `mock` / `client` / `voxelize`); tokio background runtime; OS-keychain API key storage via `keyring` crate; `AiJobState` state machine; AI panel in egui (prompt textbox, password-masked API key entry, resolution combo 32/64/128, Generate/Cancel, progress bar, terminal-state rendering); `MockProvider` for end-to-end UI testing without spending credits |
 | **2 — Real client** | ✅ | `FalHunyuanProvider` in `src/ai/client.rs` against `https://queue.fal.run/fal-ai/hunyuan3d-v3/text-to-3d`; queue API with 2 s polling + 5 min cap; cooperative cancel between every stage; transient 5xx tolerance; API key never appears in error messages; response body truncated to 200 chars (UTF-8 safe) |
 | **3 — Voxelization** | ✅ | `voxelize_glb(bytes, resolution) -> VoxelPatch` in `src/ai/voxelize.rs`; gltf crate for parsing, image crate for PBR texture decode; scene-graph walk with cumulative transforms; per-triangle adaptive grid sampling; color priority COLOR_0 → texture-at-UV → baseColorFactor → gray; 3-axis parity scan with majority vote for interior fill; AABB re-anchored to (0, 0, 0); `JobEvent::Done` gained `patch: Option<VoxelPatch>`; `App::tick_ai_job` lands the patch via `Command::set_voxels` (undoable via Ctrl+Z) |
-| **4 — Polish** | ⏳ Next | Result placement (center on world / re-center camera on result / auto-select destination AABB so user can immediately Move/Copy), recent-prompts MRU through prefs, status-bar polish, possibly: provider dropdown (Mock for free testing), image-to-3D upload UI (would also use the same `fal-ai/hunyuan3d-v3/image-to-3d` endpoint — `AiRequest::image` field is already wired through to provider, just no UI yet) |
+| **4 — Polish** | 🟡 In progress | **Done**: recent-prompts MRU (prefs `recent_ai_prompts` + AI-panel History dropdown, recorded at submit) and result placement (auto-select the result's AABB + auto-frame on apply, via `Selection::from_corners` + `frame_generated`). **Next**: GLB cache (free re-voxelize) + staging area (preview / move / accept before commit), cost + ETA before submit, provider dropdown (Mock for free testing), image-to-3D upload UI (`AiRequest::image` is already wired to the provider, just no UI yet) |
 
 **Architecture lock** (don't re-litigate these next session unless the constraints change):
 
@@ -312,6 +312,6 @@ When picking this back up after time away:
 
 1. `cargo run --release` — verify it still launches and the cube + ground show
 2. Skim `CLAUDE.md` "Cross-file invariants worth knowing" — the gotchas accumulate fast in a 6 k-line codebase
-3. Run `cargo test` — should be 271 passing
+3. Run `cargo test` — should be 272 passing
 4. Pick from the "Next-step menu" above, or reopen `ARCHITECTURE.md` if the long-term direction needs revisiting
 5. Open `git log --oneline` to see what was last committed and what the recent direction was

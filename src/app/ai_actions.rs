@@ -10,7 +10,7 @@
 use std::sync::mpsc;
 
 use voxelith::ai::{AiJobState, AiRequest, JobEvent, JobHandle};
-use voxelith::editor::{Command, VoxelChange};
+use voxelith::editor::{Command, Selection, VoxelChange};
 use voxelith::procgen::VoxelPatch;
 
 use super::App;
@@ -39,8 +39,12 @@ impl App {
         let handle = JobHandle::new();
         let cancel = handle.cancel.clone();
 
+        // Record the prompt to the MRU at submit time — kept even if the
+        // job later fails or is cancelled, since the user most likely
+        // wants to retry or tweak it.
+        let prompt = self.ui.ai_prompt.clone();
         let request = AiRequest {
-            prompt: self.ui.ai_prompt.clone(),
+            prompt: prompt.clone(),
             image: None,
             resolution: self.ui.ai_resolution,
         };
@@ -52,6 +56,7 @@ impl App {
         self.ai_handle = Some(handle);
         self.ai_job = AiJobState::Submitting;
         self.ui.set_status("AI: submitting");
+        self.touch_recent_prompt(&prompt);
     }
 
     /// Request cooperative cancellation of the active job. The worker
@@ -143,6 +148,15 @@ impl App {
         self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
         let cmd = Command::set_voxels(changes);
         self.editor.history.execute(cmd, &mut self.world);
+
+        // Placement polish: auto-select the result's AABB so it can be
+        // moved / copied immediately (mirrors Paste's auto-select), and
+        // frame it — the model lands at the world origin and is often
+        // off-screen from where the user was working.
+        if let Some((min, max)) = self.last_generated_bounds {
+            self.editor.selection = Some(Selection::from_corners(min, max));
+        }
+        self.frame_generated();
     }
 
     /// Save a fresh API key to the keychain, refresh the cached flag.
