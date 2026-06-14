@@ -1,7 +1,7 @@
 name: CI
 
 # Build + test gate. Runs on windows-latest because that is the project's
-# primary/verified platform (Vulkan; see docs/PROGRESS.md) and avoids the
+# primary/verified platform (Vulkan; see docs/STATUS.md) and avoids the
 # Linux system-dependency dance that rfd/winit/wgpu need just to compile.
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
       # format that differs from rustfmt's defaults, so neither is a
       # hard gate yet. Flip `continue-on-error` to false (and add
       # `-- -D warnings` to clippy) once a dedicated cleanup pass lands —
-      # see docs/ROADMAP.md P0.2.
+      # see docs/STATUS.md (Tooling / CI).
       - name: Clippy (informational)
         run: cargo clippy --all-targets
         continue-on-error: true

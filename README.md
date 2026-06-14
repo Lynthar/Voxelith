@@ -82,7 +82,7 @@ cargo run --release
 └──────────────────────────────────────────────┘
 ```
 
-See [`docs/PROGRESS.md`](docs/PROGRESS.md) for implementation status and the next-step menu, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for long-term design vision.
+See [`docs/STATUS.md`](docs/STATUS.md) for current implementation state, the remaining roadmap, and design invariants.
 
 ## License
 

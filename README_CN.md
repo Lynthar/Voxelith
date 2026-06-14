@@ -82,7 +82,7 @@ cargo run --release
 └──────────────────────────────────────────────┘
 ```
 
-实施进度见 [`docs/PROGRESS.md`](docs/PROGRESS.md),长期设计愿景见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+当前实现状态、剩余计划与设计不变量见 [`docs/STATUS.md`](docs/STATUS.md)。
 
 ## 许可证
 
