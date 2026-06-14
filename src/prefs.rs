@@ -23,6 +23,9 @@ use crate::ui::{ProcgenSettings, ViewportSettings};
 /// Maximum entries kept in the recent-files MRU.
 pub const MAX_RECENT_FILES: usize = 10;
 
+/// Maximum entries kept in the recent AI-prompts MRU.
+pub const MAX_RECENT_PROMPTS: usize = 10;
+
 /// Top-level preferences container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,6 +37,9 @@ pub struct Prefs {
     pub graph: PipelineGraph,
     pub editor: EditorPrefs,
     pub recent_files: Vec<PathBuf>,
+    /// Recent AI-generation prompts, most-recent first. Surfaced as a
+    /// History dropdown in the AI panel.
+    pub recent_ai_prompts: Vec<String>,
 }
 
 impl Default for Prefs {
@@ -46,6 +52,7 @@ impl Default for Prefs {
             graph: PipelineGraph::default(),
             editor: EditorPrefs::default(),
             recent_files: Vec::new(),
+            recent_ai_prompts: Vec::new(),
         }
     }
 }
@@ -183,6 +190,19 @@ impl Prefs {
         self.recent_files.insert(0, path);
         self.recent_files.truncate(MAX_RECENT_FILES);
     }
+
+    /// Insert `prompt` at the head of `recent_ai_prompts`, dedup, cap at
+    /// `MAX_RECENT_PROMPTS`. Blank prompts are ignored. Same MRU shape as
+    /// `touch_recent`, for AI generation prompts.
+    pub fn touch_recent_prompt(&mut self, prompt: &str) {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        self.recent_ai_prompts.retain(|p| p != prompt);
+        self.recent_ai_prompts.insert(0, prompt.to_string());
+        self.recent_ai_prompts.truncate(MAX_RECENT_PROMPTS);
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +240,23 @@ mod tests {
         assert!(!p.panels.show_stats);
         // show_tools should default to true.
         assert!(p.panels.show_tools);
+    }
+
+    #[test]
+    fn test_touch_recent_prompt_dedup_cap_and_blank() {
+        let mut p = Prefs::default();
+        p.touch_recent_prompt("   ");
+        assert!(p.recent_ai_prompts.is_empty(), "blank prompt is ignored");
+        for i in 0..15 {
+            p.touch_recent_prompt(&format!("prompt {}", i));
+        }
+        assert_eq!(p.recent_ai_prompts.len(), MAX_RECENT_PROMPTS);
+        // Most recent is at the head.
+        assert_eq!(p.recent_ai_prompts[0], "prompt 14");
+        // Re-touching an existing prompt promotes it without duplicating.
+        p.touch_recent_prompt("prompt 10");
+        assert_eq!(p.recent_ai_prompts.len(), MAX_RECENT_PROMPTS);
+        assert_eq!(p.recent_ai_prompts[0], "prompt 10");
     }
 
     #[test]

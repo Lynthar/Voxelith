@@ -300,6 +300,7 @@ impl App {
             ui.graph.relayout();
         }
         ui.recent_files = prefs.recent_files.clone();
+        ui.recent_ai_prompts = prefs.recent_ai_prompts.clone();
 
         let last_grid_size = ui.viewport.grid_size;
         let last_grid_spacing = ui.viewport.grid_spacing;
@@ -372,6 +373,14 @@ impl App {
     pub(super) fn touch_recent(&mut self, path: &std::path::Path) {
         self.prefs.touch_recent(path);
         self.ui.recent_files = self.prefs.recent_files.clone();
+    }
+
+    /// Push a prompt to the AI-prompts MRU and mirror it to the UI so
+    /// the AI panel's History dropdown reflects it next frame. Mirrors
+    /// `touch_recent` for the recent-files list.
+    pub(super) fn touch_recent_prompt(&mut self, prompt: &str) {
+        self.prefs.touch_recent_prompt(prompt);
+        self.ui.recent_ai_prompts = self.prefs.recent_ai_prompts.clone();
     }
 
     /// Snapshot live UI/editor/window state into `self.prefs`, then

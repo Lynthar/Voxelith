@@ -114,6 +114,10 @@ pub struct Ui {
     /// App syncs this whenever the prefs version changes (touch_recent
     /// + initial load).
     pub recent_files: Vec<std::path::PathBuf>,
+    /// Recent AI prompts MRU mirrored from
+    /// `prefs::Prefs::recent_ai_prompts`. App syncs it on submit and at
+    /// initial load. Surfaced as a History dropdown in the AI panel.
+    pub recent_ai_prompts: Vec<String>,
     /// Mirror of `App::clipboard.is_some()` so the Tools panel can
     /// gray out the Paste button without `App::clipboard` leaking
     /// across the UI layer boundary. App syncs it before each frame.
@@ -147,6 +151,7 @@ impl Ui {
             selected_node: None,
             dragging_wire: None,
             recent_files: Vec::new(),
+            recent_ai_prompts: Vec::new(),
             has_clipboard: false,
             ai_prompt: String::new(),
             ai_resolution: 64,
@@ -1425,11 +1430,25 @@ impl Ui {
         // the real fal.ai client. Layout stays the same — the panel
         // only reads `self.ai_*` fields and emits provider-agnostic
         // `UiAction::Ai*`.
+        // Truncate a long prompt for the History menu label; the full
+        // text is restored on click and shown on hover.
+        fn truncate_prompt(s: &str, max: usize) -> String {
+            if s.chars().count() <= max {
+                s.to_string()
+            } else {
+                let head: String = s.chars().take(max.saturating_sub(1)).collect();
+                format!("{head}…")
+            }
+        }
+
         let mut click_clear_key = false;
         let mut click_save_key: Option<String> = None;
         let mut click_generate = false;
         let mut click_cancel = false;
 
+        // Cloned before the `&mut self.ai_prompt` borrow so the History
+        // menu can refill the prompt without aliasing `self`.
+        let recent_prompts = self.recent_ai_prompts.clone();
         let prompt = &mut self.ai_prompt;
         let resolution = &mut self.ai_resolution;
         let key_input = &mut self.state.ai_key_input;
@@ -1487,7 +1506,24 @@ impl Ui {
 
                 // --- Prompt + parameters ---
                 ui.separator();
-                ui.label(egui::RichText::new("Prompt").strong());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Prompt").strong());
+                    // History MRU: refill the box from a past prompt.
+                    if !recent_prompts.is_empty() {
+                        ui.menu_button("History ▾", |ui| {
+                            for entry in &recent_prompts {
+                                if ui
+                                    .button(truncate_prompt(entry, 56))
+                                    .on_hover_text(entry.as_str())
+                                    .clicked()
+                                {
+                                    *prompt = entry.clone();
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
+                });
                 ui.add(
                     egui::TextEdit::multiline(prompt)
                         .desired_rows(3)
