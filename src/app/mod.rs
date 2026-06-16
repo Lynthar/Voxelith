@@ -268,6 +268,8 @@ impl App {
             prefs.editor.brush_color[2],
             prefs.editor.brush_color[3],
         );
+        editor.brush_color.flags = prefs.editor.brush_flags;
+        editor.brush_color.set_tint_zone(prefs.editor.brush_tint_zone);
         editor.brush_size = prefs.editor.brush_size.max(1);
         editor.current_tool = tool_from_index(prefs.editor.selected_tool);
         editor.symmetry = SymmetryAxes {
@@ -417,6 +419,8 @@ impl App {
                 self.editor.symmetry.y,
                 self.editor.symmetry.z,
             ],
+            brush_flags: self.editor.brush_color.flags,
+            brush_tint_zone: self.editor.brush_color.tint_zone(),
         };
         if let Some(window) = &self.window {
             // `inner_size()` returns physical pixels; `WindowPrefs` is

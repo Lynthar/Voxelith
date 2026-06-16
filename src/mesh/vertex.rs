@@ -3,6 +3,14 @@
 use bytemuck::{Pod, Zeroable};
 use crate::core::ChunkPos;
 
+/// Ambient floor used when baking per-vertex AO into exported vertex
+/// colors. **Kept in sync with `ambient_min` in
+/// `render/shaders/voxel.wgsl`** — the renderer multiplies brightness by
+/// `ambient_min + (1 - ambient_min) * ao`, and [`Vertex::baked_color`]
+/// bakes the same factor so an exported model carries the AO shading the
+/// editor shows. If you change the shader's `ambient_min`, change this too.
+pub const AO_AMBIENT_MIN: f32 = 0.5;
+
 /// Vertex format for voxel rendering.
 ///
 /// Layout optimized for GPU:
@@ -10,7 +18,8 @@ use crate::core::ChunkPos;
 /// - Normal: 3 floats (12 bytes)
 /// - Color: 4 floats (16 bytes)
 /// - AO: 1 float (4 bytes) — 0 = fully occluded, 1 = no occlusion
-/// Total: 44 bytes per vertex
+/// - Tint zone: 1 float (4 bytes) — faction recolor zone (export only)
+/// Total: 48 bytes per vertex
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct Vertex {
@@ -27,6 +36,11 @@ pub struct Vertex {
     /// when `Vertex::new` is used (back-compat for code that
     /// hasn't computed AO yet — patch previews, tests, etc.).
     pub ao: f32,
+    /// Per-vertex tint zone for faction recoloring (mirrors
+    /// `Voxel::tint_zone`): 0 = none, 1 = primary, 2 = secondary,
+    /// 3 = reserved. Carried into GLB export as the `_TINTZONE`
+    /// attribute; the renderer ignores it. Defaults to 0.0.
+    pub tint_zone: f32,
 }
 
 impl Vertex {
@@ -50,7 +64,26 @@ impl Vertex {
             normal,
             color,
             ao,
+            tint_zone: 0.0,
         }
+    }
+
+    /// The vertex color with per-vertex AO baked into RGB, matching the
+    /// renderer's AO darkening (`AO_AMBIENT_MIN + (1 - AO_AMBIENT_MIN) *
+    /// ao`). The GLB / OBJ exporters use this so a model opened in
+    /// Blender / Unity carries the same contact-shadow shading the editor
+    /// shows. The runtime *directional* light term is deliberately NOT
+    /// baked (the target engine relights); alpha is left untouched.
+    /// Meshes without computed AO (MC-smoothed export, previews) carry
+    /// `ao = 1.0`, so this is the identity there.
+    pub fn baked_color(&self) -> [f32; 4] {
+        let f = AO_AMBIENT_MIN + (1.0 - AO_AMBIENT_MIN) * self.ao;
+        [
+            self.color[0] * f,
+            self.color[1] * f,
+            self.color[2] * f,
+            self.color[3],
+        ]
     }
 
     /// Get the vertex buffer layout for wgpu
@@ -81,6 +114,13 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
                     shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                // Tint zone @ offset 44 — export-only; the voxel shader
+                // declares @location(4) but ignores it.
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
@@ -216,13 +256,27 @@ mod tests {
 
     #[test]
     fn test_vertex_size() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 44);
+        assert_eq!(std::mem::size_of::<Vertex>(), 48);
     }
 
     #[test]
     fn test_default_ao_is_one() {
         let v = Vertex::new([0.0; 3], [0.0; 3], [1.0; 4]);
         assert_eq!(v.ao, 1.0);
+    }
+
+    #[test]
+    fn baked_color_bakes_ao_into_rgb_only() {
+        // ao = 1 (open space): no darkening, color unchanged.
+        let open = Vertex::new_with_ao([0.0; 3], [0.0; 3], [0.8, 0.6, 0.4, 1.0], 1.0);
+        assert_eq!(open.baked_color(), [0.8, 0.6, 0.4, 1.0]);
+        // ao = 0 (fully occluded): RGB scaled by AO_AMBIENT_MIN.
+        let occ = Vertex::new_with_ao([0.0; 3], [0.0; 3], [0.8, 0.6, 0.4, 1.0], 0.0);
+        assert_eq!(occ.baked_color(), [0.4, 0.3, 0.2, 1.0]);
+        // Alpha is never scaled; mid AO uses the shader's factor.
+        let mid = Vertex::new_with_ao([0.0; 3], [0.0; 3], [1.0, 1.0, 1.0, 0.5], 0.5);
+        let f = AO_AMBIENT_MIN + (1.0 - AO_AMBIENT_MIN) * 0.5;
+        assert_eq!(mid.baked_color(), [f, f, f, 0.5]);
     }
 
     #[test]

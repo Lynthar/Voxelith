@@ -91,16 +91,18 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
             // voxel corners (every coordinate is an integer); keeps the
             // file parseable as plain text by humans inspecting it.
             // Colors get 3 decimals — anything finer is below the input
-            // RGB-byte resolution so further precision is noise.
+            // RGB-byte resolution so further precision is noise. AO is
+            // baked into the color here (see `Vertex::baked_color`).
+            let c = v.baked_color();
             writeln!(
                 writer,
                 "v {:.4} {:.4} {:.4} {:.3} {:.3} {:.3}",
                 v.position[0],
                 v.position[1],
                 v.position[2],
-                v.color[0],
-                v.color[1],
-                v.color[2],
+                c[0],
+                c[1],
+                c[2],
             )?;
         }
         for v in &mesh.vertices {
@@ -180,15 +182,16 @@ fn write_obj_combined_mesh<W: Write>(
     writer: &mut W,
 ) -> Result<(), ObjError> {
     for v in &mesh.vertices {
+        let c = v.baked_color();
         writeln!(
             writer,
             "v {:.4} {:.4} {:.4} {:.3} {:.3} {:.3}",
             v.position[0],
             v.position[1],
             v.position[2],
-            v.color[0],
-            v.color[1],
-            v.color[2],
+            c[0],
+            c[1],
+            c[2],
         )?;
     }
     for v in &mesh.vertices {
