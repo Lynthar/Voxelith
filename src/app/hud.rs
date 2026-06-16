@@ -130,8 +130,9 @@ impl App {
 }
 
 /// Symmetry mirrors Place / Remove / Paint / Fill writes and shape
-/// commits; Eyedropper samples and Select reads — a "Sym" line for
-/// those would imply an effect that won't happen.
+/// commits; Eyedropper samples, Select reads, and Socket drops an
+/// un-mirrored anchor — a "Sym" line for those would imply an effect
+/// that won't happen.
 fn tool_uses_symmetry(t: Tool) -> bool {
-    !matches!(t, Tool::Eyedropper | Tool::Select)
+    !matches!(t, Tool::Eyedropper | Tool::Select | Tool::Socket)
 }

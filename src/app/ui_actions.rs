@@ -26,6 +26,7 @@ impl App {
                 UiAction::ClearAll => {
                     self.world.clear();
                     self.editor.history.clear();
+                    self.editor.sockets.clear();
                     if let Some(renderer) = &mut self.renderer {
                         renderer.chunk_meshes.clear();
                     }
@@ -173,6 +174,7 @@ impl App {
     fn replace_scene(&mut self, build: impl FnOnce(&mut Self)) {
         self.world.clear();
         self.editor.history.clear();
+        self.editor.sockets.clear();
         if let Some(renderer) = &mut self.renderer {
             renderer.chunk_meshes.clear();
         }

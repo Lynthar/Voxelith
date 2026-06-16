@@ -195,6 +195,13 @@ pub struct App {
     /// move lands.
     last_ghost_delta: Option<(i32, i32, i32)>,
 
+    /// Cache of the socket gizmo's geometry inputs — `(position,
+    /// normal)` per socket — so `update_socket_visualization` rebuilds
+    /// the line buffer only when sockets are placed / deleted / moved /
+    /// loaded, not every frame. Names don't affect the gizmo, so
+    /// renaming a socket doesn't invalidate this.
+    last_socket_viz: Vec<([f32; 3], [f32; 3])>,
+
     /// Locked face plane for drag-paint. Captured on the first
     /// `apply_tool` of a brush stroke (Place / Remove / Paint) and
     /// cleared on left-button release. While set,
@@ -336,6 +343,7 @@ impl App {
             move_ghost_voxels: Vec::new(),
             last_selection_box: None,
             last_ghost_delta: None,
+            last_socket_viz: Vec::new(),
             stroke_plane: None,
             clipboard: None,
             prefs,
@@ -645,6 +653,7 @@ fn tool_from_index(idx: u8) -> Tool {
         7 => Tool::Sphere,
         8 => Tool::Cylinder,
         9 => Tool::Select,
+        10 => Tool::Socket,
         _ => Tool::Place,
     }
 }
@@ -661,6 +670,7 @@ fn tool_to_index(t: Tool) -> u8 {
         Tool::Sphere => 7,
         Tool::Cylinder => 8,
         Tool::Select => 9,
+        Tool::Socket => 10,
     }
 }
 
@@ -906,10 +916,11 @@ impl App {
         let size = self.editor.brush_size;
         let cursor_y = self.cursor_pos.1;
 
-        // Eyedropper and Select skip the brush-style hover overlay
-        // entirely. Eyedropper would mislead (brush color != sampled
-        // color); Select draws its own AABB wireframe.
-        let show = !matches!(tool, Tool::Eyedropper | Tool::Select);
+        // Eyedropper, Select, and Socket skip the brush-style hover
+        // overlay entirely. Eyedropper would mislead (brush color !=
+        // sampled color); Select draws its own AABB wireframe; Socket
+        // draws its own gizmo overlay (`update_socket_visualization`).
+        let show = !matches!(tool, Tool::Eyedropper | Tool::Select | Tool::Socket);
 
         // Cache key. `cell` is hover-derived for non-shape tools and
         // for idle shapes; for an active ShapeDrag, `cell` is fixed
@@ -1114,6 +1125,32 @@ impl App {
                 (!v.is_air()).then_some(((x, y, z), v))
             })
             .collect();
+    }
+
+    /// Refresh the socket gizmo overlay from `editor.sockets`. Each
+    /// socket renders as a directional pin through the line pipeline
+    /// (a shaft + arrowhead along its outward normal, plus a base cross
+    /// on the surface), so the orientation that export bakes is visible
+    /// in-scene.
+    ///
+    /// Cached against the `(position, normal)` list: cheap to recompute
+    /// each frame for the handful of sockets a scene carries, and only
+    /// touches the GPU when that list actually changes (place / delete /
+    /// load). Renames don't move the gizmo, so they don't rebuild it.
+    pub(super) fn update_socket_visualization(&mut self) {
+        let cur: Vec<([f32; 3], [f32; 3])> = self
+            .editor
+            .sockets
+            .iter()
+            .map(|s| (s.position, s.normal))
+            .collect();
+        if cur == self.last_socket_viz {
+            return;
+        }
+        self.last_socket_viz = cur.clone();
+        if let Some(r) = &mut self.renderer {
+            r.set_socket_mesh(&cur);
+        }
     }
 
     /// Resolve the cell a Select-tool gesture should anchor at for a

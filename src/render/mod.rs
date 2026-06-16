@@ -11,12 +11,14 @@ mod pipeline;
 mod gpu_mesh;
 mod grid;
 mod selection;
+mod socket;
 
 pub use camera::{Camera, CameraController, CameraUniform};
 pub use pipeline::RenderPipeline;
 pub use gpu_mesh::GpuMesh;
 pub use grid::{AxisMesh, GridMesh, LinePipeline, LineVertex};
 pub use selection::SelectionMesh;
+pub use socket::SocketMesh;
 
 use crate::mesh::ChunkMesh;
 use crate::core::ChunkPos;
@@ -57,6 +59,11 @@ pub struct Renderer {
     /// the brush hover overlay. `None` unless a move drag is in
     /// progress. Owned solely by `App::update_selection_visualization`.
     pub move_ghost_mesh: Option<GpuMesh>,
+    /// Gizmo lines for the named sockets (attachment points), drawn
+    /// through the `LinePipeline` like the selection wireframe. `None`
+    /// when the scene has no sockets. Rebuilt by
+    /// `App::update_socket_visualization` when the socket set changes.
+    pub socket_mesh: Option<SocketMesh>,
     /// Whether wireframe mode is supported
     pub wireframe_supported: bool,
 }
@@ -186,6 +193,7 @@ impl Renderer {
             brush_preview_mesh: None,
             selection_mesh: None,
             move_ghost_mesh: None,
+            socket_mesh: None,
             wireframe_supported,
         })
     }
@@ -346,6 +354,28 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, sel.vertex_buffer.slice(..));
             render_pass.draw(0..sel.vertex_count, 0..1);
+        }
+    }
+
+    /// Replace the socket gizmo overlay from a list of `(position,
+    /// normal)` pairs. An empty list clears the slot.
+    pub fn set_socket_mesh(&mut self, sockets: &[([f32; 3], [f32; 3])]) {
+        self.socket_mesh = SocketMesh::new(&self.device, sockets);
+    }
+
+    /// Clear the socket gizmo overlay.
+    pub fn clear_socket(&mut self) {
+        self.socket_mesh = None;
+    }
+
+    /// Draw the socket gizmos (if any) through the line pipeline.
+    /// Same depth rules as the selection wireframe — call alongside it.
+    pub fn draw_socket<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        if let Some(sockets) = &self.socket_mesh {
+            render_pass.set_pipeline(&self.line_pipeline.render_pipeline);
+            render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, sockets.vertex_buffer.slice(..));
+            render_pass.draw(0..sockets.vertex_count, 0..1);
         }
     }
 

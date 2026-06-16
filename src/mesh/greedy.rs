@@ -18,18 +18,21 @@
 //!
 //! ### Mask key
 //!
-//! Each mask cell stores `(packed_rgba << 8) | packed_ao` as `u64`:
-//! - `packed_rgba` (top 32 bits, with 24 bits padding above): the
-//!   shaded RGBA color, packed via `pack_rgba`
+//! Each mask cell stores `(tint_zone << 40) | (packed_rgba << 8) | packed_ao`
+//! as `u64`:
+//! - `tint_zone` (bits 40+): the voxel's faction tint zone (0-3), so
+//!   voxels of different zones never merge — the zone must survive
+//!   per-vertex to GLB export, where it can't be averaged across a quad
+//! - `packed_rgba` (bits 8-39): the shaded RGBA color via `pack_rgba`
 //! - `packed_ao` (bottom 8 bits): 4 corner AO values, 2 bits each,
 //!   packed via `mesh::ao::pack_ao`
 //!
 //! `0` is reserved as the "no visible face" sentinel — safe because
 //! every editor-placed voxel has α = 255, so a non-air visible face
 //! always packs to a non-zero `packed_rgba`. Two cells merge only
-//! when the entire `u64` matches, including all 4 corner AO values
-//! — without this, the merged quad's bilinear-interpolated AO would
-//! disagree with per-cell AO at internal edges.
+//! when the entire `u64` matches — color, all 4 corner AO values, and
+//! tint zone — without which the merged quad's bilinear-interpolated AO
+//! would disagree with per-cell AO, or a quad would span two zones.
 
 use super::ao::pack_ao;
 use super::neighbors::{

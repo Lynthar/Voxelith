@@ -402,6 +402,41 @@ impl App {
                 }
                 self.selection_drag_anchor = Some(cell);
             }
+            Tool::Socket => {
+                // Drop a named attachment point at the center of the
+                // clicked face, oriented along its outward normal.
+                // Single click — no drag, no release-commit, not
+                // undoable (managed via the Tools panel, like the
+                // selection). `drag_eligible` in `handler.rs` excludes
+                // Socket, so a held-drag never spams duplicates.
+                let (nx, ny, nz) = hit.normal;
+                if nx == 0 && ny == 0 && nz == 0 {
+                    // Degenerate normal (ray started inside a voxel) —
+                    // a socket with no orientation can't export a
+                    // meaningful rotation.
+                    self.ui
+                        .set_status("Socket: aim at a voxel face or the ground to place");
+                    return;
+                }
+                // Face center = hit voxel center + half a cell along the
+                // outward normal. For a virtual-ground hit (voxel_pos
+                // (x, -1, z), normal +Y) this lands on the y=0 plane.
+                let (vx, vy, vz) = hit.voxel_pos;
+                let position = [
+                    vx as f32 + 0.5 + nx as f32 * 0.5,
+                    vy as f32 + 0.5 + ny as f32 * 0.5,
+                    vz as f32 + 0.5 + nz as f32 * 0.5,
+                ];
+                let normal = [nx as f32, ny as f32, nz as f32];
+                let name = voxelith::editor::next_socket_name(&self.editor.sockets);
+                self.editor
+                    .sockets
+                    .push(voxelith::editor::Socket::new(name.clone(), position, normal));
+                self.ui.set_status(format!(
+                    "Placed {} at ({:.1}, {:.1}, {:.1})",
+                    name, position[0], position[1], position[2]
+                ));
+            }
         }
     }
 

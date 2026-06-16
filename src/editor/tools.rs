@@ -55,6 +55,12 @@ pub enum Tool {
     /// Box selection: drag corner-to-corner to mark an AABB region
     /// for batch operations (copy / cut / paste / delete / move).
     Select,
+    /// Place a named attachment point. Single click drops a socket at
+    /// the center of the clicked face, oriented along the face normal;
+    /// it carries no voxels and exports to glTF as an empty node. Kept
+    /// **last** in the enum so the `current_tool as usize` discriminant
+    /// in `.vxlt` / prefs stays stable for the existing tools.
+    Socket,
 }
 
 impl Tool {
@@ -71,6 +77,7 @@ impl Tool {
             Tool::Sphere => "Sphere",
             Tool::Cylinder => "Cylinder",
             Tool::Select => "Select",
+            Tool::Socket => "Socket",
         }
     }
 
@@ -87,6 +94,8 @@ impl Tool {
             Tool::Sphere => "8",
             Tool::Cylinder => "9",
             Tool::Select => "0",
+            // No digit free; placed from the toolbar / Tools panel.
+            Tool::Socket => "",
         }
     }
 
@@ -116,7 +125,10 @@ impl Tool {
     /// (Remove/Paint/Eyedropper/Fill) need a real solid voxel and
     /// shouldn't engage the fallback.
     pub fn uses_ground_plane_fallback(&self) -> bool {
-        matches!(self, Tool::Place | Tool::Select) || self.is_shape()
+        // Socket joins this set so a socket can be dropped on the y=0
+        // ground in an empty world (e.g. a spawn / origin marker), not
+        // only on an existing voxel face.
+        matches!(self, Tool::Place | Tool::Select | Tool::Socket) || self.is_shape()
     }
 }
 
@@ -196,7 +208,8 @@ impl EditorTool for BrushTool {
             | Tool::Box
             | Tool::Sphere
             | Tool::Cylinder
-            | Tool::Select => return,
+            | Tool::Select
+            | Tool::Socket => return,
         };
 
         // Expand the brush sphere across symmetry mirrors. Spheres that
@@ -267,9 +280,8 @@ impl EditorTool for BrushTool {
             // bypassed for them. Empty here keeps the trait satisfied
             // without contributing stray cells if someone ever calls
             // this for a non-brush tool by mistake.
-            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder | Tool::Select => {
-                Vec::new()
-            }
+            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder | Tool::Select
+            | Tool::Socket => Vec::new(),
         }
     }
 }

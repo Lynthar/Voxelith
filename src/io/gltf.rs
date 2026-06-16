@@ -60,6 +60,21 @@ pub struct GlbStats {
     pub byte_size: usize,
 }
 
+/// A named attachment point to emit as an empty glTF node (no mesh).
+///
+/// `translation` is the socket's world position and `rotation` is a
+/// unit quaternion in glTF `[x, y, z, w]` order. The caller
+/// (`app::file_ops`) builds these from `editor::Socket` — deriving the
+/// rotation via `Socket::rotation` — so the orientation convention
+/// lives in one place and this module stays free of math + `editor`
+/// dependencies.
+#[derive(Debug, Clone)]
+pub struct SocketNode {
+    pub name: String,
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+}
+
 // glTF / OpenGL constants, named here once so the JSON below reads
 // cleanly. See glTF 2.0 §3.6.2.4 (component types) and §3.6.2.5
 // (buffer view targets).
@@ -125,7 +140,14 @@ fn material_json(group_id: u8) -> serde_json::Value {
 /// emissive and metallic voxels carry real glTF PBR materials. Plain
 /// voxels get an explicit non-metallic material (the glTF default
 /// material is metallic, which would otherwise render them as metal).
-pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
+///
+/// `sockets` are emitted as empty nodes alongside the mesh node (see
+/// [`SocketNode`]); pass `&[]` for none.
+pub fn export_glb(
+    world: &World,
+    sockets: &[SocketNode],
+    path: &Path,
+) -> Result<GlbStats, GlbError> {
     // Accumulate combined vertex / index buffers per material group.
     let mut groups: Vec<GroupBuffers> = (0u8..4).map(GroupBuffers::new).collect();
     let mut chunk_count = 0usize;
@@ -143,7 +165,7 @@ pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
     }
     // Drop empty groups; the rest become primitives in id order.
     groups.retain(|g| !g.vertices.is_empty());
-    write_glb_groups(&groups, chunk_count, path)
+    write_glb_groups(&groups, sockets, chunk_count, path)
 }
 
 /// Export the world as a glTF Binary with Marching-Cubes smoothing.
@@ -157,8 +179,12 @@ pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
 /// at the cost of less organic curvature ("rounded cubes"); `true`
 /// applies a 3×3×3 blur for clay-like terrain output but dissolves
 /// sparse / 1-cell-wide detail.
+///
+/// `sockets` export identically to the non-smoothed path — they're
+/// independent of the mesh source.
 pub fn export_glb_smoothed(
     world: &World,
+    sockets: &[SocketNode],
     path: &Path,
     blur: bool,
 ) -> Result<GlbStats, GlbError> {
@@ -174,17 +200,19 @@ pub fn export_glb_smoothed(
             indices: mesh.indices,
         }]
     };
-    write_glb_groups(&groups, chunk_count, path)
+    write_glb_groups(&groups, sockets, chunk_count, path)
 }
 
 /// Write one or more material groups to a binary glTF 2.0 file. Each
 /// group becomes a primitive (POSITION / NORMAL / COLOR_0 / indices) plus
 /// a material; the BIN payload lays the groups out back to back. An empty
-/// `groups` slice produces a valid geometry-free glTF (no BIN chunk).
-/// `chunk_count` is passed through to the returned stats. Per-vertex AO
-/// is baked into the exported color (see `Vertex::baked_color`).
+/// `groups` slice produces a valid geometry-free glTF (no BIN chunk) —
+/// which `sockets` can still populate with empty nodes. `chunk_count` is
+/// passed through to the returned stats. Per-vertex AO is baked into the
+/// exported color (see `Vertex::baked_color`).
 fn write_glb_groups(
     groups: &[GroupBuffers],
+    sockets: &[SocketNode],
     chunk_count: usize,
     path: &Path,
 ) -> Result<GlbStats, GlbError> {
@@ -267,87 +295,107 @@ fn write_glb_groups(
         bin.push(0);
     }
 
-    // Build the JSON scene graph. No groups → geometry-free glTF;
-    // otherwise one primitive + material + 4 accessors / bufferViews
-    // per group, all sharing buffer 0.
-    let json_value = if groups.is_empty() {
-        json!({
-            "asset": { "version": "2.0", "generator": "Voxelith" },
-            "scene": 0,
-            "scenes": [{ "nodes": [] }],
-        })
-    } else {
-        let mut accessors = Vec::with_capacity(groups.len() * 5);
-        let mut buffer_views = Vec::with_capacity(groups.len() * 5);
-        let mut primitives = Vec::with_capacity(groups.len());
-        let mut materials = Vec::with_capacity(groups.len());
+    // Build per-group geometry descriptors (empty when there's no
+    // geometry): one primitive + material + 5 accessors / bufferViews
+    // per group (POSITION, NORMAL, COLOR_0, _TINTZONE, indices), all
+    // sharing buffer 0.
+    let mut accessors = Vec::with_capacity(groups.len() * 5);
+    let mut buffer_views = Vec::with_capacity(groups.len() * 5);
+    let mut primitives = Vec::with_capacity(groups.len());
+    let mut materials = Vec::with_capacity(groups.len());
 
-        for (i, (g, s)) in groups.iter().zip(&sections).enumerate() {
-            // Group i owns accessors / bufferViews [5i .. 5i+5):
-            // POSITION, NORMAL, COLOR_0, _TINTZONE, indices.
-            let base = (i * 5) as u32;
-            accessors.push(json!({
-                "bufferView": base,
-                "componentType": COMPONENT_TYPE_FLOAT,
-                "count": g.vertices.len(),
-                "type": "VEC3",
-                "min": [s.min[0], s.min[1], s.min[2]],
-                "max": [s.max[0], s.max[1], s.max[2]],
-            }));
-            accessors.push(json!({
-                "bufferView": base + 1,
-                "componentType": COMPONENT_TYPE_FLOAT,
-                "count": g.vertices.len(),
-                "type": "VEC3",
-            }));
-            accessors.push(json!({
-                "bufferView": base + 2,
-                "componentType": COMPONENT_TYPE_FLOAT,
-                "count": g.vertices.len(),
-                "type": "VEC4",
-            }));
-            // _TINTZONE: per-vertex faction recolor zone (SCALAR f32).
-            accessors.push(json!({
-                "bufferView": base + 3,
-                "componentType": COMPONENT_TYPE_FLOAT,
-                "count": g.vertices.len(),
-                "type": "SCALAR",
-            }));
-            accessors.push(json!({
-                "bufferView": base + 4,
-                "componentType": COMPONENT_TYPE_UINT,
-                "count": g.indices.len(),
-                "type": "SCALAR",
-            }));
+    for (i, (g, s)) in groups.iter().zip(&sections).enumerate() {
+        // Group i owns accessors / bufferViews [5i .. 5i+5):
+        // POSITION, NORMAL, COLOR_0, _TINTZONE, indices.
+        let base = (i * 5) as u32;
+        accessors.push(json!({
+            "bufferView": base,
+            "componentType": COMPONENT_TYPE_FLOAT,
+            "count": g.vertices.len(),
+            "type": "VEC3",
+            "min": [s.min[0], s.min[1], s.min[2]],
+            "max": [s.max[0], s.max[1], s.max[2]],
+        }));
+        accessors.push(json!({
+            "bufferView": base + 1,
+            "componentType": COMPONENT_TYPE_FLOAT,
+            "count": g.vertices.len(),
+            "type": "VEC3",
+        }));
+        accessors.push(json!({
+            "bufferView": base + 2,
+            "componentType": COMPONENT_TYPE_FLOAT,
+            "count": g.vertices.len(),
+            "type": "VEC4",
+        }));
+        // _TINTZONE: per-vertex faction recolor zone (SCALAR f32).
+        accessors.push(json!({
+            "bufferView": base + 3,
+            "componentType": COMPONENT_TYPE_FLOAT,
+            "count": g.vertices.len(),
+            "type": "SCALAR",
+        }));
+        accessors.push(json!({
+            "bufferView": base + 4,
+            "componentType": COMPONENT_TYPE_UINT,
+            "count": g.indices.len(),
+            "type": "SCALAR",
+        }));
 
-            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.pos.0, "byteLength": s.pos.1, "target": TARGET_ARRAY_BUFFER }));
-            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.normal.0, "byteLength": s.normal.1, "target": TARGET_ARRAY_BUFFER }));
-            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.color.0, "byteLength": s.color.1, "target": TARGET_ARRAY_BUFFER }));
-            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.tintzone.0, "byteLength": s.tintzone.1, "target": TARGET_ARRAY_BUFFER }));
-            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.index.0, "byteLength": s.index.1, "target": TARGET_ELEMENT_ARRAY_BUFFER }));
+        buffer_views.push(json!({ "buffer": 0, "byteOffset": s.pos.0, "byteLength": s.pos.1, "target": TARGET_ARRAY_BUFFER }));
+        buffer_views.push(json!({ "buffer": 0, "byteOffset": s.normal.0, "byteLength": s.normal.1, "target": TARGET_ARRAY_BUFFER }));
+        buffer_views.push(json!({ "buffer": 0, "byteOffset": s.color.0, "byteLength": s.color.1, "target": TARGET_ARRAY_BUFFER }));
+        buffer_views.push(json!({ "buffer": 0, "byteOffset": s.tintzone.0, "byteLength": s.tintzone.1, "target": TARGET_ARRAY_BUFFER }));
+        buffer_views.push(json!({ "buffer": 0, "byteOffset": s.index.0, "byteLength": s.index.1, "target": TARGET_ELEMENT_ARRAY_BUFFER }));
 
-            primitives.push(json!({
-                "attributes": { "POSITION": base, "NORMAL": base + 1, "COLOR_0": base + 2, "_TINTZONE": base + 3 },
-                "indices": base + 4,
-                "material": i,
-                "mode": PRIMITIVE_MODE_TRIANGLES,
-            }));
+        primitives.push(json!({
+            "attributes": { "POSITION": base, "NORMAL": base + 1, "COLOR_0": base + 2, "_TINTZONE": base + 3 },
+            "indices": base + 4,
+            "material": i,
+            "mode": PRIMITIVE_MODE_TRIANGLES,
+        }));
 
-            materials.push(material_json(g.group_id));
-        }
+        materials.push(material_json(g.group_id));
+    }
 
-        json!({
-            "asset": { "version": "2.0", "generator": "Voxelith" },
-            "scene": 0,
-            "scenes": [{ "nodes": [0] }],
-            "nodes": [{ "mesh": 0, "name": "Voxelith" }],
-            "meshes": [{ "name": "Voxelith", "primitives": primitives }],
-            "materials": materials,
-            "accessors": accessors,
-            "bufferViews": buffer_views,
-            "buffers": [{ "byteLength": bin.len() }],
-        })
-    };
+    // Assemble the scene's node list: the mesh node (node 0) when there
+    // is geometry, then one empty node per socket — `name` +
+    // `translation` + `rotation`, no `mesh` — which is the standard
+    // glTF representation of an attachment point. Sockets export even
+    // for an empty world (a sockets-only glTF is valid).
+    let mut nodes: Vec<serde_json::Value> = Vec::new();
+    let mut scene_nodes: Vec<usize> = Vec::new();
+    if !groups.is_empty() {
+        nodes.push(json!({ "mesh": 0, "name": "Voxelith" }));
+        scene_nodes.push(0);
+    }
+    for sock in sockets {
+        scene_nodes.push(nodes.len());
+        nodes.push(json!({
+            "name": sock.name,
+            "translation": sock.translation,
+            "rotation": sock.rotation,
+        }));
+    }
+
+    // Base document; geometry-only keys (meshes/materials/accessors/
+    // bufferViews/buffers) are attached only when groups exist, and
+    // `nodes` only when there's at least one node (mesh or socket).
+    let mut json_value = json!({
+        "asset": { "version": "2.0", "generator": "Voxelith" },
+        "scene": 0,
+        "scenes": [{ "nodes": scene_nodes }],
+    });
+    if !nodes.is_empty() {
+        json_value["nodes"] = json!(nodes);
+    }
+    if !groups.is_empty() {
+        json_value["meshes"] = json!([{ "name": "Voxelith", "primitives": primitives }]);
+        json_value["materials"] = json!(materials);
+        json_value["accessors"] = json!(accessors);
+        json_value["bufferViews"] = json!(buffer_views);
+        json_value["buffers"] = json!([{ "byteLength": bin.len() }]);
+    }
 
     let mut json_bytes = serde_json::to_vec(&json_value)?;
     // JSON chunk also 4-byte aligned. Pad with ASCII space (0x20).
@@ -444,7 +492,7 @@ mod tests {
     fn test_export_empty_world_produces_valid_glb_no_bin() {
         let world = World::new();
         let path = std::env::temp_dir().join("voxelith_empty.glb");
-        let stats = export_glb(&world, &path).unwrap();
+        let stats = export_glb(&world, &[], &path).unwrap();
         assert_eq!(stats.vertex_count, 0);
         assert_eq!(stats.triangle_count, 0);
 
@@ -465,7 +513,7 @@ mod tests {
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.clear_dirty_flags();
         let path = std::env::temp_dir().join("voxelith_single.glb");
-        let stats = export_glb(&world, &path).unwrap();
+        let stats = export_glb(&world, &[], &path).unwrap();
 
         // Single voxel: 6 quads, 24 verts, 12 tris (greedy can't merge).
         assert_eq!(stats.vertex_count, 24);
@@ -515,7 +563,7 @@ mod tests {
         world.set_voxel(2, 1, 3, Voxel::from_rgb(0, 255, 0));
         world.clear_dirty_flags();
         let path = std::env::temp_dir().join("voxelith_bounds.glb");
-        export_glb(&world, &path).unwrap();
+        export_glb(&world, &[], &path).unwrap();
 
         let (json_bytes, _) = read_glb(&path);
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -542,7 +590,7 @@ mod tests {
         let mut world = World::new();
         world.set_voxel(5, 5, 5, Voxel::from_rgb(10, 20, 30));
         let path = std::env::temp_dir().join("voxelith_align.glb");
-        export_glb(&world, &path).unwrap();
+        export_glb(&world, &[], &path).unwrap();
 
         let mut bytes = Vec::new();
         File::open(&path).unwrap().read_to_end(&mut bytes).unwrap();
@@ -570,7 +618,7 @@ mod tests {
             }
         }
         let path = std::env::temp_dir().join("voxelith_views.glb");
-        export_glb(&world, &path).unwrap();
+        export_glb(&world, &[], &path).unwrap();
 
         let (json_bytes, bin) = read_glb(&path);
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -607,7 +655,7 @@ mod tests {
         }
         world.clear_dirty_flags();
         let path = std::env::temp_dir().join("voxelith_ao_bake.glb");
-        export_glb(&world, &path).unwrap();
+        export_glb(&world, &[], &path).unwrap();
 
         let (json_bytes, bin) = read_glb(&path);
         let bin = bin.expect("non-empty world must have BIN chunk");
@@ -651,7 +699,7 @@ mod tests {
         world.clear_dirty_flags();
 
         let path = std::env::temp_dir().join("voxelith_materials.glb");
-        export_glb(&world, &path).unwrap();
+        export_glb(&world, &[], &path).unwrap();
         let (json_bytes, _) = read_glb(&path);
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
@@ -702,7 +750,7 @@ mod tests {
         world.clear_dirty_flags();
 
         let path = std::env::temp_dir().join("voxelith_tintzone.glb");
-        export_glb(&world, &path).unwrap();
+        export_glb(&world, &[], &path).unwrap();
         let (json_bytes, bin) = read_glb(&path);
         let bin = bin.expect("non-empty world must have BIN chunk");
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -729,6 +777,71 @@ mod tests {
             }
         }
         assert!(seen1 && seen2, "both tint zones should be exported");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_writes_socket_nodes() {
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(200, 200, 200));
+        world.clear_dirty_flags();
+        let sockets = vec![SocketNode {
+            name: "muzzle".to_string(),
+            translation: [0.5, 1.0, 0.5],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        }];
+
+        let path = std::env::temp_dir().join("voxelith_socket_node.glb");
+        export_glb(&world, &sockets, &path).unwrap();
+        let (json_bytes, _) = read_glb(&path);
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        let nodes = json["nodes"].as_array().expect("nodes present");
+        // Mesh node (node 0) + one socket node.
+        assert_eq!(nodes.len(), 2);
+        let socket = nodes
+            .iter()
+            .find(|n| n["name"] == "muzzle")
+            .expect("socket node present");
+        // A socket is an EMPTY node — no mesh attached.
+        assert!(socket.get("mesh").is_none(), "socket must not carry a mesh");
+        assert_eq!(socket["translation"], serde_json::json!([0.5, 1.0, 0.5]));
+        assert_eq!(
+            socket["rotation"].as_array().map(|a| a.len()),
+            Some(4),
+            "rotation is a 4-component quaternion"
+        );
+        // The scene references both the mesh node and the socket node.
+        let scene_nodes = json["scenes"][0]["nodes"].as_array().unwrap();
+        assert_eq!(scene_nodes.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_sockets_only_empty_world() {
+        // A world with no geometry but a socket still produces a valid
+        // glTF: a single empty node, no mesh / BIN chunk.
+        let world = World::new();
+        let sockets = vec![SocketNode {
+            name: "origin".to_string(),
+            translation: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        }];
+
+        let path = std::env::temp_dir().join("voxelith_socket_only.glb");
+        export_glb(&world, &sockets, &path).unwrap();
+        let (json_bytes, bin) = read_glb(&path);
+        assert!(bin.is_none(), "no geometry → no BIN chunk");
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        assert!(json["meshes"].is_null(), "no meshes for a sockets-only export");
+        let nodes = json["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].get("mesh").is_none());
+        assert_eq!(nodes[0]["name"], "origin");
+        assert_eq!(json["scenes"][0]["nodes"].as_array().unwrap().len(), 1);
 
         let _ = std::fs::remove_file(&path);
     }
