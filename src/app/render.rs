@@ -148,6 +148,11 @@ impl App {
             // voxels, matching how Goxel renders its selection.
             renderer.draw_selection(&mut render_pass);
 
+            // Socket gizmos (magenta attachment-point pins). Same line
+            // pipeline + depth rules as the selection wireframe, so a
+            // socket tucked behind solid voxels is occluded too.
+            renderer.draw_socket(&mut render_pass);
+
             // Procgen preview overlay (alpha-blended). Drawn after
             // opaque chunks so the depth buffer already correctly
             // gates it; the transparent pipeline reads but does not

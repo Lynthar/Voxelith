@@ -2,15 +2,27 @@
 
 use std::path::{Path, PathBuf};
 
-use voxelith::{core::Voxel, editor::Tool, io, ui::ExportReport};
+use voxelith::{core::Voxel, editor::Socket, io, ui::ExportReport};
 
 use super::App;
+
+/// Rebuild the live `editor::Socket` list from a loaded `EditorState`.
+/// Inverse of `current_editor_state`'s socket mapping; shared by the
+/// open-project and crash-recovery restore paths.
+fn sockets_from_state(state: &io::EditorState) -> Vec<Socket> {
+    state
+        .sockets
+        .iter()
+        .map(|s| Socket::new(s.name.clone(), s.position, s.normal))
+        .collect()
+}
 
 impl App {
     /// Create a new empty project.
     pub(super) fn new_project(&mut self) {
         self.world.clear();
         self.editor.history.clear();
+        self.editor.sockets.clear();
         self.project_path = None;
         self.unsaved_changes = false;
         if let Some(renderer) = &mut self.renderer {
@@ -51,7 +63,32 @@ impl App {
                 .map(|v| [v.r, v.g, v.b, v.a])
                 .collect(),
             selected_tool: self.editor.current_tool as usize,
+            sockets: self
+                .editor
+                .sockets
+                .iter()
+                .map(|s| io::SocketData {
+                    name: s.name.clone(),
+                    position: s.position,
+                    normal: s.normal,
+                })
+                .collect(),
         }
+    }
+
+    /// Build the glTF socket-node list (name + translation + derived
+    /// rotation) from the live sockets, for the GLB export paths. The
+    /// `+Y → normal` rotation convention lives in `Socket::rotation`.
+    fn socket_export_nodes(&self) -> Vec<io::SocketNode> {
+        self.editor
+            .sockets
+            .iter()
+            .map(|s| io::SocketNode {
+                name: s.name.clone(),
+                translation: s.position,
+                rotation: s.rotation(),
+            })
+            .collect()
     }
 
     /// Load a crash-recovery autosave into the editor. Mirrors
@@ -82,14 +119,8 @@ impl App {
             .iter()
             .map(|c| Voxel::from_rgba(c[0], c[1], c[2], c[3]))
             .collect();
-        self.editor.current_tool = match editor_state.selected_tool {
-            0 => Tool::Place,
-            1 => Tool::Remove,
-            2 => Tool::Paint,
-            3 => Tool::Eyedropper,
-            4 => Tool::Fill,
-            _ => Tool::Place,
-        };
+        self.editor.current_tool = super::tool_from_index(editor_state.selected_tool as u8);
+        self.editor.sockets = sockets_from_state(&editor_state);
         if let Some(renderer) = &mut self.renderer {
             renderer.chunk_meshes.clear();
             renderer.camera.position = glam::Vec3::new(
@@ -190,14 +221,9 @@ impl App {
                     .iter()
                     .map(|c| Voxel::from_rgba(c[0], c[1], c[2], c[3]))
                     .collect();
-                self.editor.current_tool = match editor_state.selected_tool {
-                    0 => Tool::Place,
-                    1 => Tool::Remove,
-                    2 => Tool::Paint,
-                    3 => Tool::Eyedropper,
-                    4 => Tool::Fill,
-                    _ => Tool::Place,
-                };
+                self.editor.current_tool =
+                    super::tool_from_index(editor_state.selected_tool as u8);
+                self.editor.sockets = sockets_from_state(&editor_state);
 
                 if let Some(renderer) = &mut self.renderer {
                     renderer.chunk_meshes.clear();
@@ -254,6 +280,9 @@ impl App {
                 Ok(world) => {
                     self.world = world;
                     self.editor.history.clear();
+                    // A .vox carries no sockets; the imported model
+                    // replaces the scene, so drop any from the old one.
+                    self.editor.sockets.clear();
                     if let Some(renderer) = &mut self.renderer {
                         renderer.chunk_meshes.clear();
                     }
@@ -372,7 +401,8 @@ impl App {
             return;
         };
 
-        match io::export_glb_smoothed(&self.world, &path, blur) {
+        let sockets = self.socket_export_nodes();
+        match io::export_glb_smoothed(&self.world, &sockets, &path, blur) {
             Ok(stats) => {
                 self.touch_recent(&path);
                 let filename = path
@@ -400,6 +430,7 @@ impl App {
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
                             color_model: "Per-vertex RGBA".into(),
+                            notes: socket_note(sockets.len()),
                             ..Default::default()
                         },
                     );
@@ -429,7 +460,8 @@ impl App {
             return;
         };
 
-        match io::export_glb(&self.world, &path) {
+        let sockets = self.socket_export_nodes();
+        match io::export_glb(&self.world, &sockets, &path) {
             Ok(stats) => {
                 self.touch_recent(&path);
                 let filename = path
@@ -456,6 +488,7 @@ impl App {
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
                             color_model: "Per-vertex RGBA".into(),
+                            notes: socket_note(sockets.len()),
                             ..Default::default()
                         },
                     );
@@ -583,6 +616,22 @@ impl App {
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
         }
+    }
+}
+
+/// Export-report note line for emitted sockets, or empty when there
+/// are none. Keeps the post-export summary honest about the empty
+/// nodes that went into the .glb alongside the mesh.
+fn socket_note(count: usize) -> Vec<String> {
+    if count == 0 {
+        Vec::new()
+    } else {
+        vec![format!(
+            "{} named socket{} exported as glTF empty node{}",
+            count,
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "" } else { "s" },
+        )]
     }
 }
 

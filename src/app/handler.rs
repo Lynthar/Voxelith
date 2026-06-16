@@ -320,6 +320,7 @@ impl ApplicationHandler for App {
                 self.tick_ai_job();
                 self.update_brush_preview();
                 self.update_selection_visualization();
+                self.update_socket_visualization();
                 self.rebuild_all_meshes();
                 self.tick_autosave();
                 self.render_frame(dt);

@@ -820,6 +820,22 @@ impl Ui {
                         editor.current_tool = Tool::Select;
                     }
 
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Socket — drop a named attachment point on a face.
+                    if tool_button(
+                        ui,
+                        Tool::Socket,
+                        editor.current_tool,
+                        "⚓",
+                        "Socket\nClick a voxel face (or the ground) to drop a named \
+                         attachment point. Exports to glTF as an empty node.",
+                    ) {
+                        editor.current_tool = Tool::Socket;
+                    }
+
                     ui.add_space(16.0);
                     ui.separator();
                     ui.add_space(8.0);
@@ -1034,6 +1050,63 @@ impl Ui {
                         editor.selection = None;
                     }
                 });
+
+                ui.add_space(4.0);
+                ui.heading("Sockets");
+                if ui
+                    .selectable_label(editor.current_tool == Tool::Socket, "Place Socket")
+                    .on_hover_text(
+                        "Click a voxel face (or the ground) to drop a named \
+                         attachment point. Exports to glTF as an empty node \
+                         (name + position + orientation).",
+                    )
+                    .clicked()
+                {
+                    editor.current_tool = Tool::Socket;
+                }
+                if editor.sockets.is_empty() {
+                    ui.label(egui::RichText::new("No sockets yet.").small().weak());
+                } else {
+                    // Per-socket row: inline rename + delete + position
+                    // readout. Names become glTF node names on export.
+                    let mut to_delete: Option<usize> = None;
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for (i, s) in editor.sockets.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut s.name)
+                                        .desired_width(110.0),
+                                )
+                                .on_hover_text("Name (becomes the glTF node name)");
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("Delete this socket")
+                                    .clicked()
+                                {
+                                    to_delete = Some(i);
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "({:.1}, {:.1}, {:.1})",
+                                        s.position[0], s.position[1], s.position[2]
+                                    ))
+                                    .small()
+                                    .weak(),
+                                );
+                            });
+                        }
+                    });
+                    if let Some(i) = to_delete {
+                        editor.sockets.remove(i);
+                    }
+                    if ui
+                        .button("Clear all sockets")
+                        .on_hover_text("Remove every socket from the scene")
+                        .clicked()
+                    {
+                        editor.sockets.clear();
+                    }
+                }
 
                 ui.separator();
 

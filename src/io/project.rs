@@ -90,6 +90,23 @@ pub struct EditorState {
     pub palette: Vec<[u8; 4]>,
     /// Selected tool index
     pub selected_tool: usize,
+    /// Named attachment points (sockets) placed in the scene. `#[serde
+    /// (default)]` so `.vxlt` files written before sockets existed still
+    /// load (missing field → no sockets); the project format version
+    /// doesn't need a bump because the addition is purely additive.
+    #[serde(default)]
+    pub sockets: Vec<SocketData>,
+}
+
+/// Serializable form of an `editor::Socket` (name + position + outward
+/// normal). Kept as plain data here so the `io` layer doesn't depend on
+/// `editor`; `app::file_ops` converts to/from `editor::Socket` at the
+/// boundary, exactly like camera / brush / palette.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SocketData {
+    pub name: String,
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
 }
 
 /// Serializable chunk data
@@ -439,6 +456,18 @@ mod tests {
             brush_color: [12, 34, 56, 200],
             palette: vec![[1, 2, 3, 4], [255, 254, 253, 252]],
             selected_tool: 4,
+            sockets: vec![
+                SocketData {
+                    name: "muzzle".to_string(),
+                    position: [2.5, 1.0, -3.5],
+                    normal: [0.0, 1.0, 0.0],
+                },
+                SocketData {
+                    name: "Socket_2".to_string(),
+                    position: [-1.0, 0.5, 4.0],
+                    normal: [1.0, 0.0, 0.0],
+                },
+            ],
         };
 
         let project = Project::from_world_with_state(&world, state.clone());
@@ -453,6 +482,7 @@ mod tests {
         assert_eq!(es.brush_color, state.brush_color);
         assert_eq!(es.palette, state.palette);
         assert_eq!(es.selected_tool, state.selected_tool);
+        assert_eq!(es.sockets, state.sockets);
 
         // Every set voxel survives — negatives, far chunks, exact rgba.
         let loaded_world = loaded.to_world();
@@ -466,6 +496,24 @@ mod tests {
                 z
             );
         }
+    }
+
+    #[test]
+    fn editor_state_without_sockets_field_still_loads() {
+        // A `.vxlt` written before sockets existed has no `sockets` key
+        // in its EditorState JSON. `#[serde(default)]` must fill it with
+        // an empty Vec rather than failing the whole header parse —
+        // otherwise the addition would silently brick every old project.
+        let json = r#"{
+            "camera_position": [0.0, 0.0, 0.0],
+            "camera_target": [0.0, 0.0, 0.0],
+            "brush_color": [10, 20, 30, 255],
+            "palette": [],
+            "selected_tool": 2
+        }"#;
+        let es: EditorState = serde_json::from_str(json).unwrap();
+        assert_eq!(es.selected_tool, 2);
+        assert!(es.sockets.is_empty());
     }
 
     #[test]

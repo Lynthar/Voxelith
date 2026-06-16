@@ -11,6 +11,7 @@ mod commands;
 mod raycast;
 mod selection;
 mod shapes;
+mod socket;
 mod tools;
 mod transform;
 
@@ -22,6 +23,7 @@ pub use commands::{Command, CommandHistory, VoxelChange};
 pub use raycast::{Ray, RaycastHit, VoxelRaycast};
 pub use selection::Selection;
 pub use shapes::{box_voxels, cylinder_voxels, line_voxels, sphere_voxels};
+pub use socket::{next_socket_name, Socket};
 pub use tools::{
     compute_flood_fill_changes, eyedrop, flood_fill, flood_fill_multi, BrushTool, EditorTool,
     Tool, ToolContext,
@@ -117,6 +119,12 @@ pub struct Editor {
     /// pushed onto the undo stack — it's an ephemeral marquee, like
     /// in image editors.
     pub selection: Option<Selection>,
+    /// Named attachment points placed with the `Socket` tool. Unlike
+    /// the selection these *are* document data — they persist in
+    /// `.vxlt` and export to glTF as empty nodes — but, like it, they
+    /// stay out of the undo history (managed via the Tools panel). See
+    /// [`Socket`].
+    pub sockets: Vec<Socket>,
 }
 
 impl Default for Editor {
@@ -137,6 +145,7 @@ impl Editor {
             tool_before_alt: None,
             symmetry: SymmetryAxes::default(),
             selection: None,
+            sockets: Vec::new(),
         }
     }
 
