@@ -17,6 +17,10 @@ struct VertexInput {
     // (sharp inside corner), 1 = no occlusion. Bilinearly
     // interpolated across the quad by the rasterizer.
     @location(3) ao: f32,
+    // Faction tint zone — present in the vertex layout for GLB export;
+    // unused by rendering, declared so the pipeline accepts the vertex
+    // buffer's @location(4) attribute.
+    @location(4) tint_zone: f32,
 };
 
 struct VertexOutput {

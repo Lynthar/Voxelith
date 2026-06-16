@@ -41,7 +41,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::core::World;
-use crate::mesh::{mesh_world_smoothed, GreedyMesher, Mesher, Vertex};
+use crate::mesh::{mesh_chunk_by_material, mesh_world_smoothed, Vertex};
 
 #[derive(Debug, Error)]
 pub enum GlbError {
@@ -69,28 +69,81 @@ const TARGET_ARRAY_BUFFER: u32 = 34962;
 const TARGET_ELEMENT_ARRAY_BUFFER: u32 = 34963;
 const PRIMITIVE_MODE_TRIANGLES: u32 = 4;
 
-/// Export the current world as a binary glTF 2.0 file at `path`.
-pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
-    let mesher = GreedyMesher::new();
+/// One material group's combined geometry for GLB export.
+struct GroupBuffers {
+    /// Material group id: bit0 emissive, bit1 metallic (0 = plain).
+    group_id: u8,
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
+}
 
-    // Accumulate all chunks' meshes into one flat vertex / index pair.
-    // Each chunk's local indices are offset by the running vertex
-    // base so they index into the combined buffer.
-    let mut vertices: Vec<Vertex> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+impl GroupBuffers {
+    fn new(group_id: u8) -> Self {
+        Self {
+            group_id,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+}
+
+/// Human name for a material group → glTF `materials[].name`.
+fn material_name(group_id: u8) -> &'static str {
+    match group_id {
+        1 => "Voxelith_emissive",
+        2 => "Voxelith_metallic",
+        3 => "Voxelith_emissive_metallic",
+        _ => "Voxelith",
+    }
+}
+
+/// Build the glTF material for a group. The glTF *default* material is
+/// metallic (`metallicFactor` defaults to 1.0), so even plain voxels get
+/// an explicit `metallicFactor = 0` to render as matte colored surfaces;
+/// metallic voxels get `metallicFactor = 1` + a lower roughness; emissive
+/// voxels get a constant white `emissiveFactor` (core glTF can't express
+/// per-vertex emissive color — vertex color only multiplies base color).
+fn material_json(group_id: u8) -> serde_json::Value {
+    let metallic = group_id & 0b10 != 0;
+    let emissive = group_id & 0b01 != 0;
+    let mut m = json!({
+        "name": material_name(group_id),
+        "pbrMetallicRoughness": {
+            "metallicFactor": if metallic { 1.0 } else { 0.0 },
+            "roughnessFactor": if metallic { 0.4 } else { 1.0 },
+        },
+    });
+    if emissive {
+        m["emissiveFactor"] = json!([1.0, 1.0, 1.0]);
+    }
+    m
+}
+
+/// Export the current world as a binary glTF 2.0 file at `path`,
+/// grouping geometry by material flag (plain / emissive / metallic /
+/// both). Each present group becomes its own primitive + material, so
+/// emissive and metallic voxels carry real glTF PBR materials. Plain
+/// voxels get an explicit non-metallic material (the glTF default
+/// material is metallic, which would otherwise render them as metal).
+pub fn export_glb(world: &World, path: &Path) -> Result<GlbStats, GlbError> {
+    // Accumulate combined vertex / index buffers per material group.
+    let mut groups: Vec<GroupBuffers> = (0u8..4).map(GroupBuffers::new).collect();
     let mut chunk_count = 0usize;
     for (chunk_pos, _) in world.chunks() {
-        let mesh = mesher.generate(world, *chunk_pos);
-        if mesh.is_empty() {
-            continue;
+        let per_material = mesh_chunk_by_material(world, *chunk_pos);
+        if !per_material.is_empty() {
+            chunk_count += 1;
         }
-        chunk_count += 1;
-        let base = vertices.len() as u32;
-        vertices.extend_from_slice(&mesh.vertices);
-        indices.extend(mesh.indices.iter().map(|&i| base + i));
+        for (gid, mesh) in per_material {
+            let g = &mut groups[gid as usize];
+            let base = g.vertices.len() as u32;
+            g.vertices.extend_from_slice(&mesh.vertices);
+            g.indices.extend(mesh.indices.iter().map(|&i| base + i));
+        }
     }
-
-    write_glb_from_buffers(&vertices, &indices, chunk_count, path)
+    // Drop empty groups; the rest become primitives in id order.
+    groups.retain(|g| !g.vertices.is_empty());
+    write_glb_groups(&groups, chunk_count, path)
 }
 
 /// Export the world as a glTF Binary with Marching-Cubes smoothing.
@@ -111,61 +164,81 @@ pub fn export_glb_smoothed(
 ) -> Result<GlbStats, GlbError> {
     let mesh = mesh_world_smoothed(world, blur);
     let chunk_count = if mesh.is_empty() { 0 } else { 1 };
-    write_glb_from_buffers(&mesh.vertices, &mesh.indices, chunk_count, path)
+    // MC output carries no material flags — a single plain group.
+    let groups = if mesh.is_empty() {
+        Vec::new()
+    } else {
+        vec![GroupBuffers {
+            group_id: 0,
+            vertices: mesh.vertices,
+            indices: mesh.indices,
+        }]
+    };
+    write_glb_groups(&groups, chunk_count, path)
 }
 
-/// Shared GLB writer. Takes a flat vertex / index pair (as if every
-/// chunk's mesh has been pre-flattened) plus a `chunk_count` for stats
-/// reporting. Both `export_glb` and `export_glb_smoothed` build their
-/// data here then converge on this single writer to keep the GLB
-/// structure (header / JSON chunk / BIN chunk / accessor layout)
-/// identical.
-fn write_glb_from_buffers(
-    vertices: &[Vertex],
-    indices: &[u32],
+/// Write one or more material groups to a binary glTF 2.0 file. Each
+/// group becomes a primitive (POSITION / NORMAL / COLOR_0 / indices) plus
+/// a material; the BIN payload lays the groups out back to back. An empty
+/// `groups` slice produces a valid geometry-free glTF (no BIN chunk).
+/// `chunk_count` is passed through to the returned stats. Per-vertex AO
+/// is baked into the exported color (see `Vertex::baked_color`).
+fn write_glb_groups(
+    groups: &[GroupBuffers],
     chunk_count: usize,
     path: &Path,
 ) -> Result<GlbStats, GlbError> {
-    // Build the BIN payload (deinterleaved: positions, then normals,
-    // then colors, then indices) and remember each section's offset.
+    // Per-group byte sections within the BIN, plus POSITION bounds.
+    struct Section {
+        pos: (usize, usize),
+        normal: (usize, usize),
+        color: (usize, usize),
+        tintzone: (usize, usize),
+        index: (usize, usize),
+        min: [f32; 3],
+        max: [f32; 3],
+    }
+
     let mut bin = Vec::<u8>::new();
+    let mut sections: Vec<Section> = Vec::with_capacity(groups.len());
+    let mut total_vertices = 0usize;
+    let mut total_indices = 0usize;
 
-    let pos_offset = bin.len();
-    for v in vertices {
-        bin.extend_from_slice(bytemuck::bytes_of(&v.position));
-    }
-    let pos_len = bin.len() - pos_offset;
+    for g in groups {
+        let pos_offset = bin.len();
+        for v in &g.vertices {
+            bin.extend_from_slice(bytemuck::bytes_of(&v.position));
+        }
+        let pos_len = bin.len() - pos_offset;
 
-    let normal_offset = bin.len();
-    for v in vertices {
-        bin.extend_from_slice(bytemuck::bytes_of(&v.normal));
-    }
-    let normal_len = bin.len() - normal_offset;
+        let normal_offset = bin.len();
+        for v in &g.vertices {
+            bin.extend_from_slice(bytemuck::bytes_of(&v.normal));
+        }
+        let normal_len = bin.len() - normal_offset;
 
-    let color_offset = bin.len();
-    for v in vertices {
-        bin.extend_from_slice(bytemuck::bytes_of(&v.color));
-    }
-    let color_len = bin.len() - color_offset;
+        let color_offset = bin.len();
+        for v in &g.vertices {
+            // Bake per-vertex AO into the exported color (see
+            // `Vertex::baked_color`); MC-smoothed meshes carry ao = 1.0.
+            bin.extend_from_slice(bytemuck::bytes_of(&v.baked_color()));
+        }
+        let color_len = bin.len() - color_offset;
 
-    let index_offset = bin.len();
-    bin.extend_from_slice(bytemuck::cast_slice(&indices));
-    let index_len = bin.len() - index_offset;
+        let tintzone_offset = bin.len();
+        for v in &g.vertices {
+            bin.extend_from_slice(bytemuck::bytes_of(&v.tint_zone));
+        }
+        let tintzone_len = bin.len() - tintzone_offset;
 
-    // BIN must be 4-byte aligned. Pad with zeros (spec §3.4.2).
-    while bin.len() % 4 != 0 {
-        bin.push(0);
-    }
+        let index_offset = bin.len();
+        bin.extend_from_slice(bytemuck::cast_slice(&g.indices));
+        let index_len = bin.len() - index_offset;
 
-    // POSITION accessor REQUIRES `min` / `max` per spec §3.6.2.5.
-    // For empty meshes we don't emit the accessor at all so this
-    // bound calculation is gated.
-    let bounds = if vertices.is_empty() {
-        None
-    } else {
+        // POSITION accessor REQUIRES `min` / `max` per spec §3.6.2.5.
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
-        for v in vertices {
+        for v in &g.vertices {
             for axis in 0..3 {
                 if v.position[axis] < min[axis] {
                     min[axis] = v.position[axis];
@@ -175,91 +248,104 @@ fn write_glb_from_buffers(
                 }
             }
         }
-        Some((min, max))
-    };
 
-    // Build the JSON scene graph. Empty world produces a valid but
-    // geometry-free glTF; populated world fills meshes/accessors/
-    // bufferViews/buffers.
-    let json_value = if let Some((min, max)) = bounds {
+        sections.push(Section {
+            pos: (pos_offset, pos_len),
+            normal: (normal_offset, normal_len),
+            color: (color_offset, color_len),
+            tintzone: (tintzone_offset, tintzone_len),
+            index: (index_offset, index_len),
+            min,
+            max,
+        });
+        total_vertices += g.vertices.len();
+        total_indices += g.indices.len();
+    }
+
+    // BIN must be 4-byte aligned. Pad with zeros (spec §3.4.2).
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+
+    // Build the JSON scene graph. No groups → geometry-free glTF;
+    // otherwise one primitive + material + 4 accessors / bufferViews
+    // per group, all sharing buffer 0.
+    let json_value = if groups.is_empty() {
+        json!({
+            "asset": { "version": "2.0", "generator": "Voxelith" },
+            "scene": 0,
+            "scenes": [{ "nodes": [] }],
+        })
+    } else {
+        let mut accessors = Vec::with_capacity(groups.len() * 5);
+        let mut buffer_views = Vec::with_capacity(groups.len() * 5);
+        let mut primitives = Vec::with_capacity(groups.len());
+        let mut materials = Vec::with_capacity(groups.len());
+
+        for (i, (g, s)) in groups.iter().zip(&sections).enumerate() {
+            // Group i owns accessors / bufferViews [5i .. 5i+5):
+            // POSITION, NORMAL, COLOR_0, _TINTZONE, indices.
+            let base = (i * 5) as u32;
+            accessors.push(json!({
+                "bufferView": base,
+                "componentType": COMPONENT_TYPE_FLOAT,
+                "count": g.vertices.len(),
+                "type": "VEC3",
+                "min": [s.min[0], s.min[1], s.min[2]],
+                "max": [s.max[0], s.max[1], s.max[2]],
+            }));
+            accessors.push(json!({
+                "bufferView": base + 1,
+                "componentType": COMPONENT_TYPE_FLOAT,
+                "count": g.vertices.len(),
+                "type": "VEC3",
+            }));
+            accessors.push(json!({
+                "bufferView": base + 2,
+                "componentType": COMPONENT_TYPE_FLOAT,
+                "count": g.vertices.len(),
+                "type": "VEC4",
+            }));
+            // _TINTZONE: per-vertex faction recolor zone (SCALAR f32).
+            accessors.push(json!({
+                "bufferView": base + 3,
+                "componentType": COMPONENT_TYPE_FLOAT,
+                "count": g.vertices.len(),
+                "type": "SCALAR",
+            }));
+            accessors.push(json!({
+                "bufferView": base + 4,
+                "componentType": COMPONENT_TYPE_UINT,
+                "count": g.indices.len(),
+                "type": "SCALAR",
+            }));
+
+            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.pos.0, "byteLength": s.pos.1, "target": TARGET_ARRAY_BUFFER }));
+            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.normal.0, "byteLength": s.normal.1, "target": TARGET_ARRAY_BUFFER }));
+            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.color.0, "byteLength": s.color.1, "target": TARGET_ARRAY_BUFFER }));
+            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.tintzone.0, "byteLength": s.tintzone.1, "target": TARGET_ARRAY_BUFFER }));
+            buffer_views.push(json!({ "buffer": 0, "byteOffset": s.index.0, "byteLength": s.index.1, "target": TARGET_ELEMENT_ARRAY_BUFFER }));
+
+            primitives.push(json!({
+                "attributes": { "POSITION": base, "NORMAL": base + 1, "COLOR_0": base + 2, "_TINTZONE": base + 3 },
+                "indices": base + 4,
+                "material": i,
+                "mode": PRIMITIVE_MODE_TRIANGLES,
+            }));
+
+            materials.push(material_json(g.group_id));
+        }
+
         json!({
             "asset": { "version": "2.0", "generator": "Voxelith" },
             "scene": 0,
             "scenes": [{ "nodes": [0] }],
             "nodes": [{ "mesh": 0, "name": "Voxelith" }],
-            "meshes": [{
-                "name": "Voxelith",
-                "primitives": [{
-                    "attributes": {
-                        "POSITION": 0,
-                        "NORMAL": 1,
-                        "COLOR_0": 2,
-                    },
-                    "indices": 3,
-                    "mode": PRIMITIVE_MODE_TRIANGLES,
-                }],
-            }],
-            "accessors": [
-                {
-                    "bufferView": 0,
-                    "componentType": COMPONENT_TYPE_FLOAT,
-                    "count": vertices.len(),
-                    "type": "VEC3",
-                    "min": [min[0], min[1], min[2]],
-                    "max": [max[0], max[1], max[2]],
-                },
-                {
-                    "bufferView": 1,
-                    "componentType": COMPONENT_TYPE_FLOAT,
-                    "count": vertices.len(),
-                    "type": "VEC3",
-                },
-                {
-                    "bufferView": 2,
-                    "componentType": COMPONENT_TYPE_FLOAT,
-                    "count": vertices.len(),
-                    "type": "VEC4",
-                },
-                {
-                    "bufferView": 3,
-                    "componentType": COMPONENT_TYPE_UINT,
-                    "count": indices.len(),
-                    "type": "SCALAR",
-                },
-            ],
-            "bufferViews": [
-                {
-                    "buffer": 0,
-                    "byteOffset": pos_offset,
-                    "byteLength": pos_len,
-                    "target": TARGET_ARRAY_BUFFER,
-                },
-                {
-                    "buffer": 0,
-                    "byteOffset": normal_offset,
-                    "byteLength": normal_len,
-                    "target": TARGET_ARRAY_BUFFER,
-                },
-                {
-                    "buffer": 0,
-                    "byteOffset": color_offset,
-                    "byteLength": color_len,
-                    "target": TARGET_ARRAY_BUFFER,
-                },
-                {
-                    "buffer": 0,
-                    "byteOffset": index_offset,
-                    "byteLength": index_len,
-                    "target": TARGET_ELEMENT_ARRAY_BUFFER,
-                },
-            ],
+            "meshes": [{ "name": "Voxelith", "primitives": primitives }],
+            "materials": materials,
+            "accessors": accessors,
+            "bufferViews": buffer_views,
             "buffers": [{ "byteLength": bin.len() }],
-        })
-    } else {
-        json!({
-            "asset": { "version": "2.0", "generator": "Voxelith" },
-            "scene": 0,
-            "scenes": [{ "nodes": [] }],
         })
     };
 
@@ -269,10 +355,8 @@ fn write_glb_from_buffers(
         json_bytes.push(b' ');
     }
 
-    // Emit BIN chunk only when there's actual geometry — keeps
-    // empty exports tighter and matches what Khronos's reference
-    // exporter does.
-    let has_bin = !bin.is_empty() && !vertices.is_empty();
+    // Emit BIN chunk only when there's actual geometry.
+    let has_bin = !bin.is_empty() && !groups.is_empty();
 
     // Total file length: header (12) + JSON chunk (8 + json_bytes) +
     // optional BIN chunk (8 + bin).
@@ -304,8 +388,8 @@ fn write_glb_from_buffers(
     writer.flush()?;
 
     Ok(GlbStats {
-        vertex_count: vertices.len(),
-        triangle_count: indices.len() / 3,
+        vertex_count: total_vertices,
+        triangle_count: total_indices / 3,
         chunk_count,
         byte_size: total_len as usize,
     })
@@ -401,13 +485,14 @@ mod tests {
         assert!(pos_acc["min"].is_array());
         assert!(pos_acc["max"].is_array());
 
-        // INDICES accessor count = 12 tris × 3 verts/tri = 36.
-        assert_eq!(json["accessors"][3]["count"], 36);
-        assert_eq!(json["accessors"][3]["componentType"], COMPONENT_TYPE_UINT);
+        // INDICES is now the 5th accessor per group (POSITION, NORMAL,
+        // COLOR_0, _TINTZONE, indices); count = 12 tris × 3 = 36.
+        assert_eq!(json["accessors"][4]["count"], 36);
+        assert_eq!(json["accessors"][4]["componentType"], COMPONENT_TYPE_UINT);
 
-        // BIN size: 24 verts × (12 + 12 + 16) bytes + 36 indices × 4
-        // bytes = 960 + 144 = 1104, padded to 4-byte alignment = 1104.
-        let expected = 24 * (12 + 12 + 16) + 36 * 4;
+        // BIN size: 24 verts × (12 pos + 12 normal + 16 color + 4 tintzone)
+        // bytes + 36 indices × 4 bytes.
+        let expected = 24 * (12 + 12 + 16 + 4) + 36 * 4;
         // Allow up to 3 padding bytes for alignment.
         assert!(
             bin.len() == expected || bin.len() == expected + 4 - (expected % 4) % 4,
@@ -503,6 +588,147 @@ mod tests {
                 view
             );
         }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_bakes_ao_into_colors() {
+        // A floor (y=0) and a wall (x=0) meet at a concave right-angle
+        // seam, which produces per-vertex AO < 1 along the inside corner.
+        // The exporter must darken those vertices' RGB below the source
+        // 1.0 — if AO weren't baked, every R would be exactly 1.0.
+        let mut world = World::new();
+        for a in 0..4 {
+            for b in 0..4 {
+                world.set_voxel(a, 0, b, Voxel::from_rgb(255, 0, 0)); // floor
+                world.set_voxel(0, a, b, Voxel::from_rgb(255, 0, 0)); // wall
+            }
+        }
+        world.clear_dirty_flags();
+        let path = std::env::temp_dir().join("voxelith_ao_bake.glb");
+        export_glb(&world, &path).unwrap();
+
+        let (json_bytes, bin) = read_glb(&path);
+        let bin = bin.expect("non-empty world must have BIN chunk");
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        // COLOR_0 is accessor 2 → bufferView 2; read each vertex's R.
+        let view = &json["bufferViews"][2];
+        let off = view["byteOffset"].as_u64().unwrap() as usize;
+        let len = view["byteLength"].as_u64().unwrap() as usize;
+        let mut min_r = f32::INFINITY;
+        for rgba in bin[off..off + len].chunks_exact(16) {
+            let r = f32::from_le_bytes(rgba[0..4].try_into().unwrap());
+            min_r = min_r.min(r);
+        }
+        // Source red is 1.0; an occluded corner must come out darker,
+        // but never below the ambient floor.
+        assert!(
+            min_r < 0.999,
+            "expected AO to darken some vertex below R=1.0, got min R={min_r}"
+        );
+        assert!(
+            min_r >= 0.5 - 1e-6,
+            "R darkened below the ambient floor: {min_r}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_groups_by_material_into_primitives_and_materials() {
+        let mut world = World::new();
+        // Plain, emissive, and metallic voxels — spaced apart so each is
+        // its own visible region. Three material groups → three primitives.
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(200, 200, 200));
+        let mut glow = Voxel::from_rgb(0, 100, 255);
+        glow.set_emissive(true);
+        world.set_voxel(5, 0, 0, glow);
+        let mut metal = Voxel::from_rgb(180, 180, 190);
+        metal.set_metallic(true);
+        world.set_voxel(10, 0, 0, metal);
+        world.clear_dirty_flags();
+
+        let path = std::env::temp_dir().join("voxelith_materials.glb");
+        export_glb(&world, &path).unwrap();
+        let (json_bytes, _) = read_glb(&path);
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        let mats = json["materials"].as_array().expect("materials present");
+        let prims = json["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(mats.len(), 3, "plain + emissive + metallic = 3 materials");
+        assert_eq!(prims.len(), 3, "one primitive per material group");
+
+        // Every primitive references a material by index.
+        for p in prims {
+            assert!(p["material"].is_number());
+        }
+        // Exactly one emissive material (emissiveFactor present).
+        let emissive = mats
+            .iter()
+            .filter(|m| m.get("emissiveFactor").is_some())
+            .count();
+        assert_eq!(emissive, 1, "one emissive material");
+        // Exactly one metallic material (metallicFactor == 1.0).
+        let metallic = mats
+            .iter()
+            .filter(|m| m["pbrMetallicRoughness"]["metallicFactor"].as_f64() == Some(1.0))
+            .count();
+        assert_eq!(metallic, 1, "one metallic material");
+        // The plain material must be non-metallic (fixes the glTF
+        // default-metallic trap) and non-emissive.
+        let plain = mats.iter().any(|m| {
+            m.get("emissiveFactor").is_none()
+                && m["pbrMetallicRoughness"]["metallicFactor"].as_f64() == Some(0.0)
+        });
+        assert!(plain, "plain material must be non-metallic, non-emissive");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_writes_tint_zone_attribute() {
+        let mut world = World::new();
+        // Two same-color plain voxels with different tint zones: same
+        // material group (one primitive), kept unmerged by the zone mask
+        // key, so the primitive's vertices carry both zones.
+        let mut a = Voxel::from_rgb(150, 150, 150);
+        a.set_tint_zone(1);
+        let mut b = Voxel::from_rgb(150, 150, 150);
+        b.set_tint_zone(2);
+        world.set_voxel(0, 0, 0, a);
+        world.set_voxel(2, 0, 0, b);
+        world.clear_dirty_flags();
+
+        let path = std::env::temp_dir().join("voxelith_tintzone.glb");
+        export_glb(&world, &path).unwrap();
+        let (json_bytes, bin) = read_glb(&path);
+        let bin = bin.expect("non-empty world must have BIN chunk");
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        // The primitive declares a _TINTZONE attribute, SCALAR f32.
+        let prim = &json["meshes"][0]["primitives"][0];
+        let tz = prim["attributes"]["_TINTZONE"]
+            .as_u64()
+            .expect("_TINTZONE attribute present") as usize;
+        let acc = &json["accessors"][tz];
+        assert_eq!(acc["type"], "SCALAR");
+        assert_eq!(acc["componentType"], COMPONENT_TYPE_FLOAT);
+
+        // Both zone values (1 and 2) survive to the exported buffer.
+        let view = &json["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+        let off = view["byteOffset"].as_u64().unwrap() as usize;
+        let len = view["byteLength"].as_u64().unwrap() as usize;
+        let (mut seen1, mut seen2) = (false, false);
+        for z in bin[off..off + len].chunks_exact(4) {
+            match f32::from_le_bytes(z.try_into().unwrap()) as i32 {
+                1 => seen1 = true,
+                2 => seen2 = true,
+                _ => {}
+            }
+        }
+        assert!(seen1 && seen2, "both tint zones should be exported");
 
         let _ = std::fs::remove_file(&path);
     }

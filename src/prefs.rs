@@ -114,6 +114,12 @@ pub struct EditorPrefs {
     /// Symmetry axes (`[x, y, z]`). Stored as a plain array rather than
     /// a struct so the on-disk shape stays trivial.
     pub symmetry: [bool; 3],
+    /// Brush material flags (`Voxel::flags`: bit0 emissive / bit1
+    /// metallic) so the emissive / metallic toggles survive a restart.
+    pub brush_flags: u8,
+    /// Brush tint zone (`Voxel::tint_zone`: 0 none / 1 primary /
+    /// 2 secondary / 3 reserved) so the zone picker survives a restart.
+    pub brush_tint_zone: u8,
 }
 
 impl Default for EditorPrefs {
@@ -124,6 +130,8 @@ impl Default for EditorPrefs {
             selected_tool: 0,
             palette: Vec::new(),
             symmetry: [false; 3],
+            brush_flags: 0,
+            brush_tint_zone: 0,
         }
     }
 }

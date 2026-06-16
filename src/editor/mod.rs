@@ -175,10 +175,16 @@ impl Editor {
         self.current_tool = tool;
     }
 
-    /// Set brush color from palette index
+    /// Set brush color from palette index. Preserves the brush's
+    /// material flags (emissive / metallic) — those behave like a brush
+    /// mode (e.g. symmetry), so picking a palette color shouldn't clear
+    /// them. Only the color changes.
     pub fn set_palette_color(&mut self, index: usize) {
-        if index < self.palette.len() {
-            self.brush_color = self.palette[index];
+        if let Some(c) = self.palette.get(index) {
+            self.brush_color.r = c.r;
+            self.brush_color.g = c.g;
+            self.brush_color.b = c.b;
+            self.brush_color.a = c.a;
         }
     }
 

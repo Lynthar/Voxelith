@@ -1074,11 +1074,12 @@ impl Ui {
                     editor.brush_color.b as f32 / 255.0,
                 ];
                 if ui.color_edit_button_rgb(&mut color).changed() {
-                    editor.brush_color = crate::core::Voxel::from_rgb(
-                        (color[0] * 255.0) as u8,
-                        (color[1] * 255.0) as u8,
-                        (color[2] * 255.0) as u8,
-                    );
+                    // Only RGB changes; keep alpha + material flags
+                    // (emissive / metallic) so a color pick doesn't reset
+                    // what behaves like a brush mode.
+                    editor.brush_color.r = (color[0] * 255.0) as u8;
+                    editor.brush_color.g = (color[1] * 255.0) as u8;
+                    editor.brush_color.b = (color[2] * 255.0) as u8;
                 }
 
                 // RGB values
@@ -1086,6 +1087,64 @@ impl Ui {
                     ui.label("RGB:");
                     ui.label(format!("{}, {}, {}", editor.brush_color.r, editor.brush_color.g, editor.brush_color.b));
                 });
+
+                ui.separator();
+
+                // Material flags baked into the brush's voxel template and
+                // carried into GLB export as glTF materials. A brush mode,
+                // like symmetry — picking a color preserves these.
+                ui.heading("Material");
+                ui.horizontal(|ui| {
+                    let mut emissive = editor.brush_color.is_emissive();
+                    if ui
+                        .checkbox(&mut emissive, "Emissive")
+                        .on_hover_text(
+                            "Mark placed voxels as self-illuminating \
+                             (exported as a glTF emissive material)",
+                        )
+                        .changed()
+                    {
+                        editor.brush_color.set_emissive(emissive);
+                    }
+                    let mut metallic = editor.brush_color.is_metallic();
+                    if ui
+                        .checkbox(&mut metallic, "Metallic")
+                        .on_hover_text(
+                            "Mark placed voxels as metal (exported as a \
+                             glTF metallic material)",
+                        )
+                        .changed()
+                    {
+                        editor.brush_color.set_metallic(metallic);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Tint zone");
+                    let mut zone = editor.brush_color.tint_zone();
+                    let before = zone;
+                    let label = match zone {
+                        1 => "Primary",
+                        2 => "Secondary",
+                        3 => "Reserved",
+                        _ => "None",
+                    };
+                    egui::ComboBox::from_id_salt("brush_tint_zone")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut zone, 0, "None");
+                            ui.selectable_value(&mut zone, 1, "Primary");
+                            ui.selectable_value(&mut zone, 2, "Secondary");
+                            ui.selectable_value(&mut zone, 3, "Reserved");
+                        });
+                    if zone != before {
+                        editor.brush_color.set_tint_zone(zone);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Faction recolor zone — exported per-vertex as _TINTZONE \
+                     for a downstream uber-shader (does not change the editor view)",
+                );
 
                 // Show hovered voxel info
                 if let Some(hit) = &editor.hovered_voxel {
@@ -1122,7 +1181,12 @@ impl Ui {
                             );
 
                             if response.clicked() {
-                                editor.brush_color = *voxel;
+                                // Keep the brush's material flags; only the
+                                // color changes (see `set_palette_color`).
+                                editor.brush_color.r = voxel.r;
+                                editor.brush_color.g = voxel.g;
+                                editor.brush_color.b = voxel.b;
+                                editor.brush_color.a = voxel.a;
                             }
 
                             ui.painter().rect_filled(rect, 2.0, color);

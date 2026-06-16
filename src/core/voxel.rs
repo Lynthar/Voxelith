@@ -138,6 +138,38 @@ impl Voxel {
             self.flags &= !0x01;
         }
     }
+
+    /// Check if voxel is metallic
+    #[inline]
+    pub fn is_metallic(&self) -> bool {
+        self.flags & 0x02 != 0
+    }
+
+    /// Set metallic flag
+    #[inline]
+    pub fn set_metallic(&mut self, metallic: bool) {
+        if metallic {
+            self.flags |= 0x02;
+        } else {
+            self.flags &= !0x02;
+        }
+    }
+
+    /// Tint zone for faction / team recoloring, stored in `_reserved`:
+    /// `TINT_ZONE_NONE` (0) / `PRIMARY` (1) / `SECONDARY` (2) /
+    /// `RESERVED` (3). Exported per-vertex as `_TINTZONE` so a downstream
+    /// uber-shader can multiply faction colors per zone at runtime
+    /// instead of baking a single color in. Independent of `flags`.
+    #[inline]
+    pub fn tint_zone(&self) -> u8 {
+        self._reserved
+    }
+
+    /// Set the tint zone (see [`Voxel::tint_zone`]).
+    #[inline]
+    pub fn set_tint_zone(&mut self, zone: u8) {
+        self._reserved = zone;
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +189,34 @@ mod tests {
         let solid = Voxel::from_rgb(255, 0, 0);
         assert!(!solid.is_air());
         assert!(solid.is_solid());
+    }
+
+    #[test]
+    fn test_material_flags_independent() {
+        let mut v = Voxel::from_rgb(10, 20, 30);
+        assert!(!v.is_emissive() && !v.is_metallic());
+        v.set_emissive(true);
+        assert!(v.is_emissive() && !v.is_metallic());
+        v.set_metallic(true);
+        assert!(v.is_emissive() && v.is_metallic());
+        // Clearing one bit must not disturb the other.
+        v.set_emissive(false);
+        assert!(!v.is_emissive() && v.is_metallic());
+        v.set_metallic(false);
+        assert_eq!(v.flags, 0);
+    }
+
+    #[test]
+    fn test_tint_zone_independent_of_flags() {
+        let mut v = Voxel::from_rgb(10, 20, 30);
+        assert_eq!(v.tint_zone(), 0);
+        v.set_emissive(true);
+        v.set_tint_zone(2);
+        assert_eq!(v.tint_zone(), 2);
+        assert!(v.is_emissive(), "tint zone must not disturb flags");
+        v.set_tint_zone(0);
+        assert!(v.is_emissive());
+        assert_eq!(v.tint_zone(), 0);
     }
 
     #[test]

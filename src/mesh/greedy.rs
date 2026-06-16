@@ -83,25 +83,74 @@ impl Mesher for GreedyMesher {
 
         let world_origin = chunk_pos.world_origin();
         for face in Face::ALL {
-            mesh_face_direction(&chunk, &neighbors, face, world_origin, &mut mesh);
+            mesh_face_direction(&chunk, &neighbors, face, world_origin, None, &mut mesh);
         }
         mesh
     }
+}
+
+/// Mesh a chunk into one `ChunkMesh` per material group present (0 =
+/// plain, 1 = emissive, 2 = metallic, 3 = both — the low two
+/// `Voxel::flags` bits), for material-aware GLB export. Face culling and
+/// AO are computed against all solid voxels (a plain voxel still
+/// occludes an emissive neighbor), but each returned mesh emits only the
+/// visible faces of voxels *in that group*, so greedy merging never
+/// spans a material boundary. Returns `(group_id, mesh)` for non-empty
+/// groups only; the 26 neighbors are locked once and shared across the
+/// four passes.
+pub fn mesh_chunk_by_material(world: &World, chunk_pos: ChunkPos) -> Vec<(u8, ChunkMesh)> {
+    let Some(chunk_arc) = world.get_chunk(chunk_pos) else {
+        return Vec::new();
+    };
+    let chunk = chunk_arc.read();
+    if chunk.is_empty() {
+        return Vec::new();
+    }
+    let arcs: NeighborArcs = neighbor_arcs(world, chunk_pos);
+    let neighbors: NeighborGuards = lock_neighbors(&arcs);
+    let world_origin = chunk_pos.world_origin();
+
+    let mut out = Vec::new();
+    for group in 0u8..4 {
+        let mut mesh = ChunkMesh::new(chunk_pos);
+        for face in Face::ALL {
+            mesh_face_direction(
+                &chunk,
+                &neighbors,
+                face,
+                world_origin,
+                Some(group),
+                &mut mesh,
+            );
+        }
+        if !mesh.is_empty() {
+            out.push((group, mesh));
+        }
+    }
+    out
 }
 
 /// Mesh one face direction across all CHUNK_SIZE slices, emitting
 /// merged quads to `mesh`. Stack-allocates a 1024-entry `u64` mask
 /// which is rebuilt for each slice; allocator traffic stays at zero
 /// on the hot path.
+///
+/// `group_filter`: when `Some(g)`, only voxels whose material group
+/// (`flags & 0x03`) equals `g` emit faces — used by
+/// `mesh_chunk_by_material` to split geometry per material. Face
+/// visibility and AO still consult all solid voxels regardless, so
+/// culling and shading are unchanged. `None` meshes every voxel (the
+/// render / default path).
 fn mesh_face_direction(
     chunk: &Chunk,
     neighbors: &NeighborGuards,
     face: Face,
     world_origin: (i32, i32, i32),
+    group_filter: Option<u8>,
     mesh: &mut ChunkMesh,
 ) {
     const SIZE: usize = CHUNK_SIZE;
-    // 0 = no face; non-zero = (packed_rgba << 8) | packed_ao.
+    // 0 = no face; non-zero = (tint_zone << 40) | (packed_rgba << 8) | packed_ao.
     let mut mask = [0u64; SIZE * SIZE];
 
     for d in 0..SIZE {
@@ -115,6 +164,16 @@ fn mesh_face_direction(
                 {
                     mask[v_idx * SIZE + u_idx] = 0;
                     continue;
+                }
+                // Material-split export: skip voxels outside the target
+                // group. They still occlude / shade (the checks above use
+                // all solid voxels) — only their own face emission is
+                // suppressed for this group's mesh.
+                if let Some(g) = group_filter {
+                    if voxel.flags & 0x03 != g {
+                        mask[v_idx * SIZE + u_idx] = 0;
+                        continue;
+                    }
                 }
                 let shaded = apply_face_shading(voxel.color_f32(), face);
                 let packed_color = pack_rgba(shaded);
@@ -134,8 +193,12 @@ fn mesh_face_direction(
                     },
                 );
                 let packed_ao = pack_ao(ao_int);
+                // Tint zone (0-3) in bits 40+ so voxels of different
+                // zones never merge — the zone must reach export
+                // per-vertex (it can't be averaged across a merged quad).
+                let zone = voxel.tint_zone() as u64;
                 mask[v_idx * SIZE + u_idx] =
-                    (packed_color as u64) << 8 | packed_ao as u64;
+                    (zone << 40) | ((packed_color as u64) << 8) | packed_ao as u64;
             }
         }
 
@@ -204,6 +267,9 @@ fn emit_merged_quad(
 
     let packed_color = (packed_key >> 8) as u32;
     let packed_ao = (packed_key & 0xFF) as u8;
+    // Tint zone lives in bits 40+ (above color+ao); `>> 8 as u32` for the
+    // color truncates it away, so it must be read from the full key here.
+    let tint_zone = ((packed_key >> 40) & 0xFF) as f32;
     let color = unpack_rgba(packed_color);
     let ao_int = unpack_ao(packed_ao);
     let ao = [
@@ -212,7 +278,7 @@ fn emit_merged_quad(
         ao_to_f32(ao_int[2]),
         ao_to_f32(ao_int[3]),
     ];
-    let vertices = face_quad_vertices_sized_ao(
+    let mut vertices = face_quad_vertices_sized_ao(
         world_x,
         world_y,
         world_z,
@@ -222,6 +288,9 @@ fn emit_merged_quad(
         color,
         ao,
     );
+    for vert in &mut vertices {
+        vert.tint_zone = tint_zone;
+    }
     mesh.add_quad_with_ao_flip(vertices);
 }
 
@@ -324,6 +393,27 @@ mod tests {
         world.set_voxel(2, 1, 1, Voxel::from_rgb(0, 255, 0));
         let mesh = GreedyMesher::new().generate(&world, ChunkPos::ZERO);
         assert_eq!(mesh.triangle_count(), 20);
+    }
+
+    #[test]
+    fn test_different_tint_zones_dont_merge() {
+        // Two same-color +X-adjacent voxels but different tint zones must
+        // NOT merge their shared-direction faces (the zone is in the mask
+        // key) — otherwise the zone couldn't survive per-vertex to export.
+        let mut world = World::new();
+        let mut a = Voxel::from_rgb(100, 100, 100);
+        let mut b = Voxel::from_rgb(100, 100, 100);
+        a.set_tint_zone(1);
+        b.set_tint_zone(2);
+        world.set_voxel(1, 1, 1, a);
+        world.set_voxel(2, 1, 1, b);
+        let mesh = GreedyMesher::new().generate(&world, ChunkPos::ZERO);
+        // Same color alone would merge to 12 tris (test_two_x_adjacent_merge);
+        // different zones block the merge → 20 tris, like different colors.
+        assert_eq!(mesh.triangle_count(), 20);
+        // Every emitted vertex carries its voxel's zone.
+        let zones: Vec<f32> = mesh.vertices.iter().map(|v| v.tint_zone).collect();
+        assert!(zones.contains(&1.0) && zones.contains(&2.0));
     }
 
     #[test]
