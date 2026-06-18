@@ -7,11 +7,14 @@
 //! that imports directly into Unity, Unreal, Godot, Blender, and
 //! every model viewer that handles the standard.
 //!
-//! Vertex layout matches the existing `mesh::Vertex` struct exactly
-//! — POSITION (vec3 f32), NORMAL (vec3 f32), COLOR_0 (vec4 f32) —
-//! emitted as deinterleaved bufferViews so JSON descriptors stay
+//! Each primitive emits POSITION (vec3 f32), NORMAL (vec3 f32),
+//! COLOR_0 (vec4 f32, with AO baked in), the custom `_TINTZONE`
+//! (scalar f32 faction zone), and TEXCOORD_0 (vec2 f32 — the same
+//! zone in `.x`, so Unity glTFast, which drops custom attributes,
+//! can still read it). All deinterleaved so JSON descriptors stay
 //! simple (no `byteStride` annotations needed). Indices are u32 so
-//! large worlds aren't capped at 64k vertices.
+//! large worlds aren't capped at 64k vertices. The full
+//! engine-consumption contract is in `docs/ENGINE_CONTRACT.md`.
 //!
 //! ### File structure (per glTF 2.0 spec, §3.4 GLB)
 //!
@@ -25,7 +28,8 @@
 //! +----------------+
 //! | BIN chunk hdr  |  length + type "BIN\0"   (omitted for empty world)
 //! +----------------+
-//! | BIN payload    |  raw bytes: positions | normals | colors | indices,
+//! | BIN payload    |  per group, back to back: positions | normals |
+//! |                |  colors | tintzones | texcoords | indices,
 //! |                |  padded to 4-byte align with 0x00
 //! +----------------+
 //! ```
@@ -204,8 +208,9 @@ pub fn export_glb_smoothed(
 }
 
 /// Write one or more material groups to a binary glTF 2.0 file. Each
-/// group becomes a primitive (POSITION / NORMAL / COLOR_0 / indices) plus
-/// a material; the BIN payload lays the groups out back to back. An empty
+/// group becomes a primitive (POSITION / NORMAL / COLOR_0 / _TINTZONE /
+/// TEXCOORD_0 / indices) plus a material; the BIN payload lays the groups
+/// out back to back. An empty
 /// `groups` slice produces a valid geometry-free glTF (no BIN chunk) —
 /// which `sockets` can still populate with empty nodes. `chunk_count` is
 /// passed through to the returned stats. Per-vertex AO is baked into the
@@ -222,6 +227,7 @@ fn write_glb_groups(
         normal: (usize, usize),
         color: (usize, usize),
         tintzone: (usize, usize),
+        texcoord: (usize, usize),
         index: (usize, usize),
         min: [f32; 3],
         max: [f32; 3],
@@ -259,6 +265,16 @@ fn write_glb_groups(
         }
         let tintzone_len = bin.len() - tintzone_offset;
 
+        // Tint zone ALSO as TEXCOORD_0 = vec2(zone, 0). Unity glTFast drops
+        // custom attributes (so it can't read `_TINTZONE`) but imports UV
+        // sets, so this is the channel a stock-Unity uber-shader reads. See
+        // docs/ENGINE_CONTRACT.md §6.2 (incl. the glTFast UV-pruning caveat).
+        let texcoord_offset = bin.len();
+        for v in &g.vertices {
+            bin.extend_from_slice(bytemuck::bytes_of(&[v.tint_zone, 0.0f32]));
+        }
+        let texcoord_len = bin.len() - texcoord_offset;
+
         let index_offset = bin.len();
         bin.extend_from_slice(bytemuck::cast_slice(&g.indices));
         let index_len = bin.len() - index_offset;
@@ -282,6 +298,7 @@ fn write_glb_groups(
             normal: (normal_offset, normal_len),
             color: (color_offset, color_len),
             tintzone: (tintzone_offset, tintzone_len),
+            texcoord: (texcoord_offset, texcoord_len),
             index: (index_offset, index_len),
             min,
             max,
@@ -296,18 +313,18 @@ fn write_glb_groups(
     }
 
     // Build per-group geometry descriptors (empty when there's no
-    // geometry): one primitive + material + 5 accessors / bufferViews
-    // per group (POSITION, NORMAL, COLOR_0, _TINTZONE, indices), all
-    // sharing buffer 0.
-    let mut accessors = Vec::with_capacity(groups.len() * 5);
-    let mut buffer_views = Vec::with_capacity(groups.len() * 5);
+    // geometry): one primitive + material + 6 accessors / bufferViews
+    // per group (POSITION, NORMAL, COLOR_0, _TINTZONE, TEXCOORD_0,
+    // indices), all sharing buffer 0.
+    let mut accessors = Vec::with_capacity(groups.len() * 6);
+    let mut buffer_views = Vec::with_capacity(groups.len() * 6);
     let mut primitives = Vec::with_capacity(groups.len());
     let mut materials = Vec::with_capacity(groups.len());
 
     for (i, (g, s)) in groups.iter().zip(&sections).enumerate() {
-        // Group i owns accessors / bufferViews [5i .. 5i+5):
-        // POSITION, NORMAL, COLOR_0, _TINTZONE, indices.
-        let base = (i * 5) as u32;
+        // Group i owns accessors / bufferViews [6i .. 6i+6):
+        // POSITION, NORMAL, COLOR_0, _TINTZONE, TEXCOORD_0, indices.
+        let base = (i * 6) as u32;
         accessors.push(json!({
             "bufferView": base,
             "componentType": COMPONENT_TYPE_FLOAT,
@@ -335,8 +352,16 @@ fn write_glb_groups(
             "count": g.vertices.len(),
             "type": "SCALAR",
         }));
+        // TEXCOORD_0: the same zone in .x (VEC2 f32) — the glTFast-readable
+        // mirror of _TINTZONE (see docs/ENGINE_CONTRACT.md §6.2).
         accessors.push(json!({
             "bufferView": base + 4,
+            "componentType": COMPONENT_TYPE_FLOAT,
+            "count": g.vertices.len(),
+            "type": "VEC2",
+        }));
+        accessors.push(json!({
+            "bufferView": base + 5,
             "componentType": COMPONENT_TYPE_UINT,
             "count": g.indices.len(),
             "type": "SCALAR",
@@ -346,11 +371,12 @@ fn write_glb_groups(
         buffer_views.push(json!({ "buffer": 0, "byteOffset": s.normal.0, "byteLength": s.normal.1, "target": TARGET_ARRAY_BUFFER }));
         buffer_views.push(json!({ "buffer": 0, "byteOffset": s.color.0, "byteLength": s.color.1, "target": TARGET_ARRAY_BUFFER }));
         buffer_views.push(json!({ "buffer": 0, "byteOffset": s.tintzone.0, "byteLength": s.tintzone.1, "target": TARGET_ARRAY_BUFFER }));
+        buffer_views.push(json!({ "buffer": 0, "byteOffset": s.texcoord.0, "byteLength": s.texcoord.1, "target": TARGET_ARRAY_BUFFER }));
         buffer_views.push(json!({ "buffer": 0, "byteOffset": s.index.0, "byteLength": s.index.1, "target": TARGET_ELEMENT_ARRAY_BUFFER }));
 
         primitives.push(json!({
-            "attributes": { "POSITION": base, "NORMAL": base + 1, "COLOR_0": base + 2, "_TINTZONE": base + 3 },
-            "indices": base + 4,
+            "attributes": { "POSITION": base, "NORMAL": base + 1, "COLOR_0": base + 2, "_TINTZONE": base + 3, "TEXCOORD_0": base + 4 },
+            "indices": base + 5,
             "material": i,
             "mode": PRIMITIVE_MODE_TRIANGLES,
         }));
@@ -533,14 +559,14 @@ mod tests {
         assert!(pos_acc["min"].is_array());
         assert!(pos_acc["max"].is_array());
 
-        // INDICES is now the 5th accessor per group (POSITION, NORMAL,
-        // COLOR_0, _TINTZONE, indices); count = 12 tris × 3 = 36.
-        assert_eq!(json["accessors"][4]["count"], 36);
-        assert_eq!(json["accessors"][4]["componentType"], COMPONENT_TYPE_UINT);
+        // INDICES is now the 6th accessor per group (POSITION, NORMAL,
+        // COLOR_0, _TINTZONE, TEXCOORD_0, indices); count = 12 tris × 3 = 36.
+        assert_eq!(json["accessors"][5]["count"], 36);
+        assert_eq!(json["accessors"][5]["componentType"], COMPONENT_TYPE_UINT);
 
-        // BIN size: 24 verts × (12 pos + 12 normal + 16 color + 4 tintzone)
-        // bytes + 36 indices × 4 bytes.
-        let expected = 24 * (12 + 12 + 16 + 4) + 36 * 4;
+        // BIN size: 24 verts × (12 pos + 12 normal + 16 color + 4 tintzone
+        // + 8 texcoord) bytes + 36 indices × 4 bytes.
+        let expected = 24 * (12 + 12 + 16 + 4 + 8) + 36 * 4;
         // Allow up to 3 padding bytes for alignment.
         assert!(
             bin.len() == expected || bin.len() == expected + 4 - (expected % 4) % 4,
@@ -777,6 +803,55 @@ mod tests {
             }
         }
         assert!(seen1 && seen2, "both tint zones should be exported");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_mirrors_tint_zone_into_texcoord0() {
+        // The tint zone is ALSO written into TEXCOORD_0.x (a vec2 UV) so
+        // Unity glTFast — which drops custom attributes like _TINTZONE —
+        // can still read it. Same two-zone setup as the _TINTZONE test.
+        let mut world = World::new();
+        let mut a = Voxel::from_rgb(150, 150, 150);
+        a.set_tint_zone(1);
+        let mut b = Voxel::from_rgb(150, 150, 150);
+        b.set_tint_zone(2);
+        world.set_voxel(0, 0, 0, a);
+        world.set_voxel(2, 0, 0, b);
+        world.clear_dirty_flags();
+
+        let path = std::env::temp_dir().join("voxelith_texcoord_zone.glb");
+        export_glb(&world, &[], &path).unwrap();
+        let (json_bytes, bin) = read_glb(&path);
+        let bin = bin.expect("non-empty world must have BIN chunk");
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        // The primitive declares a TEXCOORD_0 attribute, VEC2 f32.
+        let prim = &json["meshes"][0]["primitives"][0];
+        let tc = prim["attributes"]["TEXCOORD_0"]
+            .as_u64()
+            .expect("TEXCOORD_0 attribute present") as usize;
+        let acc = &json["accessors"][tc];
+        assert_eq!(acc["type"], "VEC2");
+        assert_eq!(acc["componentType"], COMPONENT_TYPE_FLOAT);
+
+        // Both zone values survive in the .x of the uv pairs; .y is a 0 pad.
+        let view = &json["bufferViews"][acc["bufferView"].as_u64().unwrap() as usize];
+        let off = view["byteOffset"].as_u64().unwrap() as usize;
+        let len = view["byteLength"].as_u64().unwrap() as usize;
+        let (mut seen1, mut seen2) = (false, false);
+        for uv in bin[off..off + len].chunks_exact(8) {
+            let x = f32::from_le_bytes(uv[0..4].try_into().unwrap());
+            let y = f32::from_le_bytes(uv[4..8].try_into().unwrap());
+            assert_eq!(y, 0.0, "TEXCOORD_0.y is an unused 0 pad");
+            match x as i32 {
+                1 => seen1 = true,
+                2 => seen2 = true,
+                _ => {}
+            }
+        }
+        assert!(seen1 && seen2, "both tint zones should reach TEXCOORD_0.x");
 
         let _ = std::fs::remove_file(&path);
     }

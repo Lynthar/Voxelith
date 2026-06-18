@@ -60,8 +60,8 @@ impl Socket {
     /// case, so a downward-facing socket still gets a valid 180°
     /// rotation rather than NaNs.
     ///
-    /// (The engine-side consumption convention is to be formalized in
-    /// the §3.2 uber-shader contract doc; this is the producer half.)
+    /// (This is the producer half; the engine-side consumption
+    /// convention is documented in `docs/ENGINE_CONTRACT.md` §sockets.)
     pub fn rotation(&self) -> [f32; 4] {
         let n = Vec3::from(self.normal);
         let n = if n.length_squared() > 1e-12 {
