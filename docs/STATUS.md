@@ -10,7 +10,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 272 passing (`cargo test`) |
+| **Tests** | 288 passing (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Entry** | `src/main.rs` (~20 lines) → `src/app/` (App + winit `ApplicationHandler`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI). Full list in `Cargo.toml` |
@@ -25,7 +25,8 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - Brush drag-paint with first-hit **plane lock** + 8 px dead-zone; **stroke-merged undo** (consecutive `SetVoxels` within 200 ms collapse); hover preview; independent **X / Y / Z symmetry** (1–8-fold, cell-aligned).
 - **Box-select + clipboard** (`Tool::Select`, `0`): AABB marquee with live readout; inside-drag **move** as a single overlap-safe `SetVoxels` Command + translucent ghost; `Ctrl+C/X/V`, `Ctrl+Shift+V` paste-at-cursor, paste auto-selects destination, `Ctrl+A`, `Del`, `Esc`/`Ctrl+D`; arrow-key nudge (`Shift`×10, `Ctrl+↑↓` for Y).
 - **Selection transforms**: rotate / mirror (each an undoable `SetVoxels`), with cyan center + orange min-corner markers on the wireframe.
-- DDA voxel raycast picking with `y=0` ground-plane fallback for anchor tools; capped `flood_fill`; Alt transient eyedropper; color palette with custom additions.
+- DDA voxel raycast picking with `y=0` ground-plane fallback for anchor tools; capped `flood_fill`; Alt transient eyedropper; color palette with custom additions; per-brush **emissive / metallic** material toggles + a **tint-zone** picker (faction recolor zone: none / primary / secondary / reserved) — written to the placed voxel's `flags` / `_reserved`; picking a color preserves them; GLB export honors materials as glTF `materials[]` and zones as a per-vertex `_TINTZONE` attribute.
+- **Named sockets** (`Tool::Socket`): click a voxel face (or the ground) to drop a named attachment point — position = face center, orientation = face normal. In-viewport magenta directional-pin gizmo (shaft + arrowhead along the `+Y→normal` facing the export bakes), Tools-panel rename/delete/clear list. Persist in `.vxlt`, export to glTF as empty nodes. Not on the undo stack (managed like the selection).
 
 ### Core
 - **32³ chunks**, **8-byte voxel** = `material:u16 + RGBA + flags(bit0 emissive / bit1 metallic) + _reserved`; `Pod`/`Zeroable` for direct GPU upload.
@@ -49,10 +50,10 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - Two UIs: single-generator panel + **visual node-graph editor** (`Translate` / `Filter` / `Mask` / `Combine` → `Output`, cycle-prevention + auto-layout). Both debounced 150 ms preview; commit routes through `Command::set_voxels`.
 
 ### I/O
-- **`.vxlt`** — native gzip format (magic `VXLT` v1), embeds `EditorState` (camera / brush / palette).
+- **`.vxlt`** — native gzip format (magic `VXLT` v1), embeds `EditorState` (camera / brush / palette / sockets; `#[serde(default)]` so pre-socket files still load).
 - **`.vox`** — MagicaVoxel import (v150 + v200 scene-graph flatten) / export (v150, 254-color, palette-overflow report).
-- **`.obj`** — export (greedy + MC light/heavy), per-chunk groups, vertex-color extension.
-- **`.glb`** — glTF 2.0 binary export (greedy + MC light/heavy): `POSITION / NORMAL / COLOR_0`, u32 indices, **no material** — imports directly into Unity / Unreal / Godot / Blender.
+- **`.obj`** — export (greedy + MC light/heavy), per-chunk groups, vertex-color extension (per-vertex AO baked into RGB).
+- **`.glb`** — glTF 2.0 binary export (greedy + MC light/heavy): `POSITION / NORMAL / COLOR_0` (per-vertex AO baked into RGB) `/ _TINTZONE` + `TEXCOORD_0.x` (per-vertex faction tint zone — the custom attr plus a UV mirror Unity glTFast can read), u32 indices; geometry is split into **per-material-group primitives with glTF `materials[]`** — plain (explicit non-metallic, since the glTF default is metallic), emissive (white `emissiveFactor`), and metallic (`metallicFactor` 1). **Named sockets** export as **empty nodes** (`name` + `translation` + `rotation`, no mesh; `+Y→normal` quaternion) — even for a geometry-free scene. Imports directly into Unity / Unreal / Godot / Blender. The engine-side consumption contract (every attribute / material / node field, color space, per-engine support) + a Unity URP reference shader live in [`docs/ENGINE_CONTRACT.md`](ENGINE_CONTRACT.md).
 - Post-export report dialog (format / geometry source / triangle-vertex-chunk counts / file size / lost-color notes).
 
 ### AI generation
@@ -77,6 +78,8 @@ Concise forward map (the unbuilt parts of the former roadmap + vision), grouped 
 **Editing** — configurable keymap + conflict detection + key-help; camera nav presets (Blender/Maya/Goxel); surface-only paint; replace-color tool; paint-only-selected; recent colors; palette-slot naming; undo-history panel.
 
 **Files & export** — pre-import inspection (peek dims/palette/warnings before commit); export presets (Godot/Unity/Blender/Web/MagicaVoxel — format+axis+scale+smoothing one-click); `.vxlt` version migration; `.gltf` text variant; `.vox` v200 export.
+
+**Game asset pipeline** (see `docs/GAME_PIPELINE_ROADMAP.md`) — §3.1 "export the data we already have" (per-vertex AO / emissive-metallic materials / tint-zone / named sockets) **done**; §3.2 **engine contract doc** ([`docs/ENGINE_CONTRACT.md`](ENGINE_CONTRACT.md)) + **Unity URP reference shader** ([`docs/reference/VoxelithUberURP.shader`](reference/VoxelithUberURP.shader)) + the **`TEXCOORD_0` tint-zone mirror** (so Unity glTFast — which drops the custom `_TINTZONE` — can still read zones) **done**. Remaining in §3.x: only the optional better smooth mesher (Surface Nets / Dual Contouring, §3.3). (Unity zone consumption still hinges on glTFast's material-driven UV pruning — verify per contract §6.2; Blender bridge is the guaranteed fallback.)
 
 **Procgen & graph** — WFC backtracking (currently forward-only); more tilesets (Castle/Pipes/sci-fi); on-canvas node diagnostics; preview time/count; cancel for large gens; commit semantics (overwrite/add/layer/into-selection); graph templates; cross-run node cache; **shape grammar** (not started).
 
@@ -114,5 +117,5 @@ Load-bearing gotchas for anyone touching the code:
 ## Onboarding
 
 1. `cargo run --release` — verify it launches and the cube + ground show.
-2. `cargo test` — should be 272 passing.
+2. `cargo test` — should be 288 passing.
 3. `git log --oneline` — see the recent direction and last-committed work.
