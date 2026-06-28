@@ -64,6 +64,63 @@ pub struct GlbStats {
     pub byte_size: usize,
 }
 
+/// Where to move the asset's local origin before export, so a consumer
+/// can place it at a world position predictably. `BaseCenter` puts the
+/// XZ center of the footprint with the bottom (min Y) at the origin —
+/// buildings sit on the ground; `feet` (a spec alias for `BaseCenter`)
+/// is the same point for characters; `Center` centers all axes; `Origin`
+/// leaves model space untouched. See `docs/GAME_PIPELINE_ROADMAP.md` §3.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pivot {
+    /// Keep model-space coordinates as-is (identity).
+    Origin,
+    /// XZ center of the geometry bounds; Y at the bottom (min Y).
+    BaseCenter,
+    /// Center of the geometry bounds on every axis.
+    Center,
+}
+
+/// Up-axis convention of the consuming engine. glTF is natively Y-up
+/// (Unity glTFast / Godot convert on import), so `Y` is the identity;
+/// `Z` adds a +90° rotation about X for Z-up engines (e.g. Unreal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpAxis {
+    Y,
+    Z,
+}
+
+/// Deterministic placement applied at export as a single root node that
+/// wraps the mesh + socket nodes: pivot → translation, up-axis →
+/// rotation, unit scale → scale. The default is the identity (`Origin` /
+/// `Y` / `1.0`) and produces byte-identical output to the plain
+/// `export_glb`, so a minimal bake reproduces the interactive export.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExportTransform {
+    pub pivot: Pivot,
+    pub up_axis: UpAxis,
+    pub unit_scale: f32,
+}
+
+impl Default for ExportTransform {
+    fn default() -> Self {
+        Self {
+            pivot: Pivot::Origin,
+            up_axis: UpAxis::Y,
+            unit_scale: 1.0,
+        }
+    }
+}
+
+impl ExportTransform {
+    /// True when this transform changes nothing — no root node is emitted
+    /// and the output matches the un-transformed export byte-for-byte.
+    pub fn is_identity(&self) -> bool {
+        self.pivot == Pivot::Origin
+            && self.up_axis == UpAxis::Y
+            && (self.unit_scale - 1.0).abs() < 1e-9
+    }
+}
+
 /// A named attachment point to emit as an empty glTF node (no mesh).
 ///
 /// `translation` is the socket's world position and `rotation` is a
@@ -152,6 +209,22 @@ pub fn export_glb(
     sockets: &[SocketNode],
     path: &Path,
 ) -> Result<GlbStats, GlbError> {
+    export_glb_with_transform(world, sockets, path, ExportTransform::default())
+}
+
+/// Like [`export_glb`] but applies a deterministic placement
+/// [`ExportTransform`] (pivot / up-axis / uniform scale) as a single
+/// root node wrapping the mesh and socket nodes. The default transform
+/// is the identity and yields byte-identical output to [`export_glb`];
+/// the headless bake ([`crate::bake`]) uses this to emit assets with a
+/// consistent pivot + scale for the game engine (see
+/// `docs/GAME_PIPELINE_ROADMAP.md` §3.5).
+pub fn export_glb_with_transform(
+    world: &World,
+    sockets: &[SocketNode],
+    path: &Path,
+    transform: ExportTransform,
+) -> Result<GlbStats, GlbError> {
     // Accumulate combined vertex / index buffers per material group.
     let mut groups: Vec<GroupBuffers> = (0u8..4).map(GroupBuffers::new).collect();
     let mut chunk_count = 0usize;
@@ -169,7 +242,7 @@ pub fn export_glb(
     }
     // Drop empty groups; the rest become primitives in id order.
     groups.retain(|g| !g.vertices.is_empty());
-    write_glb_groups(&groups, sockets, chunk_count, path)
+    write_glb_groups(&groups, sockets, chunk_count, path, transform)
 }
 
 /// Export the world as a glTF Binary with Marching-Cubes smoothing.
@@ -192,6 +265,18 @@ pub fn export_glb_smoothed(
     path: &Path,
     blur: bool,
 ) -> Result<GlbStats, GlbError> {
+    export_glb_smoothed_with_transform(world, sockets, path, blur, ExportTransform::default())
+}
+
+/// [`export_glb_smoothed`] with a deterministic placement
+/// [`ExportTransform`] (see [`export_glb_with_transform`]).
+pub fn export_glb_smoothed_with_transform(
+    world: &World,
+    sockets: &[SocketNode],
+    path: &Path,
+    blur: bool,
+    transform: ExportTransform,
+) -> Result<GlbStats, GlbError> {
     let mesh = mesh_world_smoothed(world, blur);
     let chunk_count = if mesh.is_empty() { 0 } else { 1 };
     // MC output carries no material flags — a single plain group.
@@ -204,7 +289,7 @@ pub fn export_glb_smoothed(
             indices: mesh.indices,
         }]
     };
-    write_glb_groups(&groups, sockets, chunk_count, path)
+    write_glb_groups(&groups, sockets, chunk_count, path, transform)
 }
 
 /// Write one or more material groups to a binary glTF 2.0 file. Each
@@ -220,6 +305,7 @@ fn write_glb_groups(
     sockets: &[SocketNode],
     chunk_count: usize,
     path: &Path,
+    transform: ExportTransform,
 ) -> Result<GlbStats, GlbError> {
     // Per-group byte sections within the BIN, plus POSITION bounds.
     struct Section {
@@ -353,7 +439,7 @@ fn write_glb_groups(
             "type": "SCALAR",
         }));
         // TEXCOORD_0: the same zone in .x (VEC2 f32) — the glTFast-readable
-        // mirror of _TINTZONE (see docs/ENGINE_CONTRACT.md §6.2).
+        // mirror of _TINTZONE (see docs/GAME_PIPELINE_ROADMAP.md §3.2).
         accessors.push(json!({
             "bufferView": base + 4,
             "componentType": COMPONENT_TYPE_FLOAT,
@@ -402,6 +488,31 @@ fn write_glb_groups(
             "translation": sock.translation,
             "rotation": sock.rotation,
         }));
+    }
+
+    // Deterministic placement (§3.5): for a non-identity transform, wrap
+    // every scene root (mesh + sockets) under one parent node carrying the
+    // pivot offset, up-axis rotation, and uniform scale, so geometry and
+    // sockets move together and the asset's local origin becomes the chosen
+    // pivot. An identity transform adds nothing, leaving the output
+    // byte-for-byte identical to the plain export.
+    if !transform.is_identity() && !scene_nodes.is_empty() {
+        let bounds = sections.iter().fold(
+            None,
+            |acc: Option<([f32; 3], [f32; 3])>, s| match acc {
+                None => Some((s.min, s.max)),
+                Some((mut lo, mut hi)) => {
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(s.min[a]);
+                        hi[a] = hi[a].max(s.max[a]);
+                    }
+                    Some((lo, hi))
+                }
+            },
+        );
+        let root = root_transform_node(&scene_nodes, bounds, transform);
+        scene_nodes = vec![nodes.len()];
+        nodes.push(root);
     }
 
     // Base document; geometry-only keys (meshes/materials/accessors/
@@ -467,6 +578,71 @@ fn write_glb_groups(
         chunk_count,
         byte_size: total_len as usize,
     })
+}
+
+/// Build the parent node that applies an [`ExportTransform`] to all
+/// `children` (the existing scene roots). Translation places the chosen
+/// pivot at the local origin (after scale + rotation), rotation is the
+/// up-axis conversion, and scale is uniform. `bounds` is the geometry
+/// AABB in mesh space, or `None` for a geometry-free scene (pivot then
+/// falls back to the origin). Vertex data is never touched — placement
+/// lives entirely in this node, so the export stays lossless.
+fn root_transform_node(
+    children: &[usize],
+    bounds: Option<([f32; 3], [f32; 3])>,
+    t: ExportTransform,
+) -> serde_json::Value {
+    let s = t.unit_scale;
+    let pivot = match (t.pivot, bounds) {
+        (Pivot::BaseCenter, Some((lo, hi))) => {
+            [(lo[0] + hi[0]) * 0.5, lo[1], (lo[2] + hi[2]) * 0.5]
+        }
+        (Pivot::Center, Some((lo, hi))) => [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ],
+        // `Origin`, or any pivot with no geometry to measure.
+        _ => [0.0, 0.0, 0.0],
+    };
+    let rotation = match t.up_axis {
+        UpAxis::Y => [0.0, 0.0, 0.0, 1.0],
+        // +90° about X maps model +Y onto world +Z, for Z-up engines.
+        UpAxis::Z => [
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ],
+    };
+    // translation = -(R · (scale · pivot)) so the pivot lands at origin.
+    let scaled = [pivot[0] * s, pivot[1] * s, pivot[2] * s];
+    let rotated = rotate_vec_by_quat(scaled, rotation);
+    let translation = [-rotated[0], -rotated[1], -rotated[2]];
+    json!({
+        "name": "Voxelith_root",
+        "translation": translation,
+        "rotation": rotation,
+        "scale": [s, s, s],
+        "children": children,
+    })
+}
+
+/// Rotate a vector by a unit quaternion `[x, y, z, w]`
+/// (`v' = v + 2·q_xyz × (q_xyz × v + w·v)`). Kept local so this module
+/// stays free of a math-library dependency.
+fn rotate_vec_by_quat(v: [f32; 3], q: [f32; 4]) -> [f32; 3] {
+    let (qx, qy, qz, qw) = (q[0], q[1], q[2], q[3]);
+    // t = 2 · (q_xyz × v)
+    let tx = 2.0 * (qy * v[2] - qz * v[1]);
+    let ty = 2.0 * (qz * v[0] - qx * v[2]);
+    let tz = 2.0 * (qx * v[1] - qy * v[0]);
+    // v' = v + qw · t + q_xyz × t
+    [
+        v[0] + qw * tx + (qy * tz - qz * ty),
+        v[1] + qw * ty + (qz * tx - qx * tz),
+        v[2] + qw * tz + (qx * ty - qy * tx),
+    ]
 }
 
 #[cfg(test)]
@@ -917,6 +1093,80 @@ mod tests {
         assert!(nodes[0].get("mesh").is_none());
         assert_eq!(nodes[0]["name"], "origin");
         assert_eq!(json["scenes"][0]["nodes"].as_array().unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_identity_transform_matches_plain_export() {
+        // A default (identity) ExportTransform must produce byte-for-byte
+        // the same file as the plain export, so a minimal bake reproduces
+        // the interactive export exactly.
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(200, 100, 50));
+        world.set_voxel(1, 0, 0, Voxel::from_rgb(50, 100, 200));
+        world.clear_dirty_flags();
+
+        let p1 = std::env::temp_dir().join("voxelith_xform_plain.glb");
+        let p2 = std::env::temp_dir().join("voxelith_xform_identity.glb");
+        export_glb(&world, &[], &p1).unwrap();
+        export_glb_with_transform(&world, &[], &p2, ExportTransform::default()).unwrap();
+
+        let a = std::fs::read(&p1).unwrap();
+        let b = std::fs::read(&p2).unwrap();
+        assert_eq!(a, b, "identity transform must not change output bytes");
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    #[test]
+    fn test_base_center_pivot_wraps_root_node() {
+        // A base-center pivot wraps the mesh node under a "Voxelith_root"
+        // node whose translation centers the footprint in XZ and puts the
+        // bottom (min Y) at the origin. POSITION accessor data is unchanged
+        // (lossless — placement lives entirely in the node transform).
+        let mut world = World::new();
+        // Cells (0..2, 0, 0..2): mesh spans x,z ∈ [0,2], y ∈ [0,1].
+        // Base-center pivot = (1, 0, 1).
+        for x in 0..2 {
+            for z in 0..2 {
+                world.set_voxel(x, 0, z, Voxel::from_rgb(180, 180, 180));
+            }
+        }
+        world.clear_dirty_flags();
+
+        let path = std::env::temp_dir().join("voxelith_pivot.glb");
+        let t = ExportTransform {
+            pivot: Pivot::BaseCenter,
+            up_axis: UpAxis::Y,
+            unit_scale: 1.0,
+        };
+        export_glb_with_transform(&world, &[], &path, t).unwrap();
+
+        let (json_bytes, _) = read_glb(&path);
+        let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+
+        // Scene has a single root: the transform node.
+        let scene_nodes = json["scenes"][0]["nodes"].as_array().unwrap();
+        assert_eq!(scene_nodes.len(), 1, "one scene root (the transform node)");
+        let root_idx = scene_nodes[0].as_u64().unwrap() as usize;
+        let root = &json["nodes"][root_idx];
+        assert_eq!(root["name"], "Voxelith_root");
+
+        // Translation = -pivot = (-1, 0, -1).
+        let tr = root["translation"].as_array().unwrap();
+        assert!((tr[0].as_f64().unwrap() + 1.0).abs() < 1e-5);
+        assert!(tr[1].as_f64().unwrap().abs() < 1e-5);
+        assert!((tr[2].as_f64().unwrap() + 1.0).abs() < 1e-5);
+
+        // The mesh node (index 0) is a child of the root.
+        let children = root["children"].as_array().unwrap();
+        assert!(children.iter().any(|c| c.as_u64() == Some(0)));
+
+        // POSITION bounds untouched by the pivot (lossless).
+        assert_eq!(json["accessors"][0]["min"][0].as_f64().unwrap(), 0.0);
+        assert_eq!(json["accessors"][0]["max"][0].as_f64().unwrap(), 2.0);
 
         let _ = std::fs::remove_file(&path);
     }

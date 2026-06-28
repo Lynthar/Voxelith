@@ -11,7 +11,11 @@ mod obj;
 mod project;
 mod vox;
 
-pub use gltf::{export_glb, export_glb_smoothed, GlbError, GlbStats, SocketNode};
+pub use gltf::{
+    export_glb, export_glb_smoothed, export_glb_smoothed_with_transform,
+    export_glb_with_transform, ExportTransform, GlbError, GlbStats, Pivot, SocketNode,
+    UpAxis,
+};
 pub use obj::{export_obj, export_obj_smoothed, ObjError, ObjStats};
 pub use project::{
     EditorState, Project, ProjectError, ProjectMetadata, SocketData,
