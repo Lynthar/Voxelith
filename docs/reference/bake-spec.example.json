@@ -1,0 +1,17 @@
+{
+  "defaults": {
+    "mesher": "greedy",
+    "smoothing": "none",
+    "up_axis": "y",
+    "unit_scale": 1.0,
+    "pivot": "base-center",
+    "optimize": "meshopt"
+  },
+  "items": [
+    { "src": "buildings/farm.vxlt", "out": "buildings/farm.glb" },
+    { "src": "buildings/keep.vxlt", "out": "buildings/keep.glb", "smoothing": "light" },
+    { "src": "chars/knight.vxlt", "out": "chars/knight.glb", "pivot": "feet" },
+    { "src": "fx/torch.vxlt", "out": "fx/torch.glb", "optimize": "none" },
+    { "srcDir": "creatures/", "outDir": "creatures/" }
+  ]
+}

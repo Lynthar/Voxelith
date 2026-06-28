@@ -10,9 +10,9 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 288 passing (`cargo test`) |
+| **Tests** | 298 (`cargo test`) — 288 prior + 10 new for the bake tool & export transform |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
-| **Entry** | `src/main.rs` (~20 lines) → `src/app/` (App + winit `ApplicationHandler`) |
+| **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI). Full list in `Cargo.toml` |
 | **Storage** | flat-array 32³ chunk store (no octree yet) |
 
@@ -53,8 +53,9 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - **`.vxlt`** — native gzip format (magic `VXLT` v1), embeds `EditorState` (camera / brush / palette / sockets; `#[serde(default)]` so pre-socket files still load).
 - **`.vox`** — MagicaVoxel import (v150 + v200 scene-graph flatten) / export (v150, 254-color, palette-overflow report).
 - **`.obj`** — export (greedy + MC light/heavy), per-chunk groups, vertex-color extension (per-vertex AO baked into RGB).
-- **`.glb`** — glTF 2.0 binary export (greedy + MC light/heavy): `POSITION / NORMAL / COLOR_0` (per-vertex AO baked into RGB) `/ _TINTZONE` + `TEXCOORD_0.x` (per-vertex faction tint zone — the custom attr plus a UV mirror Unity glTFast can read), u32 indices; geometry is split into **per-material-group primitives with glTF `materials[]`** — plain (explicit non-metallic, since the glTF default is metallic), emissive (white `emissiveFactor`), and metallic (`metallicFactor` 1). **Named sockets** export as **empty nodes** (`name` + `translation` + `rotation`, no mesh; `+Y→normal` quaternion) — even for a geometry-free scene. Imports directly into Unity / Unreal / Godot / Blender. The engine-side consumption contract (every attribute / material / node field, color space, per-engine support) + a Unity URP reference shader live in [`docs/ENGINE_CONTRACT.md`](ENGINE_CONTRACT.md).
+- **`.glb`** — glTF 2.0 binary export (greedy + MC light/heavy): `POSITION / NORMAL / COLOR_0` (per-vertex AO baked into RGB) `/ _TINTZONE` + `TEXCOORD_0.x` (per-vertex faction tint zone — the custom attr plus a UV mirror Unity glTFast can read), u32 indices; geometry is split into **per-material-group primitives with glTF `materials[]`** — plain (explicit non-metallic, since the glTF default is metallic), emissive (white `emissiveFactor`), and metallic (`metallicFactor` 1). **Named sockets** export as **empty nodes** (`name` + `translation` + `rotation`, no mesh; `+Y→normal` quaternion) — even for a geometry-free scene. Imports directly into Unity / Unreal / Godot / Blender. The engine-side consumption contract (every attribute / material / node field, color space, per-engine support) is specified in [`docs/GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md) §3.2; a Unity URP reference shader is still TODO.
 - Post-export report dialog (format / geometry source / triangle-vertex-chunk counts / file size / lost-color notes).
+- **Headless batch export** — `voxelith bake <spec.json> [--shard i/n]` (`src/bake.rs` + clap in `main.rs`): batch `.vxlt`→`.glb` from a declarative `{ defaults, items[] }` spec with per-asset **pivot / up-axis / unit-scale** (a lossless root-node transform — `io::export_glb_with_transform`), optional **`gltfpack` meshopt compression** (`optimize: "meshopt"`, graceful skip if not installed), `srcDir`/`outDir` bulk expansion, `--shard` for CI fan-out, and a per-item JSON report next to each output. CPU-only (no window/GPU). Identity transform ⇒ byte-identical to the interactive export. See [`GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md) §3.4–3.5.
 
 ### AI generation
 - `src/ai/` — tokio background runtime, OS-keychain API key (`keyring`), `AiJobState` machine, egui AI panel, `MockProvider` for free end-to-end testing.
@@ -77,9 +78,9 @@ Concise forward map (the unbuilt parts of the former roadmap + vision), grouped 
 
 **Editing** — configurable keymap + conflict detection + key-help; camera nav presets (Blender/Maya/Goxel); surface-only paint; replace-color tool; paint-only-selected; recent colors; palette-slot naming; undo-history panel.
 
-**Files & export** — pre-import inspection (peek dims/palette/warnings before commit); export presets (Godot/Unity/Blender/Web/MagicaVoxel — format+axis+scale+smoothing one-click); `.vxlt` version migration; `.gltf` text variant; `.vox` v200 export.
+**Files & export** — pre-import inspection (peek dims/palette/warnings before commit — the headless bake's per-item JSON report partly covers this for `.glb`); `.vxlt` version migration; `.gltf` text variant; `.vox` v200 export. (Export presets are now subsumed by `voxelith bake` named `defaults` blocks; a GUI hook to launch a bake from the editor is the remaining nicety.)
 
-**Game asset pipeline** (see `docs/GAME_PIPELINE_ROADMAP.md`) — §3.1 "export the data we already have" (per-vertex AO / emissive-metallic materials / tint-zone / named sockets) **done**; §3.2 **engine contract doc** ([`docs/ENGINE_CONTRACT.md`](ENGINE_CONTRACT.md)) + **Unity URP reference shader** ([`docs/reference/VoxelithUberURP.shader`](reference/VoxelithUberURP.shader)) + the **`TEXCOORD_0` tint-zone mirror** (so Unity glTFast — which drops the custom `_TINTZONE` — can still read zones) **done**. Remaining in §3.x: only the optional better smooth mesher (Surface Nets / Dual Contouring, §3.3). (Unity zone consumption still hinges on glTFast's material-driven UV pruning — verify per contract §6.2; Blender bridge is the guaranteed fallback.)
+**Game asset pipeline** (see [`docs/GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md)) — §3.1 data export (AO / emissive-metallic / tint-zone / sockets) **done**; §3.2 `TEXCOORD_0` zone mirror **done**, consumption contract specified in roadmap §3.2, **Unity URP reference shader shipped** (`docs/reference/VoxelithUberURP.shader`); §3.4 **post-export optimization done** (the `voxelith bake` tool shells out to `gltfpack -cc -noq`) and §3.5 **batch/headless export done** (`voxelith bake`). **Remaining:** (a) §3.3 a better smooth mesher (Surface Nets / Dual Contouring) — lowest priority; (b) the §3.2 **GATE** — verifying the `TEXCOORD_0.x` zone survives Unity glTFast's UV pruning end-to-end (needs a running Unity 6 + glTFast; procedure in roadmap §3.2); (c) optional native meshopt (§3.4 plan B) to drop the external `gltfpack` dependency.
 
 **Procgen & graph** — WFC backtracking (currently forward-only); more tilesets (Castle/Pipes/sci-fi); on-canvas node diagnostics; preview time/count; cancel for large gens; commit semantics (overwrite/add/layer/into-selection); graph templates; cross-run node cache; **shape grammar** (not started).
 

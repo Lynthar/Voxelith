@@ -22,6 +22,7 @@
 //! ```
 
 pub mod ai;
+pub mod bake;
 pub mod core;
 pub mod mesh;
 pub mod render;
