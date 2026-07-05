@@ -193,6 +193,14 @@ fn march_one_cube(
         }
         let (a, b) = EDGE_VERTEX_PAIRS[e];
         let pos = interp_edge(corners_world[a], corners_world[b], densities[a], densities[b]);
+        // Shift the emitted surface +0.5 on every axis so MC's voxel-
+        // CENTERED surface (a voxel at integer n spans [n-0.5, n+0.5])
+        // lands on the same [n, n+1] cell that the greedy mesher, the voxel
+        // world, and socket placement all use — otherwise the smoothed
+        // export sits half a cell off from its sockets (#12). `edge_color`
+        // below keeps the UN-shifted corner coords so it still samples the
+        // correct voxels.
+        let pos = [pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5];
         let normal = density_gradient(density, size, idx, corners_local, a, b, densities[a], densities[b]);
         let color = edge_color(world, corners_world[a], corners_world[b]);
         edge_vertices[e] = ((pos, normal, color), true);
@@ -310,9 +318,31 @@ fn density_gradient(
     let nz = g_a[2] + t * (g_b[2] - g_a[2]);
     let len = (nx * nx + ny * ny + nz * nz).sqrt();
     if len < 1e-6 {
-        // Degenerate — surface gradient vanished. Pick +Y so the
-        // vertex still has a sensible (if arbitrary) normal.
-        [0.0, 1.0, 0.0]
+        // Degenerate: both endpoint gradients vanished (e.g. a 1-cell-
+        // thick wall beside a 1-cell gap — every central-difference sample
+        // is symmetric). Derive the outward normal from the edge itself,
+        // pointing from the solid endpoint (higher density) toward the air
+        // one (lower). That's the true outward direction for a face lying
+        // on this edge — and unlike the old arbitrary +Y it's rarely
+        // perpendicular to the surface, so the `dot < 0` winding correction
+        // (which never fires on a dot of exactly 0) still works (#25).
+        let (ca, cb) = (corners_local[a], corners_local[b]);
+        let edge = [
+            cb.0 as f32 - ca.0 as f32,
+            cb.1 as f32 - ca.1 as f32,
+            cb.2 as f32 - ca.2 as f32,
+        ];
+        let elen = (edge[0] * edge[0] + edge[1] * edge[1] + edge[2] * edge[2]).sqrt();
+        if elen < 1e-6 {
+            return [0.0, 1.0, 0.0]; // a == b (never a real edge) — stay finite
+        }
+        // da >= db → corner a is the solid side, so solid→air runs a→b.
+        let sign = if da >= db { 1.0 } else { -1.0 };
+        [
+            sign * edge[0] / elen,
+            sign * edge[1] / elen,
+            sign * edge[2] / elen,
+        ]
     } else {
         // Negative because the gradient of a "solid=1, air=0" field
         // points INTO the solid; we want the outward-facing normal.
@@ -434,9 +464,11 @@ fn edge_color(world: &World, a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
 /// 3×3×3 box blur over a density field. Used for the "smoothed"
 /// export mode — turns 0/1 voxel densities into a continuous field
 /// where surfaces become rounded blobs instead of rounded cubes.
-/// Boundary cells are blurred against zero (the padding layer the
-/// caller already allocated, so this just rolls naturally past the
-/// real data).
+/// Boundary cells are blurred against zero: the sum of in-bounds
+/// neighbors is always divided by the full 27, so out-of-bounds samples
+/// act as 0. (Dividing by the in-bounds count instead would renormalize
+/// boundary cells upward and dissolve the model's bottom face — see the
+/// note at the division site.)
 fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
     let idx = |dx: usize, dy: usize, dz: usize| -> usize {
         dx + dy * size.0 + dz * size.0 * size.1
@@ -446,7 +478,6 @@ fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
         for y in 0..size.1 {
             for x in 0..size.0 {
                 let mut sum = 0.0;
-                let mut count = 0;
                 for dz in -1i32..=1 {
                     for dy in -1i32..=1 {
                         for dx in -1i32..=1 {
@@ -462,12 +493,17 @@ fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
                             {
                                 sum +=
                                     input[idx(nx as usize, ny as usize, nz as usize)];
-                                count += 1;
                             }
                         }
                     }
                 }
-                out[idx(x, y, z)] = sum / count as f32;
+                // Always divide by the full 27, treating out-of-bounds
+                // neighbors as 0 (blur AGAINST the zero padding). Dividing
+                // by the in-bounds count instead renormalizes boundary
+                // cells upward: a bottom-pad cell would read 9/18 = 0.5 ≥
+                // ISO_LEVEL, classify as "inside", and erase the model's
+                // bottom face (no inside→outside transition → open mesh).
+                out[idx(x, y, z)] = sum / 27.0;
             }
         }
     }
@@ -696,16 +732,93 @@ mod tests {
     }
 
     #[test]
-    fn test_box_blur_preserves_average() {
-        // Box blur of a uniform field should give back the same
-        // uniform field (interior cells average 27 ones; boundary
-        // cells average fewer ones over fewer samples → still 1.0).
+    fn test_mc_mesh_uses_cell_convention_not_voxel_centered() {
+        // A single solid voxel at integer (2,2,2). After the +0.5 emit
+        // shift (#12), its MC surface must span the CELL [2,3]³ — the same
+        // "voxel n occupies [n, n+1)" convention the greedy mesher, the
+        // voxel world, and socket placement use — so its center sits at
+        // 2.5, NOT the un-shifted voxel-centered 2.0.
+        let mut world = World::new();
+        world.set_voxel(2, 2, 2, Voxel::from_rgb(200, 100, 50));
+        world.clear_dirty_flags();
+        let mesh = mesh_world_smoothed(&world, false);
+        assert!(!mesh.is_empty());
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for v in &mesh.vertices {
+            for a in 0..3 {
+                lo[a] = lo[a].min(v.position[a]);
+                hi[a] = hi[a].max(v.position[a]);
+            }
+        }
+        for a in 0..3 {
+            let center = (lo[a] + hi[a]) * 0.5;
+            assert!(
+                (center - 2.5).abs() < 0.1,
+                "axis {} surface center {} (expected ~2.5, the cell center of [2,3])",
+                a,
+                center
+            );
+        }
+    }
+
+    #[test]
+    fn test_thin_wall_normals_stay_finite_and_unit() {
+        // Two parallel 1-cell-thick walls with a 1-cell gap between them is
+        // the geometry where both endpoint density gradients can vanish
+        // (symmetric central-difference samples). The zero-gradient
+        // fallback (#25) must still produce finite, unit-length normals —
+        // it derives them from the edge direction now, not an arbitrary +Y
+        // that also defeated the winding correction.
+        let mut world = World::new();
+        for y in 0..4 {
+            for z in 0..4 {
+                world.set_voxel(0, y, z, Voxel::from_rgb(180, 180, 180));
+                world.set_voxel(2, y, z, Voxel::from_rgb(180, 180, 180));
+            }
+        }
+        world.clear_dirty_flags();
+        let mesh = mesh_world_smoothed(&world, false);
+        assert!(!mesh.is_empty());
+        for v in &mesh.vertices {
+            assert!(
+                v.normal.iter().all(|c| c.is_finite()),
+                "non-finite normal {:?}",
+                v.normal
+            );
+            let len = (v.normal[0] * v.normal[0]
+                + v.normal[1] * v.normal[1]
+                + v.normal[2] * v.normal[2])
+                .sqrt();
+            assert!(
+                (len - 1.0).abs() < 1e-3,
+                "non-unit normal {:?} (len {})",
+                v.normal,
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn test_box_blur_divides_by_27_against_zero_padding() {
+        // The blur ALWAYS divides by the full 3×3×3 = 27, treating
+        // out-of-bounds neighbors as 0 (blur against the caller's zero
+        // padding). This is load-bearing: dividing by the in-bounds count
+        // instead lets a boundary pad cell read 9/18 = 0.5 ≥ ISO_LEVEL —
+        // "inside" — which dissolves the model's bottom face into an open
+        // mesh. Pin the exact fractions on a uniform all-ones field.
         let size = (5, 5, 5);
         let input = vec![1.0_f32; 125];
         let out = box_blur_3x3x3(&input, size);
-        for v in &out {
-            assert!((v - 1.0).abs() < 1e-6);
-        }
+        let at = |x: usize, y: usize, z: usize| out[x + y * size.0 + z * size.0 * size.1];
+        // Interior: all 27 neighbors in-bounds → 27/27 = 1.0.
+        assert!((at(2, 2, 2) - 1.0).abs() < 1e-6);
+        // Face center: one plane out of bounds → 18 in-bounds.
+        assert!((at(0, 2, 2) - 18.0 / 27.0).abs() < 1e-6);
+        // Edge: two planes out → 12 in-bounds.
+        assert!((at(0, 0, 2) - 12.0 / 27.0).abs() < 1e-6);
+        // Corner: three planes out → 8 in-bounds.
+        assert!((at(0, 0, 0) - 8.0 / 27.0).abs() < 1e-6);
     }
 
     #[test]

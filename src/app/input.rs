@@ -255,6 +255,14 @@ impl App {
         if t <= 0.0 {
             return None;
         }
+        // Cap the reach exactly like the voxel-picking cast: a ray nearly
+        // parallel to the plane produces an enormous `t`, placing the
+        // footprint's far corner millions of cells away — `box_voxels`
+        // would then try to build billions of cells (freeze / capacity-
+        // overflow panic). Beyond editor reach = no hit, same as picking.
+        if t > RAYCAST_MAX_DIST {
+            return None;
+        }
         let p_arr = ray.at(t).to_array();
         let other1 = (plane.axis + 1) % 3;
         let other2 = (plane.axis + 2) % 3;
@@ -865,6 +873,18 @@ impl App {
 
     /// Handle keyboard shortcuts (tools, undo/redo, file ops,
     /// selection).
+    /// Clear all box-selection state: the marquee, an in-progress
+    /// select-drag or move-drag anchor, and the translucent move ghost.
+    /// Shared by the `Deselect` UI action, Esc, and Ctrl+D so the three
+    /// entry points can't drift — Esc / Ctrl+D used to omit the move
+    /// anchor + ghost, stranding a ghost after a cancelled move.
+    pub(super) fn deselect(&mut self) {
+        self.selection_drag_anchor = None;
+        self.selection_move_anchor = None;
+        self.move_ghost_voxels.clear();
+        self.editor.selection = None;
+    }
+
     pub(super) fn handle_tool_shortcut(&mut self, key: KeyCode) {
         match key {
             KeyCode::Digit1 => self.editor.current_tool = Tool::Place,
@@ -906,16 +926,14 @@ impl App {
             // abort an in-progress Select drag so the user can bail
             // mid-gesture without committing a stray AABB.
             KeyCode::Escape => {
-                self.selection_drag_anchor = None;
-                self.editor.selection = None;
+                self.deselect();
                 if self.shape_drag.is_some() {
                     self.shape_drag = None;
                     self.ui.set_status("Shape canceled");
                 }
             }
             KeyCode::KeyD if self.modifiers.control_key() => {
-                self.selection_drag_anchor = None;
-                self.editor.selection = None;
+                self.deselect();
             }
             // Selection clipboard ops. Ctrl+Shift+V forces "paste
             // at cursor" (vengi-style two-channel paste); plain

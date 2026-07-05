@@ -66,11 +66,31 @@ impl ApplicationHandler for App {
 
             WindowEvent::Focused(false) => {
                 // Losing focus (alt-tab, or a modal Save/Open dialog
-                // taking over) means key-release events can be delivered
-                // elsewhere. Forget held keys so flight doesn't resume
-                // with a phantom WASD key stuck down when focus returns.
+                // taking over) means press/release events can be delivered
+                // elsewhere. Abandon EVERY in-progress interaction so none
+                // resumes latched when focus returns — mirror the mouse-
+                // release + deselect cleanup: forget held keys and mouse
+                // buttons, drop the brush-stroke / shape latches, release
+                // the orbit cursor capture, and clear any select-drag /
+                // move-drag anchor + ghost. The committed selection marquee
+                // itself is left intact, exactly like a plain mouse release.
                 if let Some(renderer) = &mut self.renderer {
                     renderer.camera_controller.clear_keys();
+                    renderer.camera_controller.clear_mouse_buttons();
+                }
+                self.left_button_held = false;
+                self.last_stroke_voxel = None;
+                self.stroke_start_screen_pos = None;
+                self.stroke_plane = None;
+                self.shape_drag = None;
+                self.selection_drag_anchor = None;
+                self.selection_move_anchor = None;
+                self.move_ghost_voxels.clear();
+                if self.cursor_captured {
+                    self.cursor_captured = false;
+                    if let Some(window) = &self.window {
+                        window.set_cursor_visible(true);
+                    }
                 }
             }
 
@@ -94,24 +114,38 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                if !egui_consumed {
-                    if let PhysicalKey::Code(key) = event.physical_key {
+                if let PhysicalKey::Code(key) = event.physical_key {
+                    let pressed = event.state.is_pressed();
+
+                    // The camera-key RELEASE must ALWAYS reach the
+                    // controller, even when egui consumed the event (a key
+                    // let go while a panel has focus, or after a modal
+                    // Save/Open dialog grabbed it). Otherwise a held WASD
+                    // key latches "down" and the camera flies forever.
+                    // Everything below stays gated on `!egui_consumed` so
+                    // typing in a panel neither moves the camera nor fires
+                    // tool shortcuts.
+                    if !pressed {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer
+                                .camera_controller
+                                .process_keyboard(key, event.state);
+                        }
+                    }
+
+                    if !egui_consumed && pressed {
                         // Command chords (Ctrl/Super + key) are editor
                         // shortcuts, not fly-camera input. Feeding the
                         // chord's letter (e.g. the 'S' in Ctrl+S) to the
-                        // controller would dolly the camera while held —
-                        // and if a modal Save/Open dialog swallows the
-                        // key-release, the camera drifts forever. So drop
-                        // the *press* while a command modifier is held,
-                        // but always forward the *release* so a key pressed
-                        // before the modifier (hold W, then tap Ctrl) can
-                        // never get stuck "down". Sprint lives on Shift
-                        // (see `CameraController::update`), which isn't a
+                        // controller would dolly the camera while held, so
+                        // drop the *press* while a command modifier is down.
+                        // (The matching release is forwarded above, so a key
+                        // pressed before the modifier — hold W, then tap
+                        // Ctrl — never sticks.) Sprint lives on Shift, not a
                         // command modifier, so Shift+WASD is unaffected.
                         let command_chord =
                             self.modifiers.control_key() || self.modifiers.super_key();
-                        let skip_camera = command_chord && event.state.is_pressed();
-                        if !skip_camera {
+                        if !command_chord {
                             if let Some(renderer) = &mut self.renderer {
                                 renderer
                                     .camera_controller
@@ -119,11 +153,9 @@ impl ApplicationHandler for App {
                             }
                         }
 
-                        if event.state.is_pressed() {
-                            self.handle_tool_shortcut(key);
-                        }
+                        self.handle_tool_shortcut(key);
 
-                        if key == KeyCode::Escape && event.state.is_pressed() {
+                        if key == KeyCode::Escape {
                             self.cursor_captured = false;
                             if let Some(window) = &self.window {
                                 window.set_cursor_visible(true);
@@ -296,12 +328,19 @@ impl ApplicationHandler for App {
                         }
                     }
 
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.camera_controller.process_mouse_motion(
-                            position.x as f32,
-                            position.y as f32,
-                            &mut renderer.camera,
-                        );
+                    // Skip the windowed motion path while the cursor is
+                    // captured (middle-orbit): the raw `DeviceEvent` path
+                    // drives orbit then, and running both double-counts it
+                    // (2× orbit speed in-window). Right-button pan doesn't
+                    // capture, so it still flows through here.
+                    if !self.cursor_captured {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.camera_controller.process_mouse_motion(
+                                position.x as f32,
+                                position.y as f32,
+                                &mut renderer.camera,
+                            );
+                        }
                     }
                 }
             }
@@ -345,21 +384,16 @@ impl ApplicationHandler for App {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.cursor_captured {
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.camera_controller.yaw += delta.0 as f32 * 0.003;
-                    renderer.camera_controller.pitch += delta.1 as f32 * 0.003;
-                    renderer.camera_controller.pitch =
-                        renderer.camera_controller.pitch.clamp(-1.5, 1.5);
-
-                    let distance = renderer.camera_controller.distance;
-                    let yaw = renderer.camera_controller.yaw;
-                    let pitch = renderer.camera_controller.pitch;
-
-                    let x = distance * yaw.cos() * pitch.cos();
-                    let y = distance * pitch.sin();
-                    let z = distance * yaw.sin() * pitch.cos();
-
-                    renderer.camera.position =
-                        renderer.camera.target + glam::Vec3::new(x, y, z);
+                    // Raw motion is the SOLE orbit path while captured (the
+                    // windowed `CursorMoved` path is gated off then), so the
+                    // two no longer double-count. Reuse `orbit_by` so the
+                    // sensitivity + spherical-position math live in one
+                    // place instead of a hardcoded 0.003 duplicate.
+                    renderer.camera_controller.orbit_by(
+                        delta.0 as f32,
+                        delta.1 as f32,
+                        &mut renderer.camera,
+                    );
                 }
             }
         }

@@ -63,6 +63,11 @@ impl App {
                 .map(|v| [v.r, v.g, v.b, v.a])
                 .collect(),
             selected_tool: self.editor.current_tool as usize,
+            // Carry the brush's material flags + tint zone so open /
+            // crash-recovery can restore them; without these the load
+            // path's `from_rgba` silently zeroes the brush mode (#8).
+            brush_flags: self.editor.brush_color.flags,
+            brush_tint_zone: self.editor.brush_color.tint_zone(),
             sockets: self
                 .editor
                 .sockets
@@ -114,6 +119,13 @@ impl App {
             editor_state.brush_color[2],
             editor_state.brush_color[3],
         );
+        // Same brush flag / tint-zone restore as `do_open_project` (#8) —
+        // otherwise crash recovery drops the emissive / metallic /
+        // faction-zone mode the user had when the autosave was written.
+        self.editor.brush_color.flags = editor_state.brush_flags;
+        self.editor
+            .brush_color
+            .set_tint_zone(editor_state.brush_tint_zone);
         self.editor.palette = editor_state
             .palette
             .iter()
@@ -216,6 +228,14 @@ impl App {
                     editor_state.brush_color[2],
                     editor_state.brush_color[3],
                 );
+                // Restore the brush's material flags / tint zone too —
+                // `from_rgba` zeroes them, which used to silently clear
+                // the emissive / metallic / faction-zone mode on every
+                // open (#8). Round-trips via EditorState now.
+                self.editor.brush_color.flags = editor_state.brush_flags;
+                self.editor
+                    .brush_color
+                    .set_tint_zone(editor_state.brush_tint_zone);
                 self.editor.palette = editor_state
                     .palette
                     .iter()
@@ -280,6 +300,14 @@ impl App {
                 Ok(world) => {
                     self.world = world;
                     self.editor.history.clear();
+                    // Detach from any previously-open .vxlt: the imported
+                    // model is a new document, so a later Save must prompt
+                    // for a location instead of silently overwriting the
+                    // project that was open before the import (#7). The
+                    // source .vox stays on disk, so — like open/new —
+                    // `unsaved_changes` is left false; the first edit arms
+                    // autosave.
+                    self.project_path = None;
                     // A .vox carries no sockets; the imported model
                     // replaces the scene, so drop any from the old one.
                     self.editor.sockets.clear();

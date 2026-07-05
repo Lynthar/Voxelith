@@ -279,7 +279,11 @@ impl PipelineGraph {
         let id = self.next_id;
         self.next_id += 1;
         let is_output = matches!(kind, NodeKind::Output { .. });
-        let n = self.nodes.len();
+        // Cascade position keyed on the monotonic id, NOT `nodes.len()`:
+        // len shrinks when a node is deleted, so the next add would land
+        // exactly on top of an existing node. Ids never repeat, so slots
+        // never collide (Auto Layout re-compacts on demand).
+        let n = id as usize;
         let position = [
             NODE_LAYOUT_ORIGIN[0]
                 + ((n % NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DX,
@@ -461,12 +465,11 @@ impl PipelineGraph {
     }
 
     fn find_output_immut(&self) -> Result<NodeId, GraphError> {
-        if let Some(id) = self.output_node {
-            if matches!(self.get(id).map(|n| &n.kind), Some(NodeKind::Output { .. })) {
-                return Ok(id);
-            }
-        }
-        // Cache miss / stale — scan.
+        // Always scan — don't trust the `output_node` cache. A stale or
+        // duplicate cache entry must not mask a second Output node, or a
+        // graph with two Outputs would silently evaluate one instead of
+        // reporting `MultipleOutputs` (#33). The graph is tiny, so a full
+        // scan every evaluate is negligible.
         let mut found: Option<NodeId> = None;
         for n in &self.nodes {
             if matches!(n.kind, NodeKind::Output { .. }) {
@@ -1034,6 +1037,63 @@ mod tests {
         // around 0; with width=4 the leftmost x is -2, shifted = 98).
         for ((x, _, _), _) in &patch.voxels {
             assert!(*x >= 98, "translated x out of range: {}", x);
+        }
+    }
+
+    #[test]
+    fn test_two_outputs_report_multiple_outputs() {
+        // Two Output nodes must be reported as MultipleOutputs, never
+        // silently resolved to whichever the `output_node` cache points
+        // at. `find_output` scans directly; `find_output_immut` (used by
+        // evaluate) now always scans too, so the cache can't mask the
+        // second Output (#33).
+        let mut g = PipelineGraph::default();
+        let src = g.add(NodeKind::Terrain(PerlinTerrain {
+            width: 4,
+            depth: 4,
+            ..Default::default()
+        }));
+        g.add(NodeKind::Output { input: Some(src) });
+        g.add(NodeKind::Output { input: Some(src) }); // a second sink
+        assert!(matches!(g.find_output(), Err(GraphError::MultipleOutputs)));
+        // Before the fix, evaluate() cache-hit one Output and returned Ok;
+        // it must now surface the error instead of silently evaluating one.
+        assert!(g.evaluate().is_err());
+    }
+
+    #[test]
+    fn test_add_after_delete_does_not_overlap_positions() {
+        // Auto-layout keys the cascade slot on the monotonic id, not
+        // `nodes.len()`, so deleting a node then adding another can't drop
+        // the new node exactly on top of an existing one (#33).
+        let mut g = PipelineGraph::default();
+        let ids: Vec<_> = (0..5)
+            .map(|_| {
+                g.add(NodeKind::Translate {
+                    input: None,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                })
+            })
+            .collect();
+        g.remove(ids[2]); // shrink len; a len-based layout would now reuse a slot
+        let new_id = g.add(NodeKind::Translate {
+            input: None,
+            dx: 0,
+            dy: 0,
+            dz: 0,
+        });
+        let new_pos = g.get(new_id).unwrap().position;
+        for n in &g.nodes {
+            if n.id != new_id {
+                assert!(
+                    n.position != new_pos,
+                    "new node overlaps existing node #{} at {:?}",
+                    n.id,
+                    new_pos
+                );
+            }
         }
     }
 

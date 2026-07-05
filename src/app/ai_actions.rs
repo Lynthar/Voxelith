@@ -10,7 +10,7 @@
 use std::sync::mpsc;
 
 use voxelith::ai::{AiJobState, AiRequest, JobEvent, JobHandle};
-use voxelith::editor::{Command, Selection, VoxelChange};
+use voxelith::editor::{Command, Selection};
 use voxelith::procgen::VoxelPatch;
 
 use super::App;
@@ -124,22 +124,8 @@ impl App {
     /// existing scene doesn't pollute the undo stack with no-ops.
     /// Phase 4 will polish placement (auto-center, auto-select).
     fn apply_ai_patch(&mut self, patch: VoxelPatch) {
-        let changes: Vec<VoxelChange> = patch
-            .voxels
-            .iter()
-            .filter_map(|&(pos, new_voxel)| {
-                let old_voxel = self.world.get_voxel(pos.0, pos.1, pos.2);
-                if old_voxel == new_voxel {
-                    None
-                } else {
-                    Some(VoxelChange {
-                        pos,
-                        old_voxel,
-                        new_voxel,
-                    })
-                }
-            })
-            .collect();
+        // Dedupe by position + drop identity writes (see `patch_to_changes`).
+        let changes = self.patch_to_changes(&patch);
         if changes.is_empty() {
             return;
         }

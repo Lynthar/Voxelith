@@ -168,6 +168,17 @@ impl CameraController {
         self.pressed_keys.clear();
     }
 
+    /// Forget any in-progress mouse drag (middle-orbit / right-pan).
+    /// Called on window focus loss alongside `clear_keys` so a button
+    /// whose release is delivered to another window can't leave orbit or
+    /// pan latched on when focus returns. `last_mouse_pos = None` also
+    /// forces the next motion to re-seed its delta instead of jumping.
+    pub fn clear_mouse_buttons(&mut self) {
+        self.middle_mouse_pressed = false;
+        self.right_mouse_pressed = false;
+        self.last_mouse_pos = None;
+    }
+
     /// Handle mouse button input.
     ///
     /// Takes `&mut Camera` so middle-press can sync orbit state from
@@ -230,6 +241,20 @@ impl CameraController {
         self.pitch = dir.y.asin().clamp(-1.5, 1.5);
     }
 
+    /// Apply an orbit delta in raw pixels around the current target,
+    /// using the shared `sensitivity`. This is the single orbit
+    /// implementation for BOTH the windowed `process_mouse_motion` path
+    /// and the raw `DeviceEvent::MouseMotion` path; the event handler
+    /// must drive exactly one per frame (raw while the cursor is
+    /// captured) or the two accumulate and orbit runs at 2× speed.
+    pub fn orbit_by(&mut self, dx: f32, dy: f32, camera: &mut Camera) {
+        self.yaw += dx * self.sensitivity;
+        self.pitch += dy * self.sensitivity;
+        // Clamp pitch to avoid flipping past the poles.
+        self.pitch = self.pitch.clamp(-1.5, 1.5);
+        self.update_camera_position(camera);
+    }
+
     /// Handle mouse movement
     pub fn process_mouse_motion(&mut self, x: f32, y: f32, camera: &mut Camera) {
         if let Some((last_x, last_y)) = self.last_mouse_pos {
@@ -242,13 +267,8 @@ impl CameraController {
                 // right swings the camera around to view the right
                 // side of the scene. Inverted from the camera-relative
                 // convention where dragging moves the camera itself.
-                self.yaw += dx * self.sensitivity;
-                self.pitch += dy * self.sensitivity;
-
-                // Clamp pitch to avoid flipping
-                self.pitch = self.pitch.clamp(-1.5, 1.5);
-
-                self.update_camera_position(camera);
+                // Shared with the raw-motion path via `orbit_by`.
+                self.orbit_by(dx, dy, camera);
             } else if self.right_mouse_pressed {
                 // Pan camera. Both position and target shift by the same
                 // offset so the view direction and the camera-to-target

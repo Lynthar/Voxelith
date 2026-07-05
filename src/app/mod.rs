@@ -369,7 +369,12 @@ impl App {
     pub(super) fn initial_window_size(&self) -> (u32, u32) {
         let w = self.prefs.window.width;
         let h = self.prefs.window.height;
-        if !(320..=2048).contains(&w) || !(240..=2048).contains(&h) {
+        // Range must match the clamp in `save_prefs` — otherwise a size
+        // this side accepts but that side never writes (or the reverse)
+        // makes a valid window silently reset. A 2560- or 3840-wide logical
+        // window (a 2K / 4K display at scale 1.0) used to be rejected here
+        // (old max 2048) yet saved fine, so it never restored (#9).
+        if !(640..=4096).contains(&w) || !(480..=4096).contains(&h) {
             (1280, 720)
         } else {
             (w, h)
@@ -941,7 +946,18 @@ impl App {
                 ))
             } else {
                 self.editor.hovered_voxel.map(|h| {
-                    let cell = if tool.is_shape() { h.adjacent_pos } else { h.voxel_pos };
+                    // Key on the cell the preview is actually DRAWN at:
+                    // Place (like the shape tools) previews on `adjacent_pos`
+                    // — the empty cell in front of the hit face — the rest
+                    // on `voxel_pos`. Keying Place on `voxel_pos` left the
+                    // preview stale when the cursor crossed to another face
+                    // of the same voxel (adjacent_pos moved but the key
+                    // didn't, so no regen).
+                    let cell = if tool.is_shape() || matches!(tool, Tool::Place) {
+                        h.adjacent_pos
+                    } else {
+                        h.voxel_pos
+                    };
                     (cell, tool, color, size, symmetry, None)
                 })
             }

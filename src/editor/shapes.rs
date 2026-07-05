@@ -89,14 +89,26 @@ pub fn line_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32
     out
 }
 
+/// Upper bound on the preallocation hint for a shape's cell buffer.
+/// Real drags stay far below this — the raycast reach cap bounds the
+/// span — but a pathological box must not eagerly reserve gigabytes for
+/// its capacity hint (the Vec still grows if genuinely needed).
+const MAX_SHAPE_CELLS_HINT: i64 = 1 << 22; // ~4.2M cells
+
 /// Closed axis-aligned bounding box from `a` to `b` (any pair of
 /// opposite corners). Inclusive on both endpoints.
 pub fn box_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
     let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
     let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
     let (z0, z1) = (a.2.min(b.2), a.2.max(b.2));
-    let count = ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)) as usize;
-    let mut out = Vec::with_capacity(count);
+    // Volume in i64: the i32 product overflows for a pathologically large
+    // span (debug panic; release wraps negative → `as usize` sign-extends
+    // to a bogus huge capacity). Cast each extent to i64 BEFORE the
+    // subtraction so `x1 - x0` itself can't overflow either.
+    let count = (x1 as i64 - x0 as i64 + 1)
+        * (y1 as i64 - y0 as i64 + 1)
+        * (z1 as i64 - z0 as i64 + 1);
+    let mut out = Vec::with_capacity(count.clamp(0, MAX_SHAPE_CELLS_HINT) as usize);
     for z in z0..=z1 {
         for y in y0..=y1 {
             for x in x0..=x1 {

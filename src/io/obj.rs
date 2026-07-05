@@ -53,8 +53,9 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
     // air-only chunks don't bloat the output with `g` headers.
     let mut chunk_meshes = Vec::new();
     let mut stats = ObjStats::default();
-    for (chunk_pos, _) in world.chunks() {
-        let mesh = mesher.generate(world, *chunk_pos);
+    // Deterministic chunk order so repeated exports are byte-identical (#11).
+    for chunk_pos in world.sorted_chunk_positions() {
+        let mesh = mesher.generate(world, chunk_pos);
         if mesh.is_empty() {
             continue;
         }

@@ -677,7 +677,10 @@ impl VoxModel {
         let mut max_z = i32::MIN;
 
         // First pass: find bounds
-        for (chunk_pos, chunk_lock) in world.chunks() {
+        for chunk_pos in world.sorted_chunk_positions() {
+            let Some(chunk_lock) = world.get_chunk(chunk_pos) else {
+                continue;
+            };
             let chunk = chunk_lock.read();
             let (ox, oy, oz) = chunk_pos.world_origin();
 
@@ -721,7 +724,10 @@ impl VoxModel {
         let mut voxels = Vec::new();
 
         // Second pass: collect voxels and build palette
-        for (chunk_pos, chunk_lock) in world.chunks() {
+        for chunk_pos in world.sorted_chunk_positions() {
+            let Some(chunk_lock) = world.get_chunk(chunk_pos) else {
+                continue;
+            };
             let chunk = chunk_lock.read();
             let (ox, oy, oz) = chunk_pos.world_origin();
 

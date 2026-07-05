@@ -96,6 +96,21 @@ pub struct EditorState {
     /// doesn't need a bump because the addition is purely additive.
     #[serde(default)]
     pub sockets: Vec<SocketData>,
+    /// Brush material flags (`Voxel::flags`: bit0 emissive / bit1
+    /// metallic) captured at save time. `#[serde(default)]` so older
+    /// `.vxlt` files (which never stored this) still load — missing → 0,
+    /// a plain brush. Round-tripping it is what stops open / crash-
+    /// recovery from silently clearing the brush's emissive / metallic
+    /// mode: the load path rebuilds `brush_color` via `Voxel::from_rgba`,
+    /// which zeroes `flags`.
+    #[serde(default)]
+    pub brush_flags: u8,
+    /// Brush tint zone (`Voxel::tint_zone`, stored in `_reserved`:
+    /// 0 none / 1 primary / 2 secondary / 3 reserved) captured at save
+    /// time. Same `#[serde(default)]` forward-compat + anti-zeroing
+    /// contract as `brush_flags`.
+    #[serde(default)]
+    pub brush_tint_zone: u8,
 }
 
 /// Serializable form of an `editor::Socket` (name + position + outward
@@ -150,14 +165,17 @@ impl Project {
         let mut project = Self::new();
         project.editor_state = editor_state;
 
-        for (pos, chunk_lock) in world.chunks() {
+        // Deterministic chunk order so the `.vxlt` bytes are reproducible
+        // across runs (HashMap iteration is per-process random) — matters
+        // for backup dedup / content-addressing (#11).
+        for pos in world.sorted_chunk_positions() {
+            let Some(chunk_lock) = world.get_chunk(pos) else {
+                continue;
+            };
             let chunk = chunk_lock.read();
             if !chunk.is_empty() {
                 let rle_data = rle_encode_chunk(&chunk);
-                project.chunks.push(ChunkData {
-                    pos: *pos,
-                    rle_data,
-                });
+                project.chunks.push(ChunkData { pos, rle_data });
             }
         }
 
@@ -375,20 +393,75 @@ fn rle_decode_chunk(data: &[u8]) -> Option<Chunk> {
     Some(chunk)
 }
 
-/// Quick save world to file path
+/// Quick save world to file path (atomic + durable — see
+/// [`write_project_atomic`]).
 pub fn save_world(world: &World, path: &std::path::Path) -> Result<(), ProjectError> {
-    let project = Project::from_world(world);
-    let file = std::fs::File::create(path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    project.save(&mut writer)
+    write_project_atomic(&Project::from_world(world), path)
 }
 
-/// Save world with editor state to file path
-pub fn save_world_with_state(world: &World, editor_state: EditorState, path: &std::path::Path) -> Result<(), ProjectError> {
-    let project = Project::from_world_with_state(world, editor_state);
-    let file = std::fs::File::create(path)?;
+/// Save world with editor state to file path (atomic + durable — see
+/// [`write_project_atomic`]).
+pub fn save_world_with_state(
+    world: &World,
+    editor_state: EditorState,
+    path: &std::path::Path,
+) -> Result<(), ProjectError> {
+    write_project_atomic(&Project::from_world_with_state(world, editor_state), path)
+}
+
+/// Serialize a project to `path` **atomically and durably**.
+///
+/// Writes to a sibling `<path>.tmp`, forces it to disk, then renames it
+/// over the target. This closes two data-loss holes the plain
+/// `File::create` + `BufWriter` path had:
+///
+/// - **Silent truncation on a flush error (#5).** `BufWriter`'s `Drop`
+///   flushes but *ignores* any error, so a small project whose whole
+///   gzip stream still sat in the 8 KiB buffer could report `Ok` having
+///   written nothing to disk. `into_inner()` performs the final flush and
+///   surfaces its error; `sync_all()` then forces the bytes to physical
+///   storage before we treat the save as done.
+/// - **A half-written target (#6).** `File::create` truncates the
+///   destination up front, so a crash mid-write would destroy the
+///   previous good save. Writing a temp then `fs::rename`-ing it over the
+///   target (which replaces an existing file on Windows via `MoveFileExW`
+///   as on POSIX; same directory ⇒ same volume) means the target is only
+///   ever the complete old file or the complete new one.
+///
+/// On any failure the partial temp is removed rather than left behind.
+fn write_project_atomic(project: &Project, path: &std::path::Path) -> Result<(), ProjectError> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+
+    // Phase 1: write + fsync the temp. On any error, drop the partial
+    // temp so we never leave stray `.tmp` files behind.
+    if let Err(e) = write_temp_then_sync(project, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Phase 2: atomically replace the target with the complete temp.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Write `project` to `tmp`, flush it (surfacing the error `BufWriter`'s
+/// `Drop` would swallow), and fsync it to physical disk. Split out so
+/// [`write_project_atomic`] has a single `?`-using body with one cleanup
+/// path for every early return.
+fn write_temp_then_sync(project: &Project, tmp: &std::path::Path) -> Result<(), ProjectError> {
+    let file = std::fs::File::create(tmp)?;
     let mut writer = std::io::BufWriter::new(file);
-    project.save(&mut writer)
+    project.save(&mut writer)?;
+    // `into_inner` flushes the buffer and hands back the File; on a flush
+    // error it yields an `IntoInnerError` we unwrap to the io::Error.
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Quick load world from file path
@@ -433,6 +506,35 @@ mod tests {
     }
 
     #[test]
+    fn save_bytes_are_chunk_order_independent() {
+        // The chunk store is a HashMap (per-instance, per-process random
+        // iteration order), so two worlds with identical content built in
+        // different orders could serialize to different bytes if the writer
+        // didn't sort chunks. `sorted_chunk_positions` guarantees a
+        // byte-identical `.vxlt` regardless of insertion order (#11 —
+        // matters for backup dedup / content-addressing).
+        let cells: Vec<(i32, i32, i32)> = (0..8)
+            .map(|i| (i * 40 - 120, (i % 3) * 5, (i % 5) * 40 - 80))
+            .collect();
+        let color = Voxel::from_rgb(123, 45, 67);
+
+        let mut forward = World::new();
+        for &(x, y, z) in &cells {
+            forward.set_voxel(x, y, z, color);
+        }
+        let mut reverse = World::new();
+        for &(x, y, z) in cells.iter().rev() {
+            reverse.set_voxel(x, y, z, color);
+        }
+
+        let mut a = Vec::new();
+        Project::from_world(&forward).save(&mut a).unwrap();
+        let mut b = Vec::new();
+        Project::from_world(&reverse).save(&mut b).unwrap();
+        assert_eq!(a, b, "chunk order must not affect the saved bytes");
+    }
+
+    #[test]
     fn test_roundtrip_preserves_editor_state_and_cross_chunk_voxels() {
         // `test_project_roundtrip` checks a couple of voxels in one chunk.
         // This pins the two things most likely to regress if RLE / chunk-
@@ -456,6 +558,8 @@ mod tests {
             brush_color: [12, 34, 56, 200],
             palette: vec![[1, 2, 3, 4], [255, 254, 253, 252]],
             selected_tool: 4,
+            brush_flags: 0b11, // emissive + metallic both set
+            brush_tint_zone: 2, // secondary faction zone
             sockets: vec![
                 SocketData {
                     name: "muzzle".to_string(),
@@ -483,6 +587,8 @@ mod tests {
         assert_eq!(es.palette, state.palette);
         assert_eq!(es.selected_tool, state.selected_tool);
         assert_eq!(es.sockets, state.sockets);
+        assert_eq!(es.brush_flags, state.brush_flags);
+        assert_eq!(es.brush_tint_zone, state.brush_tint_zone);
 
         // Every set voxel survives — negatives, far chunks, exact rgba.
         let loaded_world = loaded.to_world();
@@ -514,6 +620,10 @@ mod tests {
         let es: EditorState = serde_json::from_str(json).unwrap();
         assert_eq!(es.selected_tool, 2);
         assert!(es.sockets.is_empty());
+        // brush_flags / brush_tint_zone are likewise absent in pre-existing
+        // files; `#[serde(default)]` must fill them with 0 (a plain brush).
+        assert_eq!(es.brush_flags, 0);
+        assert_eq!(es.brush_tint_zone, 0);
     }
 
     #[test]
@@ -548,6 +658,62 @@ mod tests {
         // The intact buffer still round-trips.
         let mut rfull = buf.as_slice();
         assert!(Project::load(&mut rfull).is_ok());
+    }
+
+    #[test]
+    fn save_world_with_state_writes_loadable_file_atomically() {
+        // The roundtrip tests above serialize into an in-memory `Vec`, so
+        // they never exercised the real File + BufWriter path where the #5
+        // flush bug lived, nor the #6 temp-then-rename. This drives
+        // `save_world_with_state` against an actual file: it must produce a
+        // file that loads back (incl. brush flags/zone through the header),
+        // atomically REPLACE an existing file on a second save, and leave
+        // no `.tmp` behind.
+        let dir = std::env::temp_dir().join("voxelith_atomic_save");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proj.vxlt");
+        let tmp = path.with_file_name("proj.vxlt.tmp"); // what the helper writes
+
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
+        world.set_voxel(40, 2, -3, Voxel::from_rgba(1, 2, 3, 200)); // forces a 2nd chunk
+        let state = EditorState {
+            brush_color: [12, 34, 56, 200],
+            brush_flags: 0b11, // emissive + metallic
+            brush_tint_zone: 2,
+            ..Default::default()
+        };
+
+        save_world_with_state(&world, state.clone(), &path).unwrap();
+        assert!(path.exists(), "save produced no file");
+        assert!(!tmp.exists(), "temp file left behind after a successful save");
+
+        let (loaded_world, loaded_state) = load_world_with_state(&path).unwrap();
+        assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
+        assert_eq!(
+            loaded_world.get_voxel(40, 2, -3),
+            Voxel::from_rgba(1, 2, 3, 200)
+        );
+        assert_eq!(loaded_state.brush_color, [12, 34, 56, 200]);
+        assert_eq!(loaded_state.brush_flags, 0b11);
+        assert_eq!(loaded_state.brush_tint_zone, 2);
+
+        // A second save over the SAME path must replace it wholesale — the
+        // old red voxel is gone and the new green one is present (proves the
+        // rename swapped the file rather than appending / partially writing).
+        let mut world2 = World::new();
+        world2.set_voxel(5, 5, 5, Voxel::from_rgb(0, 255, 0));
+        save_world_with_state(&world2, EditorState::default(), &path).unwrap();
+        let (loaded2, _) = load_world_with_state(&path).unwrap();
+        assert!(
+            loaded2.get_voxel(0, 0, 0).is_air(),
+            "old content survived the overwrite"
+        );
+        assert_eq!(loaded2.get_voxel(5, 5, 5).g, 255);
+        assert!(!tmp.exists(), "temp file left behind after overwrite");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

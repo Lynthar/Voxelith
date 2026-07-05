@@ -36,12 +36,7 @@ impl App {
                 UiAction::PasteClipboard => self.paste_clipboard(false),
                 UiAction::DeleteSelection => self.delete_selection(),
                 UiAction::SelectAllSolid => self.select_all_solid(),
-                UiAction::Deselect => {
-                    self.selection_drag_anchor = None;
-                    self.selection_move_anchor = None;
-                    self.move_ghost_voxels.clear();
-                    self.editor.selection = None;
-                }
+                UiAction::Deselect => self.deselect(),
                 UiAction::RotateSelection { axis, quarter } => {
                     self.rotate_selection(axis, quarter);
                 }
@@ -202,22 +197,7 @@ impl App {
             return;
         }
 
-        let changes: Vec<VoxelChange> = patch
-            .voxels
-            .iter()
-            .filter_map(|&(pos, new_voxel)| {
-                let old_voxel = self.world.get_voxel(pos.0, pos.1, pos.2);
-                if old_voxel == new_voxel {
-                    None
-                } else {
-                    Some(VoxelChange {
-                        pos,
-                        old_voxel,
-                        new_voxel,
-                    })
-                }
-            })
-            .collect();
+        let changes = self.patch_to_changes(&patch);
 
         if changes.is_empty() {
             self.ui
@@ -241,6 +221,30 @@ impl App {
         self.ui.set_status(status);
 
         self.invalidate_preview();
+    }
+
+    /// Turn a generated [`VoxelPatch`] into an undoable `SetVoxels`
+    /// change list. Shared by the procgen panel, the graph, and the AI
+    /// result path so all three treat duplicate and identity writes
+    /// identically:
+    /// 1. **Dedupe by position, last write wins** (`VoxelPatch::
+    ///    dedup_last_write`) — otherwise re-running a generator that
+    ///    overwrites a cell flips it each run (see that method's docs).
+    /// 2. **Drop identity writes** (cell already equals the final value)
+    ///    so re-running over an unchanged world pushes no no-op undo entry.
+    pub(super) fn patch_to_changes(&self, patch: &VoxelPatch) -> Vec<VoxelChange> {
+        patch
+            .dedup_last_write()
+            .into_iter()
+            .filter_map(|(pos, new_voxel)| {
+                let old_voxel = self.world.get_voxel(pos.0, pos.1, pos.2);
+                (old_voxel != new_voxel).then_some(VoxelChange {
+                    pos,
+                    old_voxel,
+                    new_voxel,
+                })
+            })
+            .collect()
     }
 
     /// Run the procgen panel's currently-selected generator and apply
@@ -269,27 +273,9 @@ impl App {
             return;
         }
 
-        // Convert patch -> set_voxels command. The current voxel at
-        // each position becomes `old_voxel` so undo restores the
-        // pre-generation state. Identity writes are dropped so we
-        // don't push a no-op command (e.g. re-running an unchanged
-        // generator over the same world).
-        let changes: Vec<VoxelChange> = patch
-            .voxels
-            .iter()
-            .filter_map(|&(pos, new_voxel)| {
-                let old_voxel = self.world.get_voxel(pos.0, pos.1, pos.2);
-                if old_voxel == new_voxel {
-                    None
-                } else {
-                    Some(VoxelChange {
-                        pos,
-                        old_voxel,
-                        new_voxel,
-                    })
-                }
-            })
-            .collect();
+        // Convert patch -> undoable set_voxels command: dedupe by position
+        // then drop identity writes (see `patch_to_changes`).
+        let changes = self.patch_to_changes(&patch);
 
         if changes.is_empty() {
             self.ui

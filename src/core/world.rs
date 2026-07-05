@@ -222,6 +222,17 @@ impl World {
         self.chunks.iter()
     }
 
+    /// Chunk positions in deterministic (x, y, z) order. The backing
+    /// store is a `HashMap`, whose iteration order is unspecified and
+    /// re-seeded per process, so any export that must be byte-reproducible
+    /// across runs (`.glb` / `.obj` / `.vox` / `.vxlt`) walks this instead
+    /// of `chunks()` directly, fetching each lock with `get_chunk`.
+    pub fn sorted_chunk_positions(&self) -> Vec<ChunkPos> {
+        let mut positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
+        positions.sort_unstable_by_key(|p| (p.x, p.y, p.z));
+        positions
+    }
+
     /// Get number of loaded chunks
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
@@ -385,6 +396,34 @@ mod tests {
 
         // Unset voxel should be air
         assert!(world.get_voxel(0, 0, 0).is_air());
+    }
+
+    #[test]
+    fn sorted_chunk_positions_are_ordered_regardless_of_insertion() {
+        // Export determinism (#11) hinges on this: whatever order chunks
+        // were created in, `sorted_chunk_positions` returns them ascending
+        // by (x, y, z). Insert across several chunks in a scrambled order
+        // and assert the result is fully sorted and loses nothing.
+        let mut world = World::new();
+        let cells = [
+            (40, 0, 40),
+            (-40, 0, 0),
+            (0, 40, -40),
+            (40, 0, -40),
+            (-40, -40, 40),
+            (0, 0, 0),
+        ];
+        for &(x, y, z) in &cells {
+            world.set_voxel(x, y, z, Voxel::from_rgb(1, 2, 3));
+        }
+        let sorted = world.sorted_chunk_positions();
+        for w in sorted.windows(2) {
+            assert!(
+                (w[0].x, w[0].y, w[0].z) <= (w[1].x, w[1].y, w[1].z),
+                "sorted_chunk_positions returned out-of-order positions"
+            );
+        }
+        assert_eq!(sorted.len(), world.chunk_count());
     }
 
     #[test]

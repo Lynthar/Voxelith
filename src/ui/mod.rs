@@ -1474,9 +1474,19 @@ impl Ui {
                     );
                     ui.separator();
                     ui.menu_button("+ Add Node", |ui| {
+                        let has_output = graph
+                            .nodes
+                            .iter()
+                            .any(|n| matches!(n.kind, NodeKind::Output { .. }));
                         for k in node_menu_options() {
-                            if ui.button(k.0).clicked() {
-                                add_kind = Some((k.1)());
+                            let kind = (k.1)();
+                            // Only one Output (sink) is allowed — evaluation
+                            // needs a single pipeline result. Gray the entry
+                            // out once one exists (#33).
+                            let enabled =
+                                !(has_output && matches!(kind, NodeKind::Output { .. }));
+                            if ui.add_enabled(enabled, egui::Button::new(k.0)).clicked() {
+                                add_kind = Some(kind);
                                 ui.close_menu();
                             }
                             if k.2 {
@@ -1522,7 +1532,7 @@ impl Ui {
                         egui::vec2(sidebar_w, avail.y),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            graph_sidebar(ui, graph, *selected);
+                            graph_sidebar(ui, graph, *selected, &mut wire_action);
                         },
                     );
                 });
@@ -2392,7 +2402,12 @@ fn input_socket_screen(
 ) -> egui::Pos2 {
     let body = node_screen_rect(canvas_min, node);
     match &node.kind {
-        NodeKind::Combine { .. } => {
+        // Both 2-input kinds get vertically-stacked sockets so slot 0 and
+        // slot 1 land at DISTINCT positions. Mask was missing here, so its
+        // two sockets overlapped at body-center and the wire hit-test —
+        // which stops at the first slot within radius — could never reach
+        // slot 1 (#17).
+        NodeKind::Combine { .. } | NodeKind::Mask { .. } => {
             let body_inner_top = body.min.y + NODE_HEADER_H + 14.0;
             let y = body_inner_top + slot as f32 * 22.0;
             egui::pos2(body.min.x, y)
@@ -2481,16 +2496,14 @@ fn graph_canvas(
     for node in &graph.nodes {
         let in_count = PipelineGraph::input_count(&node.kind);
         for slot in 0..in_count {
-            let input_id = match (slot, &node.kind) {
-                (
-                    0,
-                    NodeKind::Translate { input, .. } | NodeKind::Output { input },
-                ) => *input,
-                (0, NodeKind::Combine { a, .. }) => *a,
-                (1, NodeKind::Combine { b, .. }) => *b,
-                _ => None,
+            // Canonical accessor so EVERY node kind's slots are covered.
+            // The old inline match omitted Filter's input and both of
+            // Mask's slots (they fell through to `None`), so those wires
+            // were never drawn. `get_input` is Ok for any in-range slot on
+            // an existing node, so `.ok().flatten()` = the wired source.
+            let Some(src_id) = graph.get_input(node.id, slot).ok().flatten() else {
+                continue;
             };
-            let Some(src_id) = input_id else { continue };
             let Some(src) = graph.get(src_id) else { continue };
             let from = output_socket_screen(canvas_rect.min, src);
             let to = input_socket_screen(canvas_rect.min, node, slot);
@@ -2728,6 +2741,7 @@ fn graph_sidebar(
     ui: &mut egui::Ui,
     graph: &mut PipelineGraph,
     selected: Option<NodeId>,
+    wire_action: &mut Option<(NodeId, usize, Option<NodeId>)>,
 ) {
     ui.heading("Inspector");
     ui.add_space(4.0);
@@ -2739,9 +2753,13 @@ fn graph_sidebar(
 
     // Snapshot of node ids for input ComboBoxes (avoids holding an
     // immutable borrow on graph.nodes while we mutate one node below).
+    // Candidate sources = every node that HAS an output socket. Output
+    // nodes are sinks (no output), so excluding them stops the dropdown
+    // from offering a node that produces nothing (#18).
     let candidates: Vec<(NodeId, String)> = graph
         .nodes
         .iter()
+        .filter(|n| PipelineGraph::has_output(&n.kind))
         .map(|n| (n.id, format!("#{}: {}", n.id, n.kind.label())))
         .collect();
 
@@ -2762,7 +2780,7 @@ fn graph_sidebar(
             NodeKind::Tree(t) => tree_params_ui(ui, t),
             NodeKind::Wfc(t) => wfc_params_ui(ui, t),
             NodeKind::Translate { input, dx, dy, dz } => {
-                input_slot(ui, "Input", input, &candidates, id);
+                input_slot(ui, "Input", *input, id, 0, &candidates, wire_action);
                 ui.horizontal(|ui| {
                     ui.label("Offset");
                     ui.add(egui::DragValue::new(dx).prefix("x:"));
@@ -2771,12 +2789,12 @@ fn graph_sidebar(
                 });
             }
             NodeKind::Filter { input, predicate } => {
-                input_slot(ui, "Input", input, &candidates, id);
+                input_slot(ui, "Input", *input, id, 0, &candidates, wire_action);
                 filter_predicate_ui(ui, predicate, id);
             }
             NodeKind::Mask { subject, mask, mode } => {
-                input_slot(ui, "Subject", subject, &candidates, id);
-                input_slot(ui, "Mask", mask, &candidates, id);
+                input_slot(ui, "Subject", *subject, id, 0, &candidates, wire_action);
+                input_slot(ui, "Mask", *mask, id, 1, &candidates, wire_action);
                 ui.horizontal(|ui| {
                     ui.label("Mode");
                     egui::ComboBox::from_id_salt(("mask_mode_sb", id))
@@ -2805,8 +2823,8 @@ fn graph_sidebar(
                 );
             }
             NodeKind::Combine { a, b, op } => {
-                input_slot(ui, "Input A", a, &candidates, id);
-                input_slot(ui, "Input B", b, &candidates, id);
+                input_slot(ui, "Input A", *a, id, 0, &candidates, wire_action);
+                input_slot(ui, "Input B", *b, id, 1, &candidates, wire_action);
                 ui.horizontal(|ui| {
                     ui.label("Operation");
                     egui::ComboBox::from_id_salt(("combine_op_sb", id))
@@ -2827,7 +2845,7 @@ fn graph_sidebar(
                 });
             }
             NodeKind::Output { input } => {
-                input_slot(ui, "Input", input, &candidates, id);
+                input_slot(ui, "Input", *input, id, 0, &candidates, wire_action);
             }
         });
 }
@@ -2948,35 +2966,48 @@ fn filter_predicate_ui(
     }
 }
 
-/// ComboBox for picking one of the graph's existing nodes as an input.
-/// `self_id` is excluded from the list (a node can't connect to itself).
-/// "(none)" is always an option for clearing the slot.
+/// ComboBox for picking one of the graph's existing nodes as a node's
+/// input slot. Reports the pick through `wire_action` (rather than
+/// mutating the slot) so the caller can route it through
+/// `PipelineGraph::set_input`, which rejects and rolls back cycles.
+/// `target` (the node itself) is skipped in the list; Output nodes are
+/// pre-excluded from `candidates` upstream. "(none)" clears the slot.
 fn input_slot(
     ui: &mut egui::Ui,
     label: &str,
-    input: &mut Option<NodeId>,
+    current: Option<NodeId>,
+    target: NodeId,
+    slot: usize,
     candidates: &[(NodeId, String)],
-    self_id: NodeId,
+    wire_action: &mut Option<(NodeId, usize, Option<NodeId>)>,
 ) {
     ui.horizontal(|ui| {
         ui.label(label);
-        let current = match input {
+        let current_label = match current {
             Some(id) => candidates
                 .iter()
-                .find(|(c, _)| *c == *id)
+                .find(|(c, _)| *c == id)
                 .map(|(_, l)| l.as_str())
                 .unwrap_or("(missing)"),
             None => "(none)",
         };
-        egui::ComboBox::from_id_salt(("input_slot", label, self_id))
-            .selected_text(current)
+        egui::ComboBox::from_id_salt(("input_slot", label, target))
+            .selected_text(current_label)
             .show_ui(ui, |ui| {
-                ui.selectable_value(input, None, "(none)");
+                // Report the pick through `wire_action` instead of writing
+                // the slot directly, so the caller routes it through
+                // `set_input` (cycle-checked). A direct write here could
+                // persist a cyclic graph into prefs (#18).
+                if ui.selectable_label(current.is_none(), "(none)").clicked() {
+                    *wire_action = Some((target, slot, None));
+                }
                 for (cid, clabel) in candidates {
-                    if *cid == self_id {
+                    if *cid == target {
                         continue;
                     }
-                    ui.selectable_value(input, Some(*cid), clabel);
+                    if ui.selectable_label(current == Some(*cid), clabel).clicked() {
+                        *wire_action = Some((target, slot, Some(*cid)));
+                    }
                 }
             });
     });

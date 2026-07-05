@@ -105,7 +105,15 @@ impl Command {
                 world.set_voxel(pos.0, pos.1, pos.2, *old_voxel);
             }
             Command::SetVoxels { changes } => {
-                for change in changes {
+                // Reverse order: if two changes ever share a position (a
+                // generator patch that wrote a cell twice, or a symmetry
+                // brush stroke mirroring a cell onto itself), the EARLIEST
+                // record holds the true pre-command value and must be
+                // restored LAST to win. Forward replay would leave a later
+                // record's old_voxel. (Generator patches are now de-duped
+                // upstream, so same-position olds are equal anyway — this
+                // keeps undo exact for any caller regardless.)
+                for change in changes.iter().rev() {
                     world.set_voxel(change.pos.0, change.pos.1, change.pos.2, change.old_voxel);
                 }
             }

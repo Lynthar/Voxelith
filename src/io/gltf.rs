@@ -228,8 +228,10 @@ pub fn export_glb_with_transform(
     // Accumulate combined vertex / index buffers per material group.
     let mut groups: Vec<GroupBuffers> = (0u8..4).map(GroupBuffers::new).collect();
     let mut chunk_count = 0usize;
-    for (chunk_pos, _) in world.chunks() {
-        let per_material = mesh_chunk_by_material(world, *chunk_pos);
+    // Deterministic chunk order (HashMap iteration is per-process random)
+    // so repeated exports of the same world are byte-identical (#11).
+    for chunk_pos in world.sorted_chunk_positions() {
+        let per_material = mesh_chunk_by_material(world, chunk_pos);
         if !per_material.is_empty() {
             chunk_count += 1;
         }
@@ -518,10 +520,18 @@ fn write_glb_groups(
     // Base document; geometry-only keys (meshes/materials/accessors/
     // bufferViews/buffers) are attached only when groups exist, and
     // `nodes` only when there's at least one node (mesh or socket).
+    // glTF `scene.nodes` has minItems:1 when present, so omit the key
+    // entirely for a geometry-and-socket-free scene rather than writing an
+    // empty array (which fails the Khronos validator) (#20).
+    let scene = if scene_nodes.is_empty() {
+        json!({})
+    } else {
+        json!({ "nodes": scene_nodes })
+    };
     let mut json_value = json!({
         "asset": { "version": "2.0", "generator": "Voxelith" },
         "scene": 0,
-        "scenes": [{ "nodes": scene_nodes }],
+        "scenes": [scene],
     });
     if !nodes.is_empty() {
         json_value["nodes"] = json!(nodes);
@@ -703,7 +713,12 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
         assert_eq!(json["asset"]["version"], "2.0");
-        assert_eq!(json["scenes"][0]["nodes"].as_array().unwrap().len(), 0);
+        // Empty world: the scene must OMIT `nodes` entirely — glTF schema
+        // requires `scene.nodes` to have minItems:1 when present (#20).
+        assert!(
+            json["scenes"][0].get("nodes").is_none(),
+            "empty scene must omit the `nodes` key, not write an empty array"
+        );
         assert!(json["meshes"].is_null(), "no meshes for empty world");
 
         let _ = std::fs::remove_file(&path);
