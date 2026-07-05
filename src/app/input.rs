@@ -672,7 +672,7 @@ impl App {
             Tool::Line => line_voxels(anchor, end),
             Tool::Box => box_voxels(anchor, end),
             Tool::Sphere => sphere_voxels(anchor, end),
-            Tool::Cylinder => cylinder_voxels(anchor, end),
+            Tool::Cylinder => cylinder_voxels(anchor, end, Some(drag.plane.axis)),
             _ => return, // anchor only set for shape tools, defensive
         };
 

@@ -17,9 +17,11 @@
 //! The whole pipeline runs as a single async task on `App::ai_runtime`.
 //! Cancellation is cooperative, checked between stages. During the poll
 //! phase — where the remote GPU job actually runs and bills — a Cancel
-//! is observed within one poll interval (≈ 2 s) and also fires a
-//! best-effort `PUT` to the queue `cancel_url`, so fal.ai drops/stops
-//! the job instead of finishing it for nothing. After the job has
+//! is observed at the top of the next poll iteration (≈ 2 s typically,
+//! and at most one status-GET timeout — `STATUS_POLL_TIMEOUT`, ~30 s — if
+//! a poll happens to be in flight) and also fires a best-effort `PUT` to
+//! the queue `cancel_url`, so fal.ai drops/stops the job instead of
+//! finishing it for nothing. After the job has
 //! COMPLETED (result fetch → GLB download → voxelize) a Cancel just
 //! discards local work at the next checkpoint; those stages aren't
 //! interrupted mid-flight, but there's no remote cost left to save.
@@ -31,7 +33,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
@@ -54,11 +56,19 @@ const TEXT_TO_3D_ENDPOINT: &str =
 /// real bottleneck (the GPU job).
 const POLL_INTERVAL: Duration = Duration::from_millis(2000);
 
-/// Hard cap on poll attempts. 150 × 2 s ≈ 5 minutes. Hunyuan3D V3
-/// usually finishes in 10–30 s; this only fires when fal.ai is
-/// degraded or the queue is unusually long. Worker emits Failed with
-/// "Timeout" rather than wedge forever.
-const MAX_POLL_ATTEMPTS: u32 = 150;
+/// Wall-clock cap on the whole poll phase, measured with `Instant`
+/// rather than an attempt count: `attempts × per-request-timeout` let a
+/// hung or throttled gateway stretch the job far past its nominal window
+/// (a black-holed GET could otherwise hang for the client's full global
+/// timeout each iteration). Hunyuan3D V3 usually finishes in 10–30 s;
+/// this only fires when fal.ai is degraded. Worker emits Failed rather
+/// than wedge forever.
+const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Per-request timeout for a single status GET — far below the client's
+/// generous global timeout (which is sized for the multi-MB GLB
+/// download). Bounds each poll so `POLL_TIMEOUT` is actually honored.
+const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Built-in fal.ai provider. Stateless except for a connection-pooled
 /// reqwest client; loads the API key from the OS keychain on each
@@ -109,7 +119,10 @@ impl AiProvider for FalHunyuanProvider {
             // Failed { "Cancelled" } via `bail!`.
             if let Err(e) = run_pipeline(&http, request, &cancel, &events_tx).await {
                 let _ = events_tx.send(JobEvent::Failed {
-                    message: e.to_string(),
+                    // `{:#}` walks anyhow's full context chain ("… : … :
+                    // root cause") instead of only the outermost message,
+                    // so a buried network/parse cause isn't lost.
+                    message: format!("{:#}", e),
                 });
             }
         });
@@ -295,7 +308,9 @@ async fn fal_poll_until_done(
     cancel: &AtomicBool,
     events_tx: &mpsc::Sender<JobEvent>,
 ) -> Result<()> {
-    for attempt in 0..MAX_POLL_ATTEMPTS {
+    let start = Instant::now();
+    let mut polls: u32 = 0;
+    loop {
         if cancel.load(Ordering::Acquire) {
             // User cancelled while the remote job is queued/running.
             // Tell fal.ai to stop it (best-effort) so it doesn't keep
@@ -305,19 +320,34 @@ async fn fal_poll_until_done(
             }
             bail!("Cancelled");
         }
+        // Wall-clock cap (not an attempt count): a slow/hung gateway
+        // can't stretch the job past this. On timeout, best-effort tell
+        // fal.ai to stop the abandoned job so it stops billing.
+        if start.elapsed() >= POLL_TIMEOUT {
+            if let Some(url) = cancel_url {
+                fal_cancel(http, api_key, url).await;
+            }
+            bail!(
+                "Provider didn't finish within {:?} ({} polls)",
+                POLL_TIMEOUT,
+                polls
+            );
+        }
         sleep(POLL_INTERVAL).await;
+        polls += 1;
 
         let resp = match http
             .get(status_url)
             .header("Authorization", format!("Key {}", api_key))
+            .timeout(STATUS_POLL_TIMEOUT)
             .send()
             .await
         {
             Ok(r) => r,
-            // Transient network errors during polling are common
-            // (proxy hiccup, etc). Don't fail the whole job — wait
-            // for the next poll. If cancel hits or we exceed the
-            // attempt cap, the surrounding loop handles it.
+            // Transient network errors during polling are common (proxy
+            // hiccup, or a GET that hit its short per-request timeout).
+            // Don't fail the whole job — wait for the next poll; the
+            // elapsed cap above bounds the total wait.
             Err(_) => continue,
         };
 
@@ -347,13 +377,12 @@ async fn fal_poll_until_done(
             "COMPLETED" => return Ok(()),
             "FAILED" | "ERROR" => bail!(
                 "Provider job failed (after {} polls, queue_position={:?})",
-                attempt + 1,
+                polls,
                 status.queue_position
             ),
             _ => {} // IN_QUEUE / IN_PROGRESS — keep polling
         }
     }
-    Err(anyhow!("Provider didn't finish within {} polls", MAX_POLL_ATTEMPTS))
 }
 
 async fn fal_fetch_result(

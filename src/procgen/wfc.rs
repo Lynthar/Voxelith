@@ -2,10 +2,13 @@
 //!
 //! 2D collapse on a tile grid (X-Z plane). Each grid cell occupies a
 //! `TILE_SIZE³` voxel block. Tiles connect at face boundaries via
-//! integer connector IDs — adjacency is allowed iff some allowed tile
-//! on this side has the same connector ID as some allowed tile on the
-//! other side. Y is unconstrained: every tile fills the same Y range,
-//! so we don't collapse vertically.
+//! integer connector IDs. Two touching faces fit when one's connector is
+//! the *complement* of the other's: symmetric IDs are self-complement
+//! (like matches like), while the directional doorway pair (mouth `2` /
+//! floor socket `3`) complements only each other. The grid boundary
+//! counts as connector `0`, so nothing opens off the edge. Y is
+//! unconstrained: every tile fills the same Y range, so we don't collapse
+//! vertically.
 //!
 //! No backtracking. If propagation reduces a cell's domain to empty
 //! we substitute the fallback (`empty`) tile during output. Quality
@@ -99,13 +102,15 @@ impl WfcTileset {
 
 /// 19-tile dungeon tileset: empty / floor / 2 straight walls / 4 corners /
 /// 4 T-junctions / 1 cross / 2 walls-with-door / 4 floor-with-door-mouth.
-/// Connector IDs:
-/// - `0` = "open" (no wall on that face — anything else with `0` fits)
+/// Connector IDs (matched by complement — see the module docs):
+/// - `0` = "open" (no wall on that face — fits any other `0`, including
+///         the grid boundary)
 /// - `1` = "wall" (wall continues across the face — only other walls fit)
-/// - `2` = "doorway mouth" (this face is the open side of a doorway and
-///         must be matched by a floor-with-door-mouth tile, so the door
-///         is guaranteed to open onto walkable ground rather than into
-///         `empty`)
+/// - `2` = "doorway mouth" (a wall's open door side; complemented only by
+///         `3`, so a mouth must seat against a door-socket floor and can
+///         never face another mouth or the grid edge)
+/// - `3` = "doorway socket" (the floor side that receives a door mouth;
+///         carried by the `floor_door_*` tiles)
 ///
 /// Floor is weighted heaviest so output is mostly open ground;
 /// T-junctions, cross, and door tiles are progressively rarer to keep
@@ -229,17 +234,19 @@ fn dungeon_tileset() -> Tileset {
         weight: 0.5,
     });
 
-    // Floor-with-door-mouth: identical geometry to plain floor, but
-    // exposes connector 2 on exactly one face. Four directional variants
-    // cover the four cardinal directions a door can open in. Weight is
-    // low — these tiles only need to be available when a door forces
-    // them; otherwise plain floor (weight 4.0) overwhelmingly wins the
-    // weighted sample.
+    // Floor-with-door-socket: identical geometry to plain floor, but
+    // exposes the door-socket connector 3 on exactly one face — the
+    // complement of a wall's door mouth (2), so a door always seats
+    // against one of these and opens onto walkable floor. Four directional
+    // variants cover the four cardinal directions a door can open in.
+    // Weight is low — these tiles only need to be available when a door
+    // forces them; otherwise plain floor (weight 4.0) overwhelmingly wins
+    // the weighted sample.
     for (name, connectors) in [
-        ("floor_door_px", [2u8, 0, 0, 0]),
-        ("floor_door_nx", [0, 2, 0, 0]),
-        ("floor_door_pz", [0, 0, 2, 0]),
-        ("floor_door_nz", [0, 0, 0, 2]),
+        ("floor_door_px", [3u8, 0, 0, 0]),
+        ("floor_door_nx", [0, 3, 0, 0]),
+        ("floor_door_pz", [0, 0, 3, 0]),
+        ("floor_door_nz", [0, 0, 0, 3]),
     ] {
         tiles.push(Tile {
             name,
@@ -584,6 +591,53 @@ impl VoxelGenerator for WfcGenerator {
         let weights: Vec<f32> =
             tileset.tiles.iter().map(|t| t.weight).collect();
 
+        // Treat the grid boundary as connector 0: any face pointing off
+        // the grid must carry connector 0, so wall ends and door mouths
+        // can't open into the void past the edge (#32). Filter each border
+        // cell's domain up front, then propagate the fallout inward so the
+        // interior is arc-consistent before the first observation.
+        {
+            let tiles = &tileset.tiles;
+            let mut seeded: Vec<usize> = Vec::new();
+            for cz in 0..d {
+                for cx in 0..w {
+                    let cell_i = cz * w + cx;
+                    let mut allowed = cells[cell_i].allowed;
+                    // (this face points off-grid, face index) per side.
+                    let edges = [
+                        (cx + 1 == w, 0usize), // +X
+                        (cx == 0, 1),          // -X
+                        (cz + 1 == d, 2),      // +Z
+                        (cz == 0, 3),          // -Z
+                    ];
+                    for (on_edge, face) in edges {
+                        if !on_edge {
+                            continue;
+                        }
+                        // The boundary exposes connector 0; a tile may keep
+                        // this cell only if its edge-facing connector is the
+                        // complement of 0 (i.e. 0 itself).
+                        let mut filtered = 0u64;
+                        for i in 0..n_tiles {
+                            if allowed & (1u64 << i) != 0
+                                && tiles[i].connectors[face] == 0
+                            {
+                                filtered |= 1u64 << i;
+                            }
+                        }
+                        allowed = filtered;
+                    }
+                    if allowed != cells[cell_i].allowed {
+                        cells[cell_i].allowed = allowed;
+                        seeded.push(cell_i);
+                    }
+                }
+            }
+            for cell_i in seeded {
+                propagate(&mut cells, w, d, cell_i, tiles);
+            }
+        }
+
         // Main collapse loop. Pick the lowest-entropy cell, observe
         // it, propagate. Bail when nothing's left to collapse.
         loop {
@@ -704,6 +758,21 @@ fn collapse(cell: &mut Cell, weights: &[f32], rng: &mut StdRng) {
     cell.collapsed = true;
 }
 
+/// Connector compatibility is defined by *complement*: two adjoining
+/// faces fit when one's connector equals the complement of the other's.
+/// Symmetric connectors are their own complement (grass/open `0`, wall
+/// `1` — they match like-for-like). The doorway pair is directional: a
+/// wall's door mouth (`2`) is complemented only by a floor's door socket
+/// (`3`), so a mouth can never seat against another mouth, and a door
+/// always opens onto walkable floor (#32).
+fn connector_complement(id: u8) -> u8 {
+    match id {
+        2 => 3,
+        3 => 2,
+        other => other,
+    }
+}
+
 /// Constraint propagation. After a cell shrinks, its neighbors' domains
 /// may be reducible too (only tiles whose facing connector is matched
 /// by some tile still allowed in the source cell can survive). Whenever
@@ -719,6 +788,14 @@ fn propagate(
     let mut stack = vec![start];
     while let Some(idx) = stack.pop() {
         let allowed = cells[idx].allowed;
+        // An empty domain is a dead end, not a constraint. Propagating
+        // from it would leave `my_conns` empty and force every neighbor's
+        // `new_allowed` to 0 — one over-constrained cell would cascade to
+        // fallback across the whole grid. The single failed cell is
+        // counted at emit time; it must not poison its neighbors (#23).
+        if allowed == 0 {
+            continue;
+        }
         let cx = idx % w;
         let cz = idx / w;
 
@@ -737,6 +814,13 @@ fn propagate(
                 continue;
             }
             let nidx = nz as usize * w + nx as usize;
+            // A collapsed cell is observed and final. With no backtracking
+            // we keep its chosen tile even if this neighbor turns out
+            // incompatible, rather than zeroing its domain into a failure
+            // and cascading (#23).
+            if cells[nidx].collapsed {
+                continue;
+            }
 
             // Connectors my cell currently exposes on `my_face`. The
             // bitset is over connector IDs (assumed to fit in u32).
@@ -747,14 +831,17 @@ fn propagate(
                 }
             }
 
-            // Filter the neighbor's domain to tiles whose facing
-            // connector matches at least one of mine.
+            // Filter the neighbor's domain to tiles whose facing connector
+            // is compatible with one of mine. Compatibility is by
+            // connector *complement* (symmetric IDs match themselves; the
+            // directional doorway pair 2/3 match only each other) so a
+            // door mouth can't seat against another mouth (#32).
             let mut new_allowed: u64 = 0;
             for j in 0..tiles.len() {
                 if cells[nidx].allowed & (1u64 << j) == 0 {
                     continue;
                 }
-                let c = tiles[j].connectors[neighbor_face];
+                let c = connector_complement(tiles[j].connectors[neighbor_face]);
                 if my_conns & (1u32 << c) != 0 {
                     new_allowed |= 1u64 << j;
                 }
@@ -762,9 +849,7 @@ fn propagate(
 
             if new_allowed != cells[nidx].allowed {
                 cells[nidx].allowed = new_allowed;
-                if !cells[nidx].collapsed {
-                    stack.push(nidx);
-                }
+                stack.push(nidx);
             }
         }
     }
@@ -864,12 +949,13 @@ mod tests {
                 "{} should share plain floor's geometry",
                 variant_name
             );
-            // Exactly one connector must be `2` (the door-mouth side);
-            // everything else stays at `0` (open).
-            let mouths = v.connectors.iter().filter(|&&c| c == 2).count();
+            // Exactly one connector must be the door socket `3` (the
+            // complement of a wall's door mouth); everything else stays
+            // at `0` (open).
+            let sockets = v.connectors.iter().filter(|&&c| c == 3).count();
             assert_eq!(
-                mouths, 1,
-                "{} should have exactly one door-mouth connector",
+                sockets, 1,
+                "{} should have exactly one door-socket connector",
                 variant_name
             );
         }
@@ -1021,6 +1107,110 @@ mod tests {
             assert!(*x >= 0 && *x < extent);
             assert!(*y >= 0 && *y < TILE_SIZE as i32);
             assert!(*z >= 0 && *z < extent);
+        }
+    }
+
+    // ---- WFC propagation / connector unit tests (#23, #32) ----------
+
+    fn conn_tile(connectors: [u8; 4]) -> Tile {
+        Tile {
+            name: "t",
+            connectors,
+            cells: [Voxel::AIR; TILE_VOLUME],
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn propagate_empty_domain_does_not_poison_neighbors() {
+        // #23: a cell whose domain collapsed to empty is a dead end. It
+        // must not force its neighbors to empty and cascade a single
+        // contradiction across the grid.
+        let tiles = [conn_tile([0, 0, 0, 0]), conn_tile([1, 1, 1, 1])];
+        let mut cells = vec![
+            Cell { allowed: 0, collapsed: false },    // empty (dead end)
+            Cell { allowed: 0b11, collapsed: false }, // full domain
+        ];
+        propagate(&mut cells, 1, 2, 0, &tiles);
+        assert_eq!(cells[1].allowed, 0b11, "empty domain cascaded into a neighbor");
+    }
+
+    #[test]
+    fn propagate_never_overwrites_a_collapsed_cell() {
+        // #23: two adjacent collapsed cells with incompatible facing
+        // connectors. Without backtracking we keep both chosen tiles
+        // rather than zeroing the neighbor into a failure.
+        let tiles = [conn_tile([0, 0, 0, 0]), conn_tile([1, 1, 1, 1])];
+        let mut cells = vec![
+            Cell { allowed: 0b10, collapsed: true }, // tile 1
+            Cell { allowed: 0b01, collapsed: true }, // tile 0 (incompatible)
+        ];
+        propagate(&mut cells, 1, 2, 0, &tiles);
+        assert_eq!(cells[1].allowed, 0b01, "collapsed cell's domain was overwritten");
+    }
+
+    #[test]
+    fn connector_complement_pairs_doorway_only() {
+        // #32: symmetric IDs self-complement; the doorway pair 2/3 cross.
+        assert_eq!(connector_complement(0), 0);
+        assert_eq!(connector_complement(1), 1);
+        assert_eq!(connector_complement(2), 3);
+        assert_eq!(connector_complement(3), 2);
+    }
+
+    #[test]
+    fn door_mouth_seats_only_against_floor_socket() {
+        // #32: a wall's door mouth (+Z face = 2) must accept a floor
+        // socket neighbor and reject another door-wall (mouth vs mouth).
+        let ts = WfcTileset::Dungeon.build();
+        let tiles = &ts.tiles;
+        let idx_of = |name: &str| tiles.iter().position(|t| t.name == name).unwrap();
+        let wall = idx_of("wall_x_with_door");
+        let floor_nz = idx_of("floor_door_nz");
+        let wall_bit = 1u64 << wall;
+        let full = (1u64 << tiles.len()) - 1;
+
+        // Cell 0 = the door-wall (collapsed); cell 1 is its +Z neighbor.
+        let mut cells = vec![
+            Cell { allowed: wall_bit, collapsed: true },
+            Cell { allowed: full, collapsed: false },
+        ];
+        propagate(&mut cells, 1, 2, 0, tiles);
+
+        assert!(
+            cells[1].allowed & (1u64 << floor_nz) != 0,
+            "a door mouth should accept a floor-socket neighbor"
+        );
+        assert!(
+            cells[1].allowed & wall_bit == 0,
+            "two door mouths must not seat against each other (#32)"
+        );
+    }
+
+    #[test]
+    fn boundary_forbids_open_connectors_on_grid_edge() {
+        // #32: on a 1×1 grid every face is a boundary (connector 0), so
+        // only all-0 tiles (empty / floor) may appear — never a wall or
+        // door whose connectors open off the single-cell edge. Floor lives
+        // at y=0; walls/doors rise to y>=1, so any voxel above the floor
+        // would prove the boundary constraint leaked.
+        for seed in 0..16 {
+            let g = WfcGenerator {
+                width: 1,
+                depth: 1,
+                origin: (0, 0, 0),
+                seed,
+                tileset: WfcTileset::Dungeon,
+                ..Default::default()
+            };
+            let p = g.generate().unwrap();
+            for ((_, y, _), _) in &p.voxels {
+                assert_eq!(
+                    *y, 0,
+                    "1×1 grid produced a wall/door voxel above the floor (seed {})",
+                    seed
+                );
+            }
         }
     }
 }

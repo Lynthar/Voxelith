@@ -139,6 +139,14 @@ pub struct Ui {
     /// Mirror of `App::ai_has_key` for the same reason. Refreshed by
     /// the App after every Save / Clear API key action.
     pub ai_has_key: bool,
+
+    /// Whether `.vox` import/export converts between MagicaVoxel's Z-up
+    /// convention and Voxelith's Y-up one (default on). Owned by the UI
+    /// (a File ▸ Import checkbox binds to it); `App::import_vox` /
+    /// `App::export_vox` read it at transfer time. A model authored in
+    /// MagicaVoxel stands upright when this is on; turn it off for a
+    /// `.vox` already authored Y-up.
+    pub convert_vox_axes: bool,
 }
 
 impl Ui {
@@ -157,6 +165,7 @@ impl Ui {
             ai_resolution: 64,
             ai_job: AiJobState::Idle,
             ai_has_key: false,
+            convert_vox_axes: true,
         }
     }
 
@@ -435,6 +444,14 @@ impl Ui {
                             self.state.request(UiAction::ImportVox);
                             ui.close_menu();
                         }
+                        ui.separator();
+                        ui.checkbox(&mut self.convert_vox_axes, "Convert Z-up ↔ Y-up")
+                            .on_hover_text(
+                                "MagicaVoxel is Z-up, Voxelith is Y-up. When on, \
+                                 .vox import and export rotate between the two so \
+                                 models stay upright. Turn off for a .vox already \
+                                 authored Y-up.",
+                            );
                     });
                     ui.menu_button("Export", |ui| {
                         if ui.button("MagicaVoxel (.vox)...").clicked() {

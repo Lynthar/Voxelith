@@ -33,9 +33,14 @@ pub enum Axis {
     Z,
 }
 
-/// Rotation amount in 90° increments. `Cw` and `Ccw` are clockwise /
-/// counter-clockwise when viewed from the positive end of the axis
-/// looking back toward the origin (right-hand-rule sign convention).
+/// Rotation amount in 90° increments. The sign is **right-handed and
+/// unified across all three axes**, so the same variant turns the same
+/// way whichever axis you rotate about. `Cw` is the +90° right-hand
+/// quarter turn (about X it sends +Y -> +Z, about Y +Z -> +X, about Z
+/// +X -> +Y), `Ccw` its -90° inverse, `Half` a 180° turn. The
+/// `Cw`/`Ccw` names are kept for API/UI stability even though a
+/// right-handed +90° reads as *counter*-clockwise seen from the axis's
+/// positive end looking toward the origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Quarter {
     Cw,
@@ -84,19 +89,21 @@ pub fn rotate_pos(
     let lz = pos.2 - sel.min.2;
 
     // Each arm spells out the local-coord transform for one (axis,
-    // quarter) pair. Reading: Y-CW seen from +Y looks down on the X-Z
-    // plane and rotates +X → +Z, so a cell at local (lx, lz) goes to
-    // (lz, W-1-lx) in the rotated D×W footprint. The other arms are
-    // analogous swaps; Half is just two CWs composed.
+    // quarter) pair. `Cw` is a right-handed +90° turn about `axis` and
+    // `Ccw` its -90° inverse, unified across all three axes so the same
+    // button turns the same way whichever axis you pick. A +90° turn
+    // cycles the two perpendicular axes by the right-hand rule: about
+    // X, +Y -> +Z; about Y, +Z -> +X; about Z, +X -> +Y. `Half` is two
+    // +90° turns composed and so is sign-agnostic.
     let (nlx, nly, nlz) = match (axis, quarter) {
         (Axis::Y, Quarter::Cw) => (lz, ly, w - 1 - lx),
         (Axis::Y, Quarter::Ccw) => (d - 1 - lz, ly, lx),
         (Axis::Y, Quarter::Half) => (w - 1 - lx, ly, d - 1 - lz),
-        (Axis::X, Quarter::Cw) => (lx, lz, h - 1 - ly),
-        (Axis::X, Quarter::Ccw) => (lx, d - 1 - lz, ly),
+        (Axis::X, Quarter::Cw) => (lx, d - 1 - lz, ly),
+        (Axis::X, Quarter::Ccw) => (lx, lz, h - 1 - ly),
         (Axis::X, Quarter::Half) => (lx, h - 1 - ly, d - 1 - lz),
-        (Axis::Z, Quarter::Cw) => (ly, w - 1 - lx, lz),
-        (Axis::Z, Quarter::Ccw) => (h - 1 - ly, lx, lz),
+        (Axis::Z, Quarter::Cw) => (h - 1 - ly, lx, lz),
+        (Axis::Z, Quarter::Ccw) => (ly, w - 1 - lx, lz),
         (Axis::Z, Quarter::Half) => (w - 1 - lx, h - 1 - ly, lz),
     };
 
@@ -274,6 +281,42 @@ mod tests {
         let s = Selection::from_corners((0, 0, 0), (3, 0, 1));
         assert_eq!(rotate_pos(s, Axis::Y, Quarter::Cw, (0, 0, 0)), (0, 0, 3));
         assert_eq!(rotate_pos(s, Axis::Y, Quarter::Cw, (3, 0, 1)), (1, 0, 0));
+    }
+
+    #[test]
+    fn rotate_x_cw_is_right_handed_plus_90() {
+        // Unified convention: Cw is a right-hand +90° about the axis.
+        // About X that sends +Y -> +Z, so a vertical 1×2×1 column (along
+        // +Y) becomes a 1×1×2 row along +Z: the bottom cell stays put and
+        // the top swings out to the far +Z cell.
+        let s = Selection::from_corners((0, 0, 0), (0, 1, 0)); // 1×2×1
+        assert_eq!(rotated_aabb(s, Axis::X, Quarter::Cw).size(), (1, 1, 2));
+        assert_eq!(rotate_pos(s, Axis::X, Quarter::Cw, (0, 0, 0)), (0, 0, 0));
+        assert_eq!(rotate_pos(s, Axis::X, Quarter::Cw, (0, 1, 0)), (0, 0, 1)); // +Y -> +Z
+    }
+
+    #[test]
+    fn rotate_z_cw_is_right_handed_plus_90() {
+        // About Z, right-hand +90° sends +X -> +Y: a horizontal 2×1×1 row
+        // becomes a 1×2×1 column along +Y.
+        let s = Selection::from_corners((0, 0, 0), (1, 0, 0)); // 2×1×1
+        assert_eq!(rotated_aabb(s, Axis::Z, Quarter::Cw).size(), (1, 2, 1));
+        assert_eq!(rotate_pos(s, Axis::Z, Quarter::Cw, (0, 0, 0)), (0, 0, 0));
+        assert_eq!(rotate_pos(s, Axis::Z, Quarter::Cw, (1, 0, 0)), (0, 1, 0)); // +X -> +Y
+    }
+
+    #[test]
+    fn all_axes_cw_share_right_handed_sign() {
+        // Regression guard for the pre-fix bug where X/Z-Cw were -90°
+        // while Y-Cw was +90°. Pin the "leading" +90° mapping of each
+        // axis so none can silently flip sign again:
+        // about X: +Y -> +Z ; about Y: +Z -> +X ; about Z: +X -> +Y.
+        let sx = Selection::from_corners((0, 0, 0), (0, 1, 0)); // along +Y
+        assert_eq!(rotate_pos(sx, Axis::X, Quarter::Cw, (0, 1, 0)), (0, 0, 1));
+        let sy = Selection::from_corners((0, 0, 0), (0, 0, 1)); // along +Z
+        assert_eq!(rotate_pos(sy, Axis::Y, Quarter::Cw, (0, 0, 1)), (1, 0, 0));
+        let sz = Selection::from_corners((0, 0, 0), (1, 0, 0)); // along +X
+        assert_eq!(rotate_pos(sz, Axis::Z, Quarter::Cw, (1, 0, 0)), (0, 1, 0));
     }
 
     #[test]

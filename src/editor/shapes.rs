@@ -150,12 +150,21 @@ pub fn sphere_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i
     out
 }
 
-/// Filled cylinder fitting in the closed AABB `[a, b]`. The cylinder's
-/// axis runs along whichever bbox dimension is largest (ties broken
-/// in favor of Y, then X, then Z — matches the most common voxel-art
-/// usage of "tall cylinder pillars"). The cross-section perpendicular
-/// to the axis is an ellipse spanning the other two dimensions.
-pub fn cylinder_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
+/// Filled cylinder fitting in the closed AABB `[a, b]`. `axis_hint`
+/// selects the axis of revolution (`0 = X`, `1 = Y`, `2 = Z`): shape
+/// drags pass `Some(plane.axis)` so the cylinder stands along the locked
+/// footprint plane's normal — the direction the height phase extrudes —
+/// honoring the two-phase "footprint then height" gesture (a ground
+/// footprint pulled up gives a *vertical* pillar, not a tube lying along
+/// the bbox's longest side). `None` falls back to the bbox's longest
+/// dimension (ties Y, then X, then Z), used only by geometry-only paths
+/// with no plane. The cross-section perpendicular to the axis is an
+/// ellipse spanning the other two dimensions.
+pub fn cylinder_voxels(
+    a: (i32, i32, i32),
+    b: (i32, i32, i32),
+    axis_hint: Option<usize>,
+) -> Vec<(i32, i32, i32)> {
     let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
     let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
     let (z0, z1) = (a.2.min(b.2), a.2.max(b.2));
@@ -163,14 +172,15 @@ pub fn cylinder_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32,
     let dy = y1 - y0;
     let dz = z1 - z0;
 
-    // 0 = X, 1 = Y, 2 = Z. Tie-break order: Y, X, Z.
-    let axis = if dy >= dx && dy >= dz {
+    // 0 = X, 1 = Y, 2 = Z. An explicit hint wins; otherwise the longest
+    // side, tie-break order Y, X, Z.
+    let axis = axis_hint.unwrap_or(if dy >= dx && dy >= dz {
         1
     } else if dx >= dz {
         0
     } else {
         2
-    };
+    });
 
     let mut out = Vec::new();
     for z in z0..=z1 {
@@ -311,7 +321,7 @@ mod tests {
         // Y is dominant: cell (cx, ymid, cz) must be inside; cells at
         // bbox X corners with mid Y/Z should be ON the boundary or
         // just outside (they're at the extreme of the cross-section).
-        let v = cylinder_voxels((0, 0, 0), (2, 10, 2));
+        let v = cylinder_voxels((0, 0, 0), (2, 10, 2), None);
         let set: HashSet<_> = v.into_iter().collect();
         // Center column is fully inside.
         for y in 0..=10 {
@@ -323,11 +333,35 @@ mod tests {
     fn test_cylinder_thin_dimension_does_not_panic() {
         // 1-cell-thick cross-section is the kind of degenerate case
         // that often divides by zero. Must produce a non-empty result.
-        let v = cylinder_voxels((0, 0, 0), (0, 5, 0));
+        let v = cylinder_voxels((0, 0, 0), (0, 5, 0), None);
         assert!(!v.is_empty());
         // Every cell along the line is included.
         for y in 0..=5 {
             assert!(v.contains(&(0, y, 0)), "missing y={}", y);
         }
+    }
+
+    #[test]
+    fn test_cylinder_axis_hint_overrides_longest_side() {
+        // A ground footprint 10 wide in X and Z pulled up only 4 in Y:
+        // the bbox's longest side is X/Z, so the longest-side heuristic
+        // would lay the tube down horizontally. An explicit Y hint (the
+        // locked footprint plane's normal) must keep it a vertical pillar.
+        let a = (0, 0, 0);
+        let b = (9, 3, 9); // 10 × 4 × 10 — longest side is X/Z, not Y
+        let vertical: HashSet<_> = cylinder_voxels(a, b, Some(1)).into_iter().collect();
+        let heuristic: HashSet<_> = cylinder_voxels(a, b, None).into_iter().collect();
+
+        // Vertical pillar: full height at the X-Z center; the X-Z corner
+        // sits outside the circular cross-section.
+        for y in 0..=3 {
+            assert!(vertical.contains(&(5, y, 5)), "center column missing at y={}", y);
+        }
+        assert!(!vertical.contains(&(0, 2, 0)), "X-Z corner must be outside a Y pillar");
+
+        // With no hint the heuristic orients the tube horizontally, so
+        // that same corner cell lands inside its cross-section — proof
+        // the hint actually changed the orientation.
+        assert!(heuristic.contains(&(0, 2, 0)));
     }
 }

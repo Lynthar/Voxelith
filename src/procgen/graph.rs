@@ -391,8 +391,10 @@ impl PipelineGraph {
     /// `new_input` is `Some`), reachability from `target` is checked
     /// before committing — if the proposed wire would form a cycle,
     /// the change is reverted and `GraphError::Cycle` is returned.
-    /// `target` must exist; sources have no input slots and return
-    /// `Err(DanglingReference)` instead of silently no-op'ing.
+    /// `target` must exist (a missing node is `Err(DanglingReference)`,
+    /// surfaced by the `get_input` call below). A source node has no input
+    /// slots, so setting one on it is a silent no-op: the tentative apply
+    /// does nothing and the call returns `Ok(())`.
     pub fn set_input(
         &mut self,
         target: NodeId,

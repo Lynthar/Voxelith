@@ -60,29 +60,14 @@ impl App {
                     self.replace_scene(|app| app.create_pyramid((0, 0, 0), 10));
                 }
                 UiAction::ResetCamera => {
-                    // Reset camera target to the scene's AABB center
-                    // (or origin if the world is empty) so the default
-                    // view always faces the model. Pre-fix this set
-                    // target to ZERO unconditionally, which placed the
-                    // orbit pivot underground for any scene whose
-                    // voxels sit above y=0.
-                    let target = self
-                        .world
-                        .scene_center()
-                        .unwrap_or(glam::Vec3::ZERO);
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.camera.target = target;
-                        renderer.camera_controller.distance = 40.0;
-                        renderer.camera_controller.yaw = 0.0;
-                        renderer.camera_controller.pitch = 0.5;
-                        // Apply immediately so camera.position matches the
-                        // new orbit state — without this, the camera would
-                        // appear "stuck" until the next orbit drag, and
-                        // that drag would start with a visible teleport.
-                        renderer
-                            .camera_controller
-                            .update_camera_position(&mut renderer.camera);
-                    }
+                    // "Reset Camera" recenters the orbit pivot on the
+                    // scene while preserving the current view direction —
+                    // identical to the F key (both route through
+                    // recenter_camera_on_scene). Snapping back to a fixed
+                    // default orientation is the job of SetCameraView
+                    // (Top/Front/Side), not this action. No-op on an empty
+                    // world (nothing to focus on).
+                    self.recenter_camera_on_scene();
                 }
                 UiAction::SetCameraView(view) => {
                     if let Some(renderer) = &mut self.renderer {
@@ -303,8 +288,10 @@ impl App {
         self.ui.set_status(status);
 
         // The just-applied geometry would otherwise double-render with
-        // the preview overlay on top of it. Clear the preview; it'll
-        // regenerate on the next param change if still enabled.
+        // the preview overlay on top of it. Clear the preview; if the
+        // generator panel is still open the debounced (~150 ms) preview
+        // refresh rebuilds it on its next tick (it re-evaluates on a timer,
+        // not only when a parameter changes).
         self.invalidate_preview();
     }
 }

@@ -405,16 +405,32 @@ impl VoxScene {
         })
     }
 
-    /// Flatten the scene graph into a `World`. Walks the tree from
-    /// the root `nTRN` (MagicaVoxel convention: id 0), accumulates
-    /// translation and rotation, and at each `nSHP` places the
-    /// referenced model's voxels rotated around the model's center.
+    /// Flatten the scene graph into a `World`, then (when `convert_axes`)
+    /// rotate the whole model from MagicaVoxel's Z-up convention into
+    /// Voxelith's Y-up one. Flattening runs in MagicaVoxel's native space
+    /// so the per-node `nTRN` rotations compose correctly; the up-axis
+    /// swap is a single global rotation over the finished grid (see
+    /// [`mv_to_voxelith`]).
+    pub fn to_world(&self, convert_axes: bool) -> World {
+        let native = self.to_world_native();
+        if convert_axes {
+            rotate_world_z_up_to_y_up(&native)
+        } else {
+            native
+        }
+    }
+
+    /// Flatten the scene graph into a `World` in MagicaVoxel's native
+    /// (Z-up) coordinates. Walks the tree from the root `nTRN`
+    /// (MagicaVoxel convention: id 0), accumulates translation and
+    /// rotation, and at each `nSHP` places the referenced model's voxels
+    /// rotated around the model's center.
     ///
     /// If the scene has no `nTRN` nodes (v150 single-model files
     /// or v200 files we read before the scene graph existed), every
     /// model is placed at the origin — same behavior as the old
     /// single-model reader.
-    pub fn to_world(&self) -> World {
+    fn to_world_native(&self) -> World {
         let mut world = World::new();
         if self.nodes.is_empty() || !self.nodes.contains_key(&0) {
             // No scene graph: write model voxels directly into
@@ -496,6 +512,48 @@ impl VoxScene {
             }
         }
     }
+}
+
+/// MagicaVoxel stores models Z-up; Voxelith is Y-up. Rotate a MagicaVoxel
+/// coordinate into Voxelith space with a right-handed -90° turn about X:
+/// `(x, y, z) -> (x, z, -y)`. A rotation (determinant +1), not a mirror,
+/// so chirality is preserved — asymmetric models and text don't come out
+/// flipped. [`voxelith_to_mv`] is its exact inverse.
+#[inline]
+fn mv_to_voxelith(p: (i32, i32, i32)) -> (i32, i32, i32) {
+    (p.0, p.2, -p.1)
+}
+
+/// Inverse of [`mv_to_voxelith`]: Voxelith (Y-up) back to MagicaVoxel
+/// (Z-up), a right-handed +90° about X, `(x, y, z) -> (x, -z, y)`.
+#[inline]
+fn voxelith_to_mv(p: (i32, i32, i32)) -> (i32, i32, i32) {
+    (p.0, -p.2, p.1)
+}
+
+/// Rotate every solid voxel of `src` from MagicaVoxel's Z-up space into
+/// Voxelith's Y-up space (see [`mv_to_voxelith`]), returning a fresh
+/// world. Applied once on import after the scene graph is flattened, so a
+/// model that stands upright in MagicaVoxel stands upright here.
+fn rotate_world_z_up_to_y_up(src: &World) -> World {
+    let mut out = World::new();
+    for chunk_pos in src.sorted_chunk_positions() {
+        let Some(chunk_lock) = src.get_chunk(chunk_pos) else {
+            continue;
+        };
+        let chunk = chunk_lock.read();
+        let (ox, oy, oz) = chunk_pos.world_origin();
+        for (local_pos, voxel) in chunk.iter_solid() {
+            let p = (
+                ox + local_pos.x as i32,
+                oy + local_pos.y as i32,
+                oz + local_pos.z as i32,
+            );
+            let (nx, ny, nz) = mv_to_voxelith(p);
+            out.set_voxel(nx, ny, nz, *voxel);
+        }
+    }
+    out
 }
 
 /// Place one model into the world at `translation`, rotated by
@@ -667,7 +725,7 @@ impl VoxModel {
     }
 
     /// Create model from world
-    pub fn from_world(world: &World) -> Result<Self, VoxError> {
+    pub fn from_world(world: &World, convert_axes: bool) -> Result<Self, VoxError> {
         // Find bounding box of all voxels
         let mut min_x = i32::MAX;
         let mut min_y = i32::MAX;
@@ -685,9 +743,12 @@ impl VoxModel {
             let (ox, oy, oz) = chunk_pos.world_origin();
 
             for (local_pos, _) in chunk.iter_solid() {
-                let x = ox + local_pos.x as i32;
-                let y = oy + local_pos.y as i32;
-                let z = oz + local_pos.z as i32;
+                let raw = (
+                    ox + local_pos.x as i32,
+                    oy + local_pos.y as i32,
+                    oz + local_pos.z as i32,
+                );
+                let (x, y, z) = if convert_axes { voxelith_to_mv(raw) } else { raw };
 
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
@@ -732,9 +793,15 @@ impl VoxModel {
             let (ox, oy, oz) = chunk_pos.world_origin();
 
             for (local_pos, voxel) in chunk.iter_solid() {
-                let x = ox + local_pos.x as i32 - min_x;
-                let y = oy + local_pos.y as i32 - min_y;
-                let z = oz + local_pos.z as i32 - min_z;
+                let raw = (
+                    ox + local_pos.x as i32,
+                    oy + local_pos.y as i32,
+                    oz + local_pos.z as i32,
+                );
+                let mv = if convert_axes { voxelith_to_mv(raw) } else { raw };
+                let x = mv.0 - min_x;
+                let y = mv.1 - min_y;
+                let z = mv.2 - min_z;
 
                 let color = [voxel.r, voxel.g, voxel.b];
 
@@ -867,8 +934,17 @@ fn find_closest_color(palette: &[[u8; 4]; 256], color: [u8; 3]) -> u8 {
 /// Export world to VOX file. Returns the number of distinct world
 /// colors that didn't fit in the 255-slot palette and were quantized
 /// to the nearest existing entry — 0 means a lossless export.
-pub fn export_vox<W: Write>(world: &World, writer: &mut W) -> Result<u32, VoxError> {
-    let model = VoxModel::from_world(world)?;
+///
+/// When `convert_axes` is set the world is rotated from Voxelith's Y-up
+/// convention into MagicaVoxel's Z-up one (the inverse of the import
+/// conversion) so the exported model opens upright in MagicaVoxel; pass
+/// `false` to write voxel coordinates through verbatim.
+pub fn export_vox<W: Write>(
+    world: &World,
+    writer: &mut W,
+    convert_axes: bool,
+) -> Result<u32, VoxError> {
+    let model = VoxModel::from_world(world, convert_axes)?;
     model.write(writer)?;
     Ok(model.palette_overflow)
 }
@@ -878,9 +954,15 @@ pub fn export_vox<W: Write>(world: &World, writer: &mut W) -> Result<u32, VoxErr
 /// into the unified `World` voxel grid, with each `nSHP`'s models
 /// placed at their cumulative `nTRN` transform along the path
 /// from the scene root.
-pub fn import_vox<R: Read>(reader: &mut R) -> Result<World, VoxError> {
+///
+/// When `convert_axes` is set (the interactive default) the flattened
+/// model is rotated from MagicaVoxel's Z-up convention into Voxelith's
+/// Y-up one, so a model that stands upright in MagicaVoxel stands upright
+/// here. Pass `false` to read coordinates through verbatim (e.g. for a
+/// file already authored Y-up).
+pub fn import_vox<R: Read>(reader: &mut R, convert_axes: bool) -> Result<World, VoxError> {
     let scene = VoxScene::read(reader)?;
-    Ok(scene.to_world())
+    Ok(scene.to_world(convert_axes))
 }
 
 #[cfg(test)]
@@ -895,14 +977,67 @@ mod tests {
         world.set_voxel(0, 1, 0, Voxel::from_rgb(0, 0, 255));
 
         let mut buffer = Vec::new();
-        let overflow = export_vox(&world, &mut buffer).unwrap();
+        let overflow = export_vox(&world, &mut buffer, false).unwrap();
         assert_eq!(overflow, 0, "3 colors should fit in the 255-slot palette");
 
-        let imported = import_vox(&mut buffer.as_slice()).unwrap();
+        let imported = import_vox(&mut buffer.as_slice(), false).unwrap();
 
         assert!(imported.get_voxel(0, 0, 0).is_solid());
         assert!(imported.get_voxel(1, 0, 0).is_solid());
         assert!(imported.get_voxel(0, 1, 0).is_solid());
+    }
+
+    #[test]
+    fn axis_helpers_are_inverse_and_map_up_correctly() {
+        // MagicaVoxel up is +Z; Voxelith up is +Y.
+        assert_eq!(mv_to_voxelith((0, 0, 1)), (0, 1, 0)); // MV +Z (up) -> Voxelith +Y (up)
+        assert_eq!(voxelith_to_mv((0, 1, 0)), (0, 0, 1)); // and back
+        // Exact inverses in both directions, for arbitrary points.
+        for p in [(1, 2, 3), (-4, 5, -6), (0, 0, 0), (7, -8, 9)] {
+            assert_eq!(mv_to_voxelith(voxelith_to_mv(p)), p);
+            assert_eq!(voxelith_to_mv(mv_to_voxelith(p)), p);
+        }
+    }
+
+    #[test]
+    fn vox_axis_conversion_roundtrips_and_preserves_up() {
+        // A vertical pair (one voxel two cells above another) exercises
+        // orientation: exported with conversion it stands along MagicaVoxel's
+        // Z axis, and re-importing with conversion must bring the "up" voxel
+        // back *above* the base, not beside it.
+        let mut world = World::new();
+        let base = Voxel::from_rgb(200, 50, 50);
+        let up = Voxel::from_rgb(50, 200, 50);
+        world.set_voxel(0, 0, 0, base);
+        world.set_voxel(0, 2, 0, up); // two cells up in Voxelith (+Y)
+
+        let mut buffer = Vec::new();
+        export_vox(&world, &mut buffer, true).unwrap();
+        let imported = import_vox(&mut buffer.as_slice(), true).unwrap();
+
+        // Same colors, same vertical relationship preserved.
+        assert_eq!(imported.get_voxel(0, 0, 0).color(), base.color());
+        assert_eq!(imported.get_voxel(0, 2, 0).color(), up.color());
+        // Nothing leaked sideways where a wrong axis would have placed it.
+        assert!(imported.get_voxel(0, 0, 2).is_air());
+        assert!(imported.get_voxel(2, 0, 0).is_air());
+    }
+
+    #[test]
+    fn vox_roundtrip_without_conversion_keeps_axes() {
+        // Conversion off: a Y-up column stays a Y-column across the
+        // round-trip (verbatim coordinates, no rotation).
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(10, 20, 30));
+        world.set_voxel(0, 3, 0, Voxel::from_rgb(40, 50, 60));
+
+        let mut buffer = Vec::new();
+        export_vox(&world, &mut buffer, false).unwrap();
+        let imported = import_vox(&mut buffer.as_slice(), false).unwrap();
+
+        assert!(imported.get_voxel(0, 0, 0).is_solid());
+        assert!(imported.get_voxel(0, 3, 0).is_solid());
+        assert!(imported.get_voxel(0, 0, 3).is_air());
     }
 
     // ---- v200 helpers / unit tests ---------------------------------
@@ -1061,7 +1196,7 @@ mod tests {
         buf.extend_from_slice(&(chunks.len() as i32).to_le_bytes());
         buf.extend_from_slice(&chunks);
 
-        let world = import_vox(&mut buf.as_slice()).expect("v200 import");
+        let world = import_vox(&mut buf.as_slice(), false).expect("v200 import");
         let v = world.get_voxel(5, 0, 0);
         assert!(v.is_solid(), "expected solid voxel at (5, 0, 0)");
         assert_eq!((v.r, v.g, v.b), (255, 0, 0));
@@ -1106,7 +1241,7 @@ mod tests {
         buf.extend_from_slice(&(chunks.len() as i32).to_le_bytes());
         buf.extend_from_slice(&chunks);
 
-        let world = import_vox(&mut buf.as_slice())
+        let world = import_vox(&mut buf.as_slice(), false)
             .expect("v200 with unknown chunks should still import");
         // No scene graph in this test, so fallback path: voxel at
         // (0, 0, 0) in world.
@@ -1204,7 +1339,7 @@ mod tests {
         buf.extend_from_slice(&(chunks.len() as i32).to_le_bytes());
         buf.extend_from_slice(&chunks);
 
-        let world = import_vox(&mut buf.as_slice()).expect("multi-model v200");
+        let world = import_vox(&mut buf.as_slice(), false).expect("multi-model v200");
 
         // Red voxel translated to (10, 0, 0)
         let red = world.get_voxel(10, 0, 0);
@@ -1235,7 +1370,7 @@ mod tests {
             );
         }
         let mut buffer = Vec::new();
-        let overflow = export_vox(&world, &mut buffer).unwrap();
+        let overflow = export_vox(&world, &mut buffer, false).unwrap();
         assert!(
             overflow >= 1,
             "expected at least one overflow color, got {}",

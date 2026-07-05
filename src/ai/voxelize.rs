@@ -4,12 +4,15 @@
 //! 1. Parse GLB via the `gltf` crate.
 //! 2. Walk the scene graph, applying cumulative node transforms.
 //! 3. Extract triangles with vertex positions + per-vertex colors.
-//!    Color priority: COLOR_0 vertex attribute → baseColorTexture
-//!    sampled at the vertex's UV → baseColorFactor uniform → light-
-//!    gray default.
+//!    Color follows the glTF composition rule — baseColorFactor ×
+//!    baseColorTexture (sampled at the vertex UV) × COLOR_0 — with any
+//!    absent source contributing identity 1.0. When there is no COLOR_0,
+//!    no texture, and the factor is the default white, a neutral 200-gray
+//!    is substituted so the model reads as solid rather than pure white.
 //! 4. Voxelize the surface by grid-sampling each triangle (sample
-//!    density tied to triangle area / voxel area so even very large
-//!    triangles fill their full voxel footprint).
+//!    density tied to both triangle area / voxel area and the longest
+//!    edge in voxels, so even large *or* thin sliver triangles fill
+//!    their full voxel footprint without holes).
 //! 5. Fill the interior by a 3-axis parity scan + majority vote — a
 //!    cell is "inside" when ≥ 2 of the 3 axis scans say so. Robust to
 //!    minor mesh defects (a single missed surface crossing on one
@@ -205,10 +208,11 @@ fn extract_from_mesh(
             None => continue,
         };
 
-        // Vertex colors (optional). When present they take priority
-        // over textures per the glTF spec's "factor * vertex * texture"
-        // composition, but for AI 3D-gen output they're usually empty
-        // and we end up sampling the baseColorTexture instead.
+        // Vertex colors (optional). Per the glTF spec COLOR_0 is an
+        // additional linear multiplier on the base color — it multiplies
+        // with the texture and factor rather than replacing them — though
+        // for AI 3D-gen output COLOR_0 is usually absent and the texture
+        // (or bare factor) carries the color.
         let vertex_colors: Option<Vec<[f32; 4]>> = reader
             .read_colors(0)
             .map(|c| c.into_rgba_f32().collect());
@@ -225,28 +229,17 @@ fn extract_from_mesh(
             .and_then(|info| textures.get(info.texture().source().index()));
 
         let color_at_vertex = |i: usize| -> [u8; 4] {
-            // Source the per-vertex color, then multiply by the
-            // material's baseColorFactor (glTF composition rule).
-            if let Some(colors) = vertex_colors.as_ref() {
-                let c = colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]);
-                pack_rgba([
-                    c[0] * base_factor[0],
-                    c[1] * base_factor[1],
-                    c[2] * base_factor[2],
-                    c[3] * base_factor[3],
-                ])
-            } else if let (Some(tex), Some(uvs)) = (base_texture, tex_coords.as_ref()) {
-                let uv = uvs.get(i).copied().unwrap_or([0.5, 0.5]);
-                let sampled = sample_texture(tex, uv[0], uv[1]);
-                pack_rgba([
-                    sampled[0] * base_factor[0],
-                    sampled[1] * base_factor[1],
-                    sampled[2] * base_factor[2],
-                    sampled[3] * base_factor[3],
-                ])
-            } else {
-                pack_rgba(base_factor)
-            }
+            let vertex = vertex_colors
+                .as_ref()
+                .map(|colors| colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]));
+            let tex_sample = match (base_texture, tex_coords.as_ref()) {
+                (Some(tex), Some(uvs)) => {
+                    let uv = uvs.get(i).copied().unwrap_or([0.5, 0.5]);
+                    Some(sample_texture(tex, uv[0], uv[1]))
+                }
+                _ => None,
+            };
+            compose_base_color(vertex, tex_sample, base_factor)
         };
 
         let world_pos = |i: usize| -> Vec3 {
@@ -306,6 +299,32 @@ fn pack_rgba(c: [f32; 4]) -> [u8; 4] {
     ]
 }
 
+/// glTF base-color composition for one vertex: `baseColorFactor ×
+/// baseColorTexture × COLOR_0`, each *absent* source contributing an
+/// identity 1.0 (per the glTF 2.0 spec, COLOR_0 is "an additional linear
+/// multiplier to base color" — it multiplies with the texture and factor,
+/// it does not replace them). When there is no vertex color, no texture,
+/// and the factor is the glTF default white, there is nothing to derive a
+/// color from, so a neutral 200-gray is returned instead of pure white.
+/// An explicit non-default factor is always honored.
+fn compose_base_color(
+    vertex: Option<[f32; 4]>,
+    tex_sample: Option<[f32; 4]>,
+    factor: [f32; 4],
+) -> [u8; 4] {
+    if vertex.is_none() && tex_sample.is_none() && factor == [1.0, 1.0, 1.0, 1.0] {
+        return [200, 200, 200, 255];
+    }
+    let mut c = factor;
+    if let Some(vc) = vertex {
+        c = [c[0] * vc[0], c[1] * vc[1], c[2] * vc[2], c[3] * vc[3]];
+    }
+    if let Some(s) = tex_sample {
+        c = [c[0] * s[0], c[1] * s[1], c[2] * s[2], c[3] * s[3]];
+    }
+    pack_rgba(c)
+}
+
 fn compute_aabb(triangles: &[Triangle]) -> (Vec3, Vec3) {
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
@@ -333,13 +352,26 @@ fn rasterize_triangles(
     let voxel_area = voxel_size * voxel_size;
 
     for tri in triangles {
-        // Triangle area for adaptive sampling density. Small triangles
-        // get the minimum 4 samples; large ones get enough to cover
-        // every voxel they touch (≈ 4 samples per voxel-cell area).
+        // Adaptive sampling density. The area term gives ≈4 samples per
+        // voxel-cell area so big flat triangles fill solidly. But area
+        // badly underestimates long thin slivers — a triangle spanning
+        // ~100 voxels can have near-zero area and would get only the
+        // 4-sample floor, leaving holes along its length (which then let
+        // the parity interior-fill leak). So also floor grid_n at the
+        // longest edge measured in voxels, guaranteeing ≥1 sample per
+        // voxel it crosses.
         let area = 0.5 * (tri.v1 - tri.v0).cross(tri.v2 - tri.v0).length();
         let target_samples =
             ((area / voxel_area * 4.0).ceil() as usize).max(4);
-        let grid_n = (target_samples as f32).sqrt().ceil() as usize;
+        let area_n = (target_samples as f32).sqrt().ceil() as usize;
+
+        let longest_edge = (tri.v1 - tri.v0)
+            .length()
+            .max((tri.v2 - tri.v1).length())
+            .max((tri.v0 - tri.v2).length());
+        let edge_n = (longest_edge / voxel_size).ceil() as usize + 1;
+
+        let grid_n = area_n.max(edge_n);
         let grid_n_f = grid_n as f32;
 
         // Stratified grid in barycentric space. The `u + v > 1` reject
@@ -561,6 +593,68 @@ mod tests {
         // baseColorFactor can be > 1 in glTF (HDR materials, rare but
         // legal); we clamp rather than wrap.
         assert_eq!(pack_rgba([2.0, -0.5, 0.5, 1.0]), [255, 0, 127, 255]);
+    }
+
+    #[test]
+    fn compose_base_color_multiplies_all_present_sources() {
+        // glTF rule: factor × texture × COLOR_0. R = 0.5·0.5·0.5.
+        let out = compose_base_color(
+            Some([0.5, 1.0, 1.0, 1.0]),
+            Some([0.5, 0.5, 1.0, 1.0]),
+            [0.5, 1.0, 1.0, 1.0],
+        );
+        assert_eq!(out[0], (0.5 * 0.5 * 0.5 * 255.0) as u8); // 31
+        assert_eq!(out[1], (0.5 * 255.0) as u8); // 127 (only texture ≠ 1)
+        assert_eq!(out[2], 255);
+        assert_eq!(out[3], 255);
+    }
+
+    #[test]
+    fn compose_base_color_white_vertex_plus_texture_keeps_texture() {
+        // The regressed case: a white COLOR_0 beside a texture must not
+        // wash the texture out (old code picked vertex *or* texture).
+        let tex = [0.2, 0.4, 0.6, 1.0];
+        let out =
+            compose_base_color(Some([1.0, 1.0, 1.0, 1.0]), Some(tex), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(out, pack_rgba(tex));
+    }
+
+    #[test]
+    fn compose_base_color_gray_only_when_nothing_to_color() {
+        // No COLOR_0, no texture, default-white factor → neutral gray.
+        assert_eq!(
+            compose_base_color(None, None, [1.0, 1.0, 1.0, 1.0]),
+            [200, 200, 200, 255]
+        );
+        // An explicit non-default factor is honored, not overridden by gray.
+        assert_eq!(
+            compose_base_color(None, None, [0.8, 0.2, 0.1, 1.0]),
+            pack_rgba([0.8, 0.2, 0.1, 1.0])
+        );
+    }
+
+    #[test]
+    fn rasterize_thin_triangle_covers_its_full_length() {
+        // A long thin sliver: near-zero area but spans ~20 voxels along X.
+        // Area-only sampling would take the 4-sample floor and leave gaps;
+        // the edge-based floor must sample every voxel it crosses.
+        let c = [255u8, 255, 255, 255];
+        let tri = Triangle {
+            v0: Vec3::new(0.0, 0.0, 0.0),
+            v1: Vec3::new(20.0, 0.0, 0.0),
+            v2: Vec3::new(20.0, 0.05, 0.0), // 0.05 tall → tiny area
+            c0: c,
+            c1: c,
+            c2: c,
+        };
+        let grid = rasterize_triangles(&[tri], Vec3::ZERO, 1.0);
+        for x in 0..20 {
+            assert!(
+                grid.keys().any(|&(gx, _, _)| gx == x),
+                "no sample landed in the x={} column — the sliver has a hole",
+                x
+            );
+        }
     }
 
     #[test]

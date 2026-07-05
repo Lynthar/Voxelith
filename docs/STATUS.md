@@ -10,7 +10,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 298 (`cargo test`) — 288 prior + 10 new for the bake tool & export transform |
+| **Tests** | 326 (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI). Full list in `Cargo.toml` |
@@ -34,13 +34,13 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - Two-layer dirty tracking with cross-chunk boundary propagation.
 
 ### Mesh
-- **`GreedyMesher`** (default render + OBJ/GLB): per-voxel-RGBA face merging (Lysenko) + **per-vertex AO** (0fps 12-sample); greedy key = `(rgba << 8) | ao` with diagonal-flip. Winding reversed from ABCD walk → **CCW-from-outside** (wgpu/glTF standard).
+- **`GreedyMesher`** (default render + OBJ/GLB): per-voxel-RGBA face merging (Lysenko) + **per-vertex AO** (0fps 12-sample); greedy key = `(tint_zone << 40) | (rgba << 8) | ao` with diagonal-flip. Winding reversed from ABCD walk → **CCW-from-outside** (wgpu/glTF standard).
 - **`NaiveMesher`** — reference / fallback (shared quad helper, seam-consistent).
 - **`mesh_world_smoothed`** (Marching Cubes, **export-only**): `light` (rounded cubes, keeps thin features) / `heavy` (3×3×3 blur, clay) + per-triangle winding correction.
 - Cross-chunk face culling; rayon-parallel re-mesh (sequential GPU upload).
 
 ### Render
-- wgpu pipelines: opaque + optional wireframe (feature-gated) + transparent; two overlay slots (procgen preview α0.5, brush preview α0.75).
+- wgpu pipelines: opaque + optional wireframe (feature-gated) + transparent; **3 transparent overlay slots** (procgen preview α0.5, brush preview α0.75, selection-move ghost) + **2 wireframe overlay slots** (selection box, socket gizmos).
 - Orbital camera: WASD fly, scroll zoom-to-cursor, RMB pan, **MMB orbit re-anchored under cursor**; **fit-distance framing** (`F`, frame all/selected/generated); orbit angles re-derive each press (no first-drag teleport).
 - Grid + axes + selection wireframe; ambient + directional light + distance fog.
 
@@ -58,7 +58,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - **Headless batch export** — `voxelith bake <spec.json> [--shard i/n]` (`src/bake.rs` + clap in `main.rs`): batch `.vxlt`→`.glb` from a declarative `{ defaults, items[] }` spec with per-asset **pivot / up-axis / unit-scale** (a lossless root-node transform — `io::export_glb_with_transform`), optional **`gltfpack` meshopt compression** (`optimize: "meshopt"`, graceful skip if not installed), `srcDir`/`outDir` bulk expansion, `--shard` for CI fan-out, and a per-item JSON report next to each output. CPU-only (no window/GPU). Identity transform ⇒ byte-identical to the interactive export. See [`GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md) §3.4–3.5.
 
 ### AI generation
-- `src/ai/` — tokio background runtime, OS-keychain API key (`keyring`), `AiJobState` machine, egui AI panel, `MockProvider` for free end-to-end testing.
+- `src/ai/` — tokio background runtime, OS-keychain API key (`keyring`), `AiJobState` machine, egui AI panel, plus a `MockProvider` offline stub (defined for test / offline wiring; not currently constructed by any code path).
 - **`FalHunyuanProvider`** (fal.ai `hunyuan3d-v3` text-to-3D): queue API + 2 s polling + 5 min cap + cooperative & remote cancel; key never leaks into errors.
 - **`voxelize_glb`**: scene-graph walk + per-triangle adaptive sampling + 3-axis parity interior fill; lands as undoable `Command::set_voxels`. Prompt MRU + result auto-select/frame done.
 
@@ -118,5 +118,5 @@ Load-bearing gotchas for anyone touching the code:
 ## Onboarding
 
 1. `cargo run --release` — verify it launches and the cube + ground show.
-2. `cargo test` — should be 288 passing.
+2. `cargo test` — should be 326 passing.
 3. `git log --oneline` — see the recent direction and last-committed work.

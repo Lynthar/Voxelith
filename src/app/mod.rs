@@ -869,9 +869,10 @@ impl App {
         // their own rebuild.
         self.unsaved_changes = true;
 
-        // Concurrent reads only: mesher acquires read locks on the
-        // dirty chunk + 6 neighbors. Multiple workers operating on
-        // disjoint chunks share-read those neighbors fine.
+        // Concurrent reads only: mesher acquires read locks on the dirty
+        // chunk + its 26 Moore neighbors (3³−1 — per-vertex AO samples
+        // diagonal chunks, not just the 6 faces; see mesh::neighbors).
+        // Multiple workers on disjoint chunks share-read those fine.
         let mesher = &self.mesher;
         let world = &self.world;
         let meshes: Vec<_> = dirty
@@ -1006,7 +1007,7 @@ impl App {
                 Tool::Line => line_voxels(anchor, end_3d),
                 Tool::Box => box_voxels(anchor, end_3d),
                 Tool::Sphere => sphere_voxels(anchor, end_3d),
-                Tool::Cylinder => cylinder_voxels(anchor, end_3d),
+                Tool::Cylinder => cylinder_voxels(anchor, end_3d, Some(drag.plane.axis)),
                 _ => Vec::new(),
             };
             expand_with_symmetry(raw, symmetry)

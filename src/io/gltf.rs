@@ -14,7 +14,7 @@
 //! can still read it). All deinterleaved so JSON descriptors stay
 //! simple (no `byteStride` annotations needed). Indices are u32 so
 //! large worlds aren't capped at 64k vertices. The full
-//! engine-consumption contract is in `docs/ENGINE_CONTRACT.md`.
+//! engine-consumption contract is in `docs/GAME_PIPELINE_ROADMAP.md` §3.2.
 //!
 //! ### File structure (per glTF 2.0 spec, §3.4 GLB)
 //!
@@ -356,7 +356,7 @@ fn write_glb_groups(
         // Tint zone ALSO as TEXCOORD_0 = vec2(zone, 0). Unity glTFast drops
         // custom attributes (so it can't read `_TINTZONE`) but imports UV
         // sets, so this is the channel a stock-Unity uber-shader reads. See
-        // docs/ENGINE_CONTRACT.md §6.2 (incl. the glTFast UV-pruning caveat).
+        // docs/GAME_PIPELINE_ROADMAP.md §3.2 (incl. the glTFast UV-pruning caveat).
         let texcoord_offset = bin.len();
         for v in &g.vertices {
             bin.extend_from_slice(bytemuck::bytes_of(&[v.tint_zone, 0.0f32]));

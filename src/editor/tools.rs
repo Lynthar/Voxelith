@@ -49,8 +49,9 @@ pub enum Tool {
     /// Filled ellipsoid fitting in the drag bbox (use a square-ish
     /// drag for a uniform sphere).
     Sphere,
-    /// Filled cylinder fitting in the drag bbox; axis = bbox's
-    /// longest dimension, ellipse cross-section in the other two.
+    /// Filled cylinder fitting in the drag bbox; axis of revolution =
+    /// the locked footprint plane's normal (the height-extrude
+    /// direction), ellipse cross-section in the other two.
     Cylinder,
     /// Box selection: drag corner-to-corner to mark an AABB region
     /// for batch operations (copy / cut / paste / delete / move).
@@ -219,14 +220,20 @@ impl EditorTool for BrushTool {
         let positions = Self::affected_positions(center, ctx.brush_size, ctx.symmetry);
 
         let changes: Vec<VoxelChange> = match self.mode {
+            // Place only writes into empty cells — it never overwrites an
+            // existing solid voxel, so brushing over a model (or a large
+            // brush straddling one) can't punch its color through. Use
+            // Paint to recolor solids.
             Tool::Place => positions
                 .into_iter()
-                .map(|pos| VoxelChange {
-                    pos,
-                    old_voxel: ctx.world.get_voxel(pos.0, pos.1, pos.2),
-                    new_voxel: ctx.brush_color,
+                .filter_map(|pos| {
+                    let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
+                    if old.is_air() {
+                        Some(VoxelChange { pos, old_voxel: old, new_voxel: ctx.brush_color })
+                    } else {
+                        None
+                    }
                 })
-                .filter(|c| c.old_voxel != c.new_voxel)
                 .collect(),
             Tool::Remove => positions
                 .into_iter()
@@ -333,10 +340,13 @@ pub fn compute_flood_fill_changes(
     new_voxel: Voxel,
     max_voxels: usize,
 ) -> Vec<VoxelChange> {
-    let target_voxel = world.get_voxel(start.0, start.1, start.2);
-    if target_voxel == new_voxel {
-        return Vec::new();
-    }
+    // Region membership is decided by RGBA only: cells that share the
+    // seed's color belong to one region even when their emissive /
+    // metallic / tint-zone bits differ, and each is rewritten with the
+    // brush's full voxel (color + material bits). Matching on the whole
+    // 8-byte voxel used to stop a fill at a same-colored-but-differently-
+    // flagged neighbor and made the result depend on which cell was seeded.
+    let target_rgba = world.get_voxel(start.0, start.1, start.2).color();
 
     let mut changes = Vec::new();
     let mut visited = HashSet::new();
@@ -346,7 +356,10 @@ pub fn compute_flood_fill_changes(
         if visited.contains(&pos) {
             continue;
         }
-        if changes.len() >= max_voxels {
+        // Cap on cells *explored*, not writes emitted: a region already
+        // holding `new_voxel` still needs bounding so the flood can't run
+        // away in an unbounded world.
+        if visited.len() >= max_voxels {
             break;
         }
         // Spatial cap: skip cells outside the chebyshev radius around
@@ -361,16 +374,21 @@ pub fn compute_flood_fill_changes(
         }
 
         let current = world.get_voxel(pos.0, pos.1, pos.2);
-        if current != target_voxel {
+        if current.color() != target_rgba {
             continue;
         }
 
         visited.insert(pos);
-        changes.push(VoxelChange {
-            pos,
-            old_voxel: current,
-            new_voxel,
-        });
+        // Emit a write only where it changes something — a cell already
+        // equal to the brush voxel is still traversed (to keep the region
+        // connected) but doesn't bloat the undo entry or the count.
+        if current != new_voxel {
+            changes.push(VoxelChange {
+                pos,
+                old_voxel: current,
+                new_voxel,
+            });
+        }
 
         // 6-connectivity expansion.
         let neighbors = [
@@ -519,5 +537,95 @@ mod tests {
             world.get_voxel(MAX_FILL_DIST, 0, 0).r,
             255
         );
+    }
+
+    #[test]
+    fn place_only_fills_air_never_overwrites_solid() {
+        let mut world = World::new();
+        let existing = Voxel::from_rgb(0, 0, 255);
+        world.set_voxel(0, 0, 0, existing); // a solid the brush must not punch through
+        let mut history = CommandHistory::new(100);
+        let brush = Voxel::from_rgb(255, 0, 0);
+        let tool = BrushTool { mode: Tool::Place };
+
+        // Place writes at adjacent_pos; aim it straight at the occupied cell.
+        let hit_occupied = RaycastHit {
+            voxel_pos: (0, 0, 0),
+            adjacent_pos: (0, 0, 0),
+            normal: (0, 1, 0),
+            distance: 1.0,
+            virtual_ground: false,
+        };
+        {
+            let mut ctx = ToolContext {
+                world: &mut world,
+                history: &mut history,
+                brush_color: brush,
+                brush_size: 1,
+                symmetry: SymmetryAxes::default(),
+            };
+            tool.apply(&mut ctx, &hit_occupied);
+        }
+        assert_eq!(world.get_voxel(0, 0, 0), existing, "Place must not overwrite a solid");
+
+        // Aiming at an empty cell still places normally.
+        let hit_air = RaycastHit {
+            voxel_pos: (0, 0, 0),
+            adjacent_pos: (0, 1, 0),
+            normal: (0, 1, 0),
+            distance: 1.0,
+            virtual_ground: false,
+        };
+        {
+            let mut ctx = ToolContext {
+                world: &mut world,
+                history: &mut history,
+                brush_color: brush,
+                brush_size: 1,
+                symmetry: SymmetryAxes::default(),
+            };
+            tool.apply(&mut ctx, &hit_air);
+        }
+        assert_eq!(world.get_voxel(0, 1, 0), brush, "Place fills empty cells");
+    }
+
+    #[test]
+    fn flood_fill_matches_on_rgba_ignoring_flags() {
+        // Two adjacent cells share RGBA but differ in flags (one is
+        // emissive). Region membership is color-only, so a fill seeded on
+        // one flows into the other and rewrites both with the brush voxel.
+        let mut world = World::new();
+        let mut history = CommandHistory::new(100);
+        let base = Voxel::from_rgb(50, 100, 150);
+        let mut emissive = base;
+        emissive.flags = 0b01; // same RGBA as `base`, emissive bit set
+        world.set_voxel(0, 0, 0, base);
+        world.set_voxel(1, 0, 0, emissive);
+        world.clear_dirty_flags();
+
+        let brush = Voxel::from_rgb(255, 0, 0);
+        let count = flood_fill(&mut world, &mut history, (0, 0, 0), brush, 1000);
+
+        assert_eq!(count, 2, "the same-RGBA neighbor must join the region");
+        assert_eq!(world.get_voxel(0, 0, 0), brush);
+        assert_eq!(world.get_voxel(1, 0, 0), brush, "emissive neighbor recolored, flags reset");
+    }
+
+    #[test]
+    fn flood_fill_stops_at_different_rgba() {
+        let mut world = World::new();
+        let mut history = CommandHistory::new(100);
+        let a = Voxel::from_rgb(10, 20, 30);
+        let wall = Voxel::from_rgb(200, 200, 200);
+        world.set_voxel(0, 0, 0, a);
+        world.set_voxel(1, 0, 0, wall); // a differently-colored wall
+        world.set_voxel(2, 0, 0, a); // same color as seed but unreachable past the wall
+        world.clear_dirty_flags();
+
+        let count = flood_fill(&mut world, &mut history, (0, 0, 0), Voxel::from_rgb(255, 0, 0), 1000);
+
+        assert_eq!(count, 1, "fill can't cross a different-colored cell");
+        assert_eq!(world.get_voxel(1, 0, 0), wall, "wall untouched");
+        assert_eq!(world.get_voxel(2, 0, 0), a, "cell beyond the wall untouched");
     }
 }

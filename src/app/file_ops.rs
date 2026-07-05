@@ -287,6 +287,9 @@ impl App {
 
     /// Prompt for a VOX file and import it.
     pub(super) fn import_vox(&mut self) {
+        // Read the UI's Z-up→Y-up toggle (default on) up front so the
+        // borrow doesn't tangle with the `&mut self` writes below.
+        let convert_axes = self.ui.convert_vox_axes;
         let dialog = rfd::FileDialog::new()
             .add_filter("MagicaVoxel", &["vox"])
             .set_title("Import MagicaVoxel File");
@@ -296,7 +299,7 @@ impl App {
         };
 
         match std::fs::File::open(&path) {
-            Ok(mut file) => match io::import_vox(&mut file) {
+            Ok(mut file) => match io::import_vox(&mut file, convert_axes) {
                 Ok(world) => {
                     self.world = world;
                     self.editor.history.clear();
@@ -587,6 +590,9 @@ impl App {
 
     /// Prompt for a path and export to VOX.
     pub(super) fn export_vox(&mut self) {
+        // Mirror the import convention on the way out (default on) so a
+        // model exported to .vox opens upright in MagicaVoxel.
+        let convert_axes = self.ui.convert_vox_axes;
         let dialog = rfd::FileDialog::new()
             .add_filter("MagicaVoxel", &["vox"])
             .set_title("Export as MagicaVoxel");
@@ -596,7 +602,7 @@ impl App {
         };
 
         match std::fs::File::create(&path) {
-            Ok(mut file) => match io::export_vox(&self.world, &mut file) {
+            Ok(mut file) => match io::export_vox(&self.world, &mut file, convert_axes) {
                 Ok(overflow) => {
                     self.touch_recent(&path);
                     let filename = path
