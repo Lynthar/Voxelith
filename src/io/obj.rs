@@ -12,10 +12,12 @@
 //! winding from outside is preserved end-to-end (mesher → OBJ); no
 //! axis or winding flip needed.
 //!
-//! The exporter doesn't deduplicate vertices across chunks. Each
-//! chunk's vertices are emitted independently and its triangle
-//! indices are translated to global OBJ-1-indexed values. Greedy
-//! meshing (TODO) would shrink output a lot more than dedup would.
+//! Geometry comes from `GreedyMesher`, so coplanar faces are already
+//! merged before they reach here. What the exporter does *not* do is
+//! deduplicate vertices across chunks: each chunk's vertices are
+//! emitted independently and its triangle indices are translated to
+//! global OBJ-1-indexed values. Cross-chunk dedup would only recover
+//! the seams between chunks — far less than the merging already done.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};

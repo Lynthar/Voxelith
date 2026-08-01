@@ -131,11 +131,11 @@ impl ExportTransform {
 /// A named attachment point to emit as an empty glTF node (no mesh).
 ///
 /// `translation` is the socket's world position and `rotation` is a
-/// unit quaternion in glTF `[x, y, z, w]` order. The caller
-/// (`app::file_ops`) builds these from `editor::Socket` — deriving the
-/// rotation via `Socket::rotation` — so the orientation convention
-/// lives in one place and this module stays free of math + `editor`
-/// dependencies.
+/// unit quaternion in glTF `[x, y, z, w]` order. Callers
+/// (`app::file_ops` for interactive export, `bake` for the headless
+/// path) build these from `editor::Socket` — deriving the rotation via
+/// `Socket::rotation` — so the orientation convention lives in one
+/// place and this module stays free of math + `editor` dependencies.
 #[derive(Debug, Clone)]
 pub struct SocketNode {
     pub name: String,

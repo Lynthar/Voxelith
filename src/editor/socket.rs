@@ -6,7 +6,7 @@
 //! nodes** (`name` + `translation` + `rotation`, no `mesh`), the
 //! standard way to ship attachment points — weapon mounts, banner /
 //! emblem slots, FX anchors — that downstream engines hang separate
-//! parts onto. See `docs/GAME_PIPELINE_ROADMAP.md` §3.1.4.
+//! parts onto. See `docs/GAME_PIPELINE_ROADMAP.md` §3.1.
 //!
 //! Sockets are *document* data: they persist in `.vxlt` (embedded in
 //! `io::EditorState`) and round-trip through autosave. Like the box
@@ -61,7 +61,8 @@ impl Socket {
     /// rotation rather than NaNs.
     ///
     /// (This is the producer half; the engine-side consumption
-    /// convention is documented in `docs/ENGINE_CONTRACT.md` §sockets.)
+    /// convention is documented in `docs/GAME_PIPELINE_ROADMAP.md`
+    /// §3.2.)
     pub fn rotation(&self) -> [f32; 4] {
         let n = Vec3::from(self.normal);
         let n = if n.length_squared() > 1e-12 {

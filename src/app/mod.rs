@@ -226,8 +226,9 @@ pub struct App {
     /// thread. AI jobs run there to keep the winit main thread free.
     /// Lives the entire app lifetime; no shutdown path needed.
     pub(super) ai_runtime: AiRuntime,
-    /// Active provider. Phase 1 = mock; Phase 2 swaps in the real
-    /// fal.ai client.
+    /// Active provider — `FalHunyuanProvider` (fal.ai Hunyuan3D).
+    /// Behind the trait so the job pipeline stays provider-agnostic;
+    /// `MockProvider` still implements it but nothing constructs one.
     pub(super) ai_provider: Arc<dyn AiProvider>,
     /// Latest job state. Mirrored into `Ui` each frame so the panel
     /// can render it. Mutated only by `tick_ai_job` (drained from

@@ -332,8 +332,11 @@ pub fn eyedrop(world: &World, hit: &RaycastHit) -> Option<Voxel> {
 /// fill path in `app::input::apply_tool`) can collect changes from
 /// several seeds and submit one combined `Command`.
 ///
-/// Returns an empty `Vec` if `start` already holds `new_voxel` or
-/// would produce no writes for any reason.
+/// Region membership is decided by RGBA alone (see the body), so a
+/// cell whose color already equals `new_voxel`'s but whose material
+/// flags or tint zone differ is still rewritten — "same color" is not
+/// "no change" here. The result is empty only when the seed's region
+/// yields no writes at all.
 pub fn compute_flood_fill_changes(
     world: &World,
     start: (i32, i32, i32),

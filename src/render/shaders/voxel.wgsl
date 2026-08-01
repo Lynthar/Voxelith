@@ -17,9 +17,17 @@ struct VertexInput {
     // (sharp inside corner), 1 = no occlusion. Bilinearly
     // interpolated across the quad by the rasterizer.
     @location(3) ao: f32,
-    // Faction tint zone — present in the vertex layout for GLB export;
-    // unused by rendering, declared so the pipeline accepts the vertex
-    // buffer's @location(4) attribute.
+    // Faction tint zone — rides along in the vertex buffer for GLB
+    // export and is unused by the shading below.
+    //
+    // Declaring it is not what makes the pipeline accept the buffer:
+    // WebGPU validates in the other direction — every location a
+    // shader *declares* must be supplied by the pipeline's vertex
+    // layout, while attributes the layout provides and the shader
+    // ignores are perfectly legal. So removing this line would be
+    // harmless, whereas removing the matching attribute from
+    // `Vertex::layout()` while this line stands fails pipeline
+    // creation. Keep the two in sync in that direction.
     @location(4) tint_zone: f32,
 };
 

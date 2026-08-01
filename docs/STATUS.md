@@ -10,7 +10,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 363 (`cargo test`) |
+| **Tests** | 367 (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI). Full list in `Cargo.toml` |
@@ -30,7 +30,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 ### Core
 - **32³ chunks**, **8-byte voxel** = `material:u16 + RGBA + flags(bit0 emissive / bit1 metallic) + _reserved`; `Pod`/`Zeroable` for direct GPU upload.
-- `World` = chunk hashmap (`Arc<RwLock<Chunk>>`), optional bounds.
+- `World` = chunk hashmap (`Arc<RwLock<Chunk>>`), unbounded — chunks are created on demand wherever a write lands, so every `i32` coordinate is writable.
 - Per-chunk dirty tracking, propagated across chunk boundaries over the **full Moore neighborhood** (a corner write dirties up to 7 neighbors) — per-vertex AO samples all 26 surrounding chunks, so face-neighbors alone leave diagonals with stale AO.
 
 ### Mesh
@@ -69,6 +69,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 ### UI
 - egui: menu / toolbar / status bar + Stats / Tools / Palette / Viewport / Help / About / Procgen / Graph / AI panels; in-app dialogs for errors, the export report, crash recovery, destructive-action confirmation, and the unsaved-changes guard. Wireframe toggles gray out on GPUs without `POLYGON_MODE_LINE` instead of silently doing nothing.
+- Every workspace panel has a title-bar close button, and all of them (including AI) survive a restart — visibility lives in one `prefs::PanelVisibility` that `UiState` holds directly, so load and save are whole-struct assignments. Tools scrolls internally (its content is taller than the default window). Float *positions* are not persisted; the `default_pos` constants are what every session gets. A restored window size is checked against the primary monitor and shrunk only if it no longer fits (`fit_window_to_monitor`) — a size saved on a 4K dock used to come back off-screen on a laptop panel.
 - **Viewport HUD** (bottom-left, click-through: tool / gesture+numbers / locked plane / symmetry / selection size) + **Perf HUD** (bottom-right, default off: FPS+ms / tris / chunks / last rebuild).
 
 ---
@@ -123,5 +124,5 @@ Load-bearing gotchas for anyone touching the code:
 ## Onboarding
 
 1. `cargo run --release` — verify it launches and the cube + ground show.
-2. `cargo test` — should be 363 passing.
+2. `cargo test` — should be 367 passing.
 3. `git log --oneline` — see the recent direction and last-committed work.

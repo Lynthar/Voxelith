@@ -1,10 +1,13 @@
 //! Mesh generation from voxel data.
 //!
 //! This module converts voxel chunks into renderable triangle meshes.
-//! Multiple meshing strategies are supported:
-//! - Naive: Simple but generates many triangles
-//! - Greedy: Optimized mesh with merged faces (TODO)
-//! - Marching Cubes: Smooth surfaces (TODO)
+//! Three meshing strategies, all shipped:
+//! - Greedy: merged faces + per-vertex AO. The default for rendering
+//!   and for OBJ / GLB export.
+//! - Naive: one quad per visible face. Reference implementation and
+//!   fallback; shares the quad helpers so windings stay identical.
+//! - Marching Cubes: smooth surfaces. **Export only** — never wired
+//!   into the render path (see `mesh_world_smoothed`).
 //!
 //! `patch_to_mesh` reuses the same face emission helpers to render
 //! a procgen `VoxelPatch` (or any sparse voxel list) directly to a

@@ -129,7 +129,10 @@ impl Default for PanelVisibility {
 
 /// Editor brush state worth restoring across sessions. `selected_tool`
 /// uses the same numeric encoding as `io::EditorState` for consistency
-/// with project files: 0=Place, 1=Remove, 2=Paint, 3=Eyedropper, 4=Fill.
+/// with project files: 0=Place, 1=Remove, 2=Paint, 3=Eyedropper,
+/// 4=Fill, 5=Line, 6=Box, 7=Sphere, 8=Cylinder, 9=Select, 10=Socket
+/// (`app::tool_from_index` is the authority; it matches `Tool`'s
+/// declaration order, which is why `Socket` was appended last).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorPrefs {

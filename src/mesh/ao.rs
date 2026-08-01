@@ -11,9 +11,10 @@
 //!
 //! Adjacent cells with different 4-corner AO sets cannot merge —
 //! otherwise the larger quad's bilinear-interpolated AO would
-//! disagree with the per-cell AO at internal edges. The greedy
-//! mesher's mask key is `(packed_rgba, ao_4)`; only cells matching
-//! on both color and full AO tuple merge. In open areas (all 4
+//! disagree with the per-cell AO at internal edges. AO is one field
+//! of the greedy mesher's mask key (`tint_zone | packed_rgba |
+//! packed_ao`, see `greedy`'s "Mask key" section); only cells
+//! matching on the whole key merge. In open areas (all 4
 //! corners = 3) merging is unaffected; near walls / stairs / pits
 //! the merge is finer-grained, but still well above naive.
 //!

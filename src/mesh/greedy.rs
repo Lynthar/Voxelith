@@ -7,10 +7,10 @@
 //! 0fps AO + greedy combination ([0fps.net 2013-07-03]).
 //!
 //! For each of the 6 face directions, we sweep slice by slice through
-//! the chunk, build a 2D mask of `(packed_color, packed_ao)` keys
-//! (or `0` for "no visible face"), and run a 2D greedy rectangle
-//! cover on the mask to emit one quad per maximal monochromatic
-//! rectangle that also has uniform 4-corner AO.
+//! the chunk, build a 2D mask of packed keys (or `0` for "no visible
+//! face" — see "Mask key" below for the layout), and run a 2D greedy
+//! rectangle cover on the mask to emit one quad per maximal run of
+//! cells agreeing on color, tint zone and all four AO corners.
 //!
 //! Cross-chunk handling matches `NaiveMesher`: rectangles stop at
 //! the chunk boundary (no merging across chunks) but face culling
