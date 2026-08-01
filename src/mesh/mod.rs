@@ -20,7 +20,7 @@ mod patch;
 mod vertex;
 
 pub use greedy::{mesh_chunk_by_material, GreedyMesher};
-pub use marching_cubes::mesh_world_smoothed;
+pub use marching_cubes::{mesh_world_smoothed, SmoothMeshError};
 pub use naive::NaiveMesher;
 pub use patch::patch_to_mesh;
 pub use vertex::{ChunkMesh, Vertex};

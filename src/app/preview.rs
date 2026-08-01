@@ -9,6 +9,14 @@
 //! while the other stays on, the slot is cleared and the still-active
 //! source is forced through its "just-toggled-on" path on the next
 //! tick so it re-renders into the freshly-cleared slot.
+//!
+//! **Regen runs synchronously on the UI thread.** That's only viable
+//! because the panel's parameter caps keep the worst case to a few
+//! milliseconds (terrain ≤ 256×256 × 8 octaves, WFC ≤ 24×24, graphs of
+//! a handful of nodes) and the debounce collapses a slider drag into
+//! one run. Raising any of those caps, or adding a slower generator,
+//! means moving regen to a background task first — otherwise the
+//! editor visibly stutters while dragging.
 
 use std::time::{Duration, Instant};
 
@@ -213,6 +221,13 @@ impl App {
                 if let Some(r) = &mut self.renderer {
                     r.clear_preview();
                 }
+                // Unlike the graph path below, a single generator
+                // failing means the parameters in front of the user are
+                // invalid — say which. Silently dropping the overlay
+                // looked like the preview had switched itself off.
+                // Debounce means one message per failed regen, not per
+                // frame.
+                self.ui.set_status(format!("Preview failed: {}", e));
                 return;
             }
         };

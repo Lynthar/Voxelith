@@ -207,9 +207,30 @@ impl RenderPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
+                // `LessEqual`, not `Less`: every overlay drawn through
+                // this pipeline (brush hover, procgen preview, move
+                // ghost) is emitted by the *same* quad helpers as the
+                // world mesh, with no outward offset. On an isolated
+                // voxel the overlay's vertices are bit-identical to the
+                // ones already in the depth buffer, so `Less` rejected
+                // it for every single pixel — Remove / Paint / Fill
+                // simply had no visible hover highlight.
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // `LessEqual` alone only fixes exact ties. Where greedy
+                // meshing merged a large quad, the world face and the
+                // per-voxel overlay interpolate depth differently and
+                // land a ULP apart, which showed as speckled z-fighting.
+                // A small negative bias pulls the overlay toward the
+                // camera by a couple of depth units — enough to win
+                // consistently, far too little to poke through geometry
+                // genuinely in front of it. Safe because this pipeline
+                // never writes depth.
+                bias: wgpu::DepthBiasState {
+                    constant: -2,
+                    slope_scale: -2.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState {
                 count: 1,

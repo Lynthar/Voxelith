@@ -14,9 +14,9 @@
 //!   the two density samples spanning the 0.5 isolevel.
 //! - **Normal**: gradient of the density field at the vertex,
 //!   normalized — gives smooth (non-faceted) shading.
-//! - **Color**: average of the up-to-4 solid voxels touching the
-//!   edge this vertex lies on, so color boundaries (e.g. grass next
-//!   to stone) blend over a 1-cell band.
+//! - **Color**: average of the solid voxels at the edge's two
+//!   endpoints, so color boundaries (e.g. grass next to stone) blend
+//!   over a 1-cell band.
 //!
 //! Output is one combined `ChunkMesh` for the whole world, ready
 //! for the same OBJ / GLB writer code paths the regular exporters
@@ -24,10 +24,34 @@
 
 mod tables;
 
+use std::collections::HashMap;
+
 use tables::{EDGE_TABLE, TRI_TABLE};
+use thiserror::Error;
 
 use crate::core::{Voxel, World};
 use crate::mesh::{ChunkMesh, Vertex};
+
+/// Cap on the dense density field, in samples. 64 Mi cells is a
+/// ~400³ bounding box — far past any real asset (MagicaVoxel tops out
+/// at 256³) — and holds the field itself to 256 MiB, or 512 MiB while
+/// the blur's second buffer is alive.
+const MAX_DENSITY_CELLS: usize = 64 * 1024 * 1024;
+
+/// Why a smoothed mesh couldn't be produced.
+#[derive(Debug, Error)]
+pub enum SmoothMeshError {
+    #[error(
+        "scene spans {min:?} to {max:?}, which needs a {cells}-cell density \
+         field (limit {MAX_DENSITY_CELLS}); delete stray far-away voxels, or \
+         export without smoothing"
+    )]
+    SceneTooLarge {
+        min: (i32, i32, i32),
+        max: (i32, i32, i32),
+        cells: u128,
+    },
+}
 
 /// Density value above which a sample is considered "inside" the
 /// surface. With voxel-centered density (1.0 for solid, 0.0 for air,
@@ -38,7 +62,8 @@ const ISO_LEVEL: f32 = 0.5;
 /// Build a Marching-Cubes mesh of the entire world. Returns a single
 /// `ChunkMesh` (the chunk position field is unused — it's a flat
 /// world-space mesh, not chunked). For empty worlds returns an
-/// empty mesh.
+/// empty mesh; for a scene whose bounding box is too big to hold a
+/// dense density field, returns [`SmoothMeshError::SceneTooLarge`].
 ///
 /// The `smooth` flag toggles a 3×3×3 box-blur over the density field
 /// before marching. Without smoothing, MC over 0/1 voxel data
@@ -47,10 +72,13 @@ const ISO_LEVEL: f32 = 0.5;
 /// shrink and isolated voxels may disappear into the smoothed
 /// background. The smoothed mode is what the user gets from the
 /// "smoothed" export menu entries.
-pub fn mesh_world_smoothed(world: &World, smooth: bool) -> ChunkMesh {
+pub fn mesh_world_smoothed(
+    world: &World,
+    smooth: bool,
+) -> Result<ChunkMesh, SmoothMeshError> {
     use crate::core::ChunkPos;
-    let Some(bbox) = world_voxel_bbox(world) else {
-        return ChunkMesh::new(ChunkPos::ZERO);
+    let Some((bbox_min, bbox_max)) = world.scene_aabb() else {
+        return Ok(ChunkMesh::new(ChunkPos::ZERO));
     };
 
     // Density field is sampled at every integer position in
@@ -60,13 +88,28 @@ pub fn mesh_world_smoothed(world: &World, smooth: bool) -> ChunkMesh {
     // additionally needs `(±1)` padding on every side, so the
     // allocated field is (bbox extent + 3) per axis.
     let pad = 1;
-    let min = (bbox.min.0 - pad, bbox.min.1 - pad, bbox.min.2 - pad);
-    let max = (bbox.max.0 + 1 + pad, bbox.max.1 + 1 + pad, bbox.max.2 + 1 + pad);
+    let min = (bbox_min.0 - pad, bbox_min.1 - pad, bbox_min.2 - pad);
+    let max = (bbox_max.0 + 1 + pad, bbox_max.1 + 1 + pad, bbox_max.2 + 1 + pad);
     let size = (
         (max.0 - min.0 + 1) as usize,
         (max.1 - min.1 + 1) as usize,
         (max.2 - min.2 + 1) as usize,
     );
+    // The field is dense over the scene's *bounding box*, so cost is
+    // driven by how far apart the voxels are, not how many there are.
+    // Two voxels 1300 cells apart on each axis want ~8.8 GB — and the
+    // blur below allocates a second field of the same size. A failed
+    // `vec!` allocation aborts the process outright (no unwind, no
+    // dialog), so this has to be refused up front. `u128` because the
+    // product itself can wrap a `usize` at extreme coordinates.
+    let cells = size.0 as u128 * size.1 as u128 * size.2 as u128;
+    if cells > MAX_DENSITY_CELLS as u128 {
+        return Err(SmoothMeshError::SceneTooLarge {
+            min: bbox_min,
+            max: bbox_max,
+            cells,
+        });
+    }
     let total = size.0 * size.1 * size.2;
 
     // Raw density: 1.0 if the voxel at the sample point is solid,
@@ -97,16 +140,26 @@ pub fn mesh_world_smoothed(world: &World, smooth: bool) -> ChunkMesh {
     // A cube at (gx, gy, gz) uses corners (gx..gx+1, gy..gy+1,
     // gz..gz+1), so the cube range stops 1 short of `size` per axis.
     let mut mesh = ChunkMesh::new(ChunkPos::ZERO);
+    let mut shared: HashMap<EdgeKey, u32> = HashMap::new();
     for gz in 0..size.2 - 1 {
         for gy in 0..size.1 - 1 {
             for gx in 0..size.0 - 1 {
                 march_one_cube(
-                    &density, size, &idx, gx, gy, gz, min, world, &mut mesh,
+                    &density,
+                    size,
+                    &idx,
+                    gx,
+                    gy,
+                    gz,
+                    min,
+                    world,
+                    &mut mesh,
+                    &mut shared,
                 );
             }
         }
     }
-    mesh
+    Ok(mesh)
 }
 
 /// Process a single MC cube at field-local index `(gx, gy, gz)`.
@@ -123,6 +176,7 @@ fn march_one_cube(
     field_min: (i32, i32, i32),
     world: &World,
     mesh: &mut ChunkMesh,
+    shared: &mut HashMap<EdgeKey, u32>,
 ) {
     // Corner numbering follows Paul Bourke's convention so the
     // EDGE_TABLE / TRI_TABLE indices line up:
@@ -187,11 +241,15 @@ fn march_one_cube(
     let mut edge_vertices: [(([f32; 3], [f32; 3], [f32; 4]), bool); 12] = [
         (([0.0; 3], [0.0; 3], [0.0; 4]), false); 12
     ];
+    // Field-global identity of each edge, so neighbouring cubes reuse
+    // one vertex instead of each emitting their own copy.
+    let mut edge_keys: [EdgeKey; 12] = [((0, 0, 0), 0); 12];
     for e in 0..12 {
         if edges & (1 << e) == 0 {
             continue;
         }
         let (a, b) = EDGE_VERTEX_PAIRS[e];
+        edge_keys[e] = edge_key(corners_local[a], corners_local[b]);
         let pos = interp_edge(corners_world[a], corners_world[b], densities[a], densities[b]);
         // Shift the emitted surface +0.5 on every axis so MC's voxel-
         // CENTERED surface (a voxel at integer n spans [n-0.5, n+0.5])
@@ -254,22 +312,63 @@ fn march_one_cube(
             + cross[1] * v0.normal[1]
             + cross[2] * v0.normal[2];
 
-        let base = mesh.vertices.len() as u32;
-        mesh.vertices.push(v0);
+        let i0 = intern_edge_vertex(mesh, shared, edge_keys[e0], v0);
+        let i1 = intern_edge_vertex(mesh, shared, edge_keys[e1], v1);
+        let i2 = intern_edge_vertex(mesh, shared, edge_keys[e2], v2);
         if dot < 0.0 {
-            // Swap v1 / v2 so cross product comes out parallel to
-            // the outward normal (CCW from outside).
-            mesh.vertices.push(v2);
-            mesh.vertices.push(v1);
+            // Swap v1 / v2 so the cross product comes out parallel to
+            // the outward normal (CCW from outside). With shared
+            // vertices the swap is on the *indices* — the vertices
+            // themselves belong to other triangles too.
+            mesh.indices.extend_from_slice(&[i0, i2, i1]);
         } else {
-            mesh.vertices.push(v1);
-            mesh.vertices.push(v2);
+            mesh.indices.extend_from_slice(&[i0, i1, i2]);
         }
-        mesh.indices.push(base);
-        mesh.indices.push(base + 1);
-        mesh.indices.push(base + 2);
         i += 3;
     }
+}
+
+/// Identity of a marching-cubes edge within the density field: its low
+/// corner plus the axis it runs along. Two cubes that share an edge
+/// produce the same key.
+type EdgeKey = ((usize, usize, usize), u8);
+
+fn edge_key(a: (usize, usize, usize), b: (usize, usize, usize)) -> EdgeKey {
+    let axis = if a.0 != b.0 {
+        0
+    } else if a.1 != b.1 {
+        1
+    } else {
+        2
+    };
+    ((a.0.min(b.0), a.1.min(b.1), a.2.min(b.2)), axis)
+}
+
+/// Return the index of the vertex for `key`, creating it if this is the
+/// first cube to reach that edge.
+///
+/// Every attribute of an MC vertex is a property of the edge alone —
+/// the position interpolates the two corner densities, the normal is
+/// the density gradient at those same corners, and the color samples
+/// the same two voxels — so sharing is lossless. Emitting three fresh
+/// vertices per triangle instead pinned the vertex count at exactly
+/// 3 × triangles and roughly tripled every smoothed `.obj` / `.glb`.
+/// It also left cubes disagreeing by an ULP on the shared position,
+/// depending on which end they interpolated from; now the first writer
+/// fixes it for everyone.
+fn intern_edge_vertex(
+    mesh: &mut ChunkMesh,
+    shared: &mut HashMap<EdgeKey, u32>,
+    key: EdgeKey,
+    vertex: Vertex,
+) -> u32 {
+    if let Some(&index) = shared.get(&key) {
+        return index;
+    }
+    let index = mesh.vertices.len() as u32;
+    mesh.vertices.push(vertex);
+    shared.insert(key, index);
+    index
 }
 
 /// Linear interpolation of an edge crossing point. With density
@@ -382,83 +481,70 @@ fn sample_gradient(
     [dx, dy, dz]
 }
 
-/// Average color of the up-to-4 solid voxels that share the cube
-/// edge connecting world-space corners `a` and `b`. An edge between
-/// two adjacent corners is touched by exactly 4 voxels (the 4
-/// voxels in the 2-cell-thick slab perpendicular to the edge); we
-/// average the colors of whichever ones are solid. Falls back to
-/// white if somehow none are solid (shouldn't happen on a real
-/// surface vertex but defensively keeps mesh data sane).
+/// Color for a vertex on the cube edge between world-space corners
+/// `a` and `b`: the average of whichever of the two endpoint voxels
+/// are solid.
+///
+/// The density field is **voxel-centered** — the sample at integer
+/// point `p` *is* the voxel at `p` — so the two voxels this edge
+/// crosses between are exactly `a` and `b`, and a surface-crossing
+/// edge has at least one of them solid by construction.
+///
+/// The old code instead took a 2×2 ring around the edge's midpoint,
+/// which is the corner-based convention: every offset was on the edge's
+/// low-coordinate side, so it never included the high endpoint. Faces
+/// pointing −X/−Y/−Z therefore sampled the wrong cells entirely —
+/// locally convex ones (a flat floor's underside, an outer wall)
+/// sampled four air cells and fell through to the white default, and
+/// concave ones picked up whatever unrelated geometry happened to sit
+/// in the ring.
+///
+/// The fallback chain past the endpoints only matters after the
+/// smoothing blur, which can put an iso-crossing between two cells that
+/// are both empty; there we widen to the 2×2×2 block around the edge
+/// before giving up on white.
 fn edge_color(world: &World, a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
-    // The edge runs along whichever axis a and b differ on. The 4
-    // voxels touching this edge are at offsets {(0|−1)} on the two
-    // perpendicular axes from the edge's midpoint cell.
-    let mid = [
-        (a[0] + b[0]) * 0.5,
-        (a[1] + b[1]) * 0.5,
-        (a[2] + b[2]) * 0.5,
-    ];
-    // The midpoint sits between two voxels along the edge axis;
-    // we want both, AND the adjacent rows on the perpendicular
-    // axes — 4 voxels total.
-    let dx = b[0] - a[0];
-    let dy = b[1] - a[1];
-    let dz = b[2] - a[2];
-    // Identify the axis the edge runs along (exactly one of dx/dy/
-    // dz is non-zero given an MC cube edge).
-    let (ox, oy, oz): (i32, i32, i32) = if dx.abs() > 0.5 {
-        // Edge along X — perpendicular axes are Y, Z.
-        (mid[0].floor() as i32, 0, 0)
-    } else if dy.abs() > 0.5 {
-        (0, mid[1].floor() as i32, 0)
-    } else {
-        (0, 0, mid[2].floor() as i32)
-    };
-    let _ = (ox, oy, oz); // silence unused warning if we restructure
+    let ai = (a[0].round() as i32, a[1].round() as i32, a[2].round() as i32);
+    let bi = (b[0].round() as i32, b[1].round() as i32, b[2].round() as i32);
 
-    // The 4 voxels around the edge: subtract 1 from each
-    // perpendicular axis to find the lower of the two voxels in
-    // that direction; the edge spans both.
-    let edge_along_x = dx.abs() > 0.5;
-    let edge_along_y = dy.abs() > 0.5;
-    let edge_along_z = dz.abs() > 0.5;
+    if let Some(c) = average_solid(world, [ai, bi].into_iter()) {
+        return c;
+    }
 
-    let (vx, vy, vz) = (
-        mid[0].floor() as i32,
-        mid[1].floor() as i32,
-        mid[2].floor() as i32,
-    );
+    // Blurred field: widen to the block spanned by the two endpoints
+    // (2 cells along the edge axis, 2 on each perpendicular axis).
+    let lo = (ai.0.min(bi.0), ai.1.min(bi.1), ai.2.min(bi.2));
+    let block = (0..2).flat_map(move |dx| {
+        (0..2).flat_map(move |dy| {
+            (0..2).map(move |dz| (lo.0 + dx, lo.1 + dy, lo.2 + dz))
+        })
+    });
+    average_solid(world, block).unwrap_or([1.0, 1.0, 1.0, 1.0])
+}
 
-    let voxel_offsets: [(i32, i32, i32); 4] = if edge_along_x {
-        [(vx, vy - 1, vz - 1), (vx, vy, vz - 1), (vx, vy - 1, vz), (vx, vy, vz)]
-    } else if edge_along_y {
-        [(vx - 1, vy, vz - 1), (vx, vy, vz - 1), (vx - 1, vy, vz), (vx, vy, vz)]
-    } else if edge_along_z {
-        [(vx - 1, vy - 1, vz), (vx, vy - 1, vz), (vx - 1, vy, vz), (vx, vy, vz)]
-    } else {
-        // Degenerate (a == b) — should never happen for a real edge.
-        return [1.0, 1.0, 1.0, 1.0];
-    };
-
+/// Mean color of the solid voxels among `positions`, or `None` if none
+/// of them are solid.
+fn average_solid(
+    world: &World,
+    positions: impl Iterator<Item = (i32, i32, i32)>,
+) -> Option<[f32; 4]> {
     let mut sum = [0.0_f32; 4];
     let mut count = 0u32;
-    for (x, y, z) in voxel_offsets {
+    for (x, y, z) in positions {
         let v: Voxel = world.get_voxel(x, y, z);
         if !v.is_air() {
             let c = v.color_f32();
-            sum[0] += c[0];
-            sum[1] += c[1];
-            sum[2] += c[2];
-            sum[3] += c[3];
+            for i in 0..4 {
+                sum[i] += c[i];
+            }
             count += 1;
         }
     }
     if count == 0 {
-        [1.0, 1.0, 1.0, 1.0]
-    } else {
-        let n = count as f32;
-        [sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n]
+        return None;
     }
+    let n = count as f32;
+    Some([sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n])
 }
 
 /// 3×3×3 box blur over a density field. Used for the "smoothed"
@@ -528,57 +614,15 @@ const EDGE_VERTEX_PAIRS: [(usize, usize); 12] = [
     (3, 7),
 ];
 
-/// World-space bounding box (inclusive on both ends) of all solid
-/// voxels in the world. Returns `None` for an empty world.
-struct VoxelBbox {
-    min: (i32, i32, i32),
-    max: (i32, i32, i32),
-}
-
-fn world_voxel_bbox(world: &World) -> Option<VoxelBbox> {
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut min_z = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-    let mut max_z = i32::MIN;
-    let mut found = false;
-
-    for (chunk_pos, chunk_lock) in world.chunks() {
-        let chunk = chunk_lock.read();
-        let (ox, oy, oz) = chunk_pos.world_origin();
-        for (local_pos, _) in chunk.iter_solid() {
-            let x = ox + local_pos.x as i32;
-            let y = oy + local_pos.y as i32;
-            let z = oz + local_pos.z as i32;
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            min_z = min_z.min(z);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-            max_z = max_z.max(z);
-            found = true;
-        }
-    }
-
-    if !found {
-        None
-    } else {
-        Some(VoxelBbox {
-            min: (min_x, min_y, min_z),
-            max: (max_x, max_y, max_z),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_empty_world_no_geometry() {
         let world = World::new();
-        let mesh = mesh_world_smoothed(&world, true);
+        let mesh = mesh_world_smoothed(&world, true).expect("scene is small");
         assert!(mesh.is_empty());
     }
 
@@ -592,7 +636,7 @@ mod tests {
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, false);
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         assert!(!mesh.is_empty(), "isolated voxel should still produce a closed surface");
         assert!(mesh.triangle_count() >= 8, "expected at least an octahedron-ish surface");
     }
@@ -611,7 +655,7 @@ mod tests {
             }
         }
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, true);
+        let mesh = mesh_world_smoothed(&world, true).expect("scene is small");
         // Smoothed 3³ block is a roundish blob; expect non-zero,
         // bounded triangle count.
         assert!(!mesh.is_empty());
@@ -634,7 +678,7 @@ mod tests {
         let mut world = World::new();
         world.set_voxel(5, 5, 5, Voxel::from_rgb(200, 100, 50));
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, false);
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         assert!(!mesh.is_empty(), "expected MC mesh for isolated voxel");
 
         // Ground truth for "outward" is each triangle's vertex
@@ -716,7 +760,7 @@ mod tests {
             }
         }
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, false);
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         for v in &mesh.vertices {
             let len = (v.normal[0] * v.normal[0]
                 + v.normal[1] * v.normal[1]
@@ -741,7 +785,7 @@ mod tests {
         let mut world = World::new();
         world.set_voxel(2, 2, 2, Voxel::from_rgb(200, 100, 50));
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, false);
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         assert!(!mesh.is_empty());
         let mut lo = [f32::MAX; 3];
         let mut hi = [f32::MIN; 3];
@@ -778,7 +822,7 @@ mod tests {
             }
         }
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, false);
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         assert!(!mesh.is_empty());
         for v in &mesh.vertices {
             assert!(
@@ -843,30 +887,124 @@ mod tests {
     }
 
     #[test]
-    fn test_color_blends_at_voxel_boundary() {
-        // Two adjacent voxels with very different colors: vertices
-        // generated near the seam should have an averaged color
-        // (somewhere between the two source colors).
+    fn test_vertex_color_comes_from_the_voxel_the_surface_belongs_to() {
+        // Two adjacent voxels of very different colors. On the raw
+        // (unblurred) field every surface-crossing edge runs from one
+        // solid voxel to air, so each vertex takes that voxel's color
+        // exactly — a vertex on the red voxel's shell is red, one on
+        // the blue voxel's shell is blue, and nothing invents a third
+        // color. (The 2×2×2 widening in `edge_color` is only reached
+        // once the blur has moved a crossing between two empty cells.)
         let mut world = World::new();
-        let red = Voxel::from_rgb(255, 0, 0);
-        let blue = Voxel::from_rgb(0, 0, 255);
-        world.set_voxel(0, 0, 0, red);
-        world.set_voxel(1, 0, 0, blue);
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
+        world.set_voxel(1, 0, 0, Voxel::from_rgb(0, 0, 255));
         world.clear_dirty_flags();
-        let mesh = mesh_world_smoothed(&world, false);
-        // Some vertex somewhere should have a non-pure-red, non-pure-
-        // blue color (averaging happened).
-        let mut saw_blend = false;
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
+        assert!(!mesh.is_empty());
+
+        let mut saw_red = false;
+        let mut saw_blue = false;
         for v in &mesh.vertices {
-            let r = v.color[0];
-            let b = v.color[2];
-            // Blended voxel-color average has both r and b in
-            // (0, 1) — neither was 0 nor 1.
-            if r > 0.05 && r < 0.95 && b > 0.05 && b < 0.95 {
-                saw_blend = true;
-                break;
+            let c = [v.color[0], v.color[1], v.color[2]];
+            let is_red = c[0] > 0.99 && c[1] < 0.01 && c[2] < 0.01;
+            let is_blue = c[0] < 0.01 && c[1] < 0.01 && c[2] > 0.99;
+            assert!(
+                is_red || is_blue,
+                "vertex color {c:?} matches neither source voxel"
+            );
+            saw_red |= is_red;
+            saw_blue |= is_blue;
+        }
+        assert!(saw_red && saw_blue, "both voxels should contribute surface");
+    }
+
+    #[test]
+    fn test_isolated_voxel_surface_is_entirely_its_own_color() {
+        // Regression for the sampler that took a 2×2 ring on the
+        // edge's *low-coordinate* side. That ring never contained the
+        // high endpoint, so −X/−Y/−Z-facing surfaces of a locally
+        // convex shape — the underside of a floor, the outer face of a
+        // wall — sampled four air cells and fell through to the white
+        // default. On a lone voxel that's a white bottom on an
+        // otherwise orange blob.
+        let mut world = World::new();
+        world.set_voxel(5, 5, 5, Voxel::from_rgb(200, 100, 50));
+        world.clear_dirty_flags();
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
+        assert!(!mesh.is_empty());
+
+        let expected = Voxel::from_rgb(200, 100, 50).color_f32();
+        for v in &mesh.vertices {
+            for a in 0..3 {
+                assert!(
+                    (v.color[a] - expected[a]).abs() < 1e-3,
+                    "vertex at {:?} has color {:?}, expected the voxel's own {:?}",
+                    v.position,
+                    v.color,
+                    expected
+                );
             }
         }
-        assert!(saw_blend, "expected at least one blended vertex color");
+    }
+
+    #[test]
+    fn test_smoothed_mesh_shares_vertices_between_triangles() {
+        // Every MC vertex belongs to a cube edge, and all of its
+        // attributes are properties of that edge — so cubes sharing an
+        // edge must share the vertex. Emitting three fresh vertices per
+        // triangle pinned the count at 3× triangles and tripled every
+        // smoothed export.
+        let mut world = World::new();
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    world.set_voxel(x, y, z, Voxel::from_rgb(120, 120, 120));
+                }
+            }
+        }
+        world.clear_dirty_flags();
+        let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
+        assert!(mesh.triangle_count() > 0);
+        assert!(
+            mesh.vertex_count() < mesh.triangle_count() * 3,
+            "no sharing: {} vertices for {} triangles",
+            mesh.vertex_count(),
+            mesh.triangle_count()
+        );
+        // Sharing must be exact, not approximate: no two vertices may
+        // sit at the same position.
+        let mut seen = HashSet::new();
+        for v in &mesh.vertices {
+            let key = (
+                v.position[0].to_bits(),
+                v.position[1].to_bits(),
+                v.position[2].to_bits(),
+            );
+            assert!(seen.insert(key), "duplicate vertex at {:?}", v.position);
+        }
+    }
+
+    #[test]
+    fn test_far_apart_voxels_error_instead_of_aborting() {
+        // The density field is dense over the scene's bounding box, so
+        // two stray voxels far apart ask for gigabytes. A failed
+        // allocation aborts the process, so this has to be a clean
+        // error the exporter can report.
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
+        world.set_voxel(2000, 2000, 2000, Voxel::from_rgb(1, 2, 3));
+        world.clear_dirty_flags();
+        assert!(matches!(
+            mesh_world_smoothed(&world, false),
+            Err(SmoothMeshError::SceneTooLarge { .. })
+        ));
+
+        // A far-apart pair on a *single* axis is only a thin slab, and
+        // must still succeed.
+        let mut thin = World::new();
+        thin.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
+        thin.set_voxel(2000, 0, 0, Voxel::from_rgb(1, 2, 3));
+        thin.clear_dirty_flags();
+        assert!(mesh_world_smoothed(&thin, false).is_ok());
     }
 }

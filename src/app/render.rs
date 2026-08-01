@@ -27,6 +27,12 @@ impl App {
         // panel reads them off `Ui` without needing a borrow back.
         self.ui.ai_job = self.ai_job.clone();
         self.ui.ai_has_key = self.ai_has_key;
+        // Ditto for GPU wireframe support, so the wireframe toggles can
+        // gray themselves out instead of silently doing nothing.
+        self.ui.wireframe_supported = self
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.wireframe_supported);
         // Viewport-HUD snapshot: gesture state (shape drag, move
         // anchors, stroke plane) lives on App, so condense it here
         // and hand the display-ready struct across the UI boundary.

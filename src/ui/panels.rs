@@ -33,9 +33,21 @@ pub enum UiAction {
     ExportGlbSmoothedHeavy,
     Exit,
 
+    /// Unsaved-changes prompt: save the project, then run the action
+    /// that was waiting on it. If the save doesn't happen (write error,
+    /// or the user backs out of Save As) the pending action is dropped.
+    UnsavedSave,
+    /// Unsaved-changes prompt: run the pending action, losing the edits.
+    UnsavedDiscard,
+    /// Unsaved-changes prompt: forget the pending action.
+    UnsavedCancel,
+
     // Edit operations
     Undo,
     Redo,
+    /// Wipe the world, history and sockets. Not undoable, so the menu
+    /// raises a confirm dialog and only dispatches this once the user
+    /// accepts.
     ClearAll,
 
     // Selection / clipboard operations
@@ -173,7 +185,22 @@ pub fn group_thousands(n: usize) -> String {
     out
 }
 
-/// UI state
+/// A "this can't be undone — are you sure?" dialog, carrying the
+/// action to dispatch if the user says yes.
+#[derive(Debug, Clone)]
+pub struct ConfirmPrompt {
+    pub title: String,
+    pub body: String,
+    pub action: UiAction,
+}
+
+/// UI state.
+///
+/// The `show_*` toggles start false here; the startup values that
+/// actually reach the user come from `prefs::PanelVisibility`, applied
+/// by `App::new` right after construction. (There used to be a hand-
+/// written `new()` carrying a second, contradicting set of defaults —
+/// it had no callers.)
 #[derive(Default)]
 pub struct UiState {
     // Panel visibility (toggles, not one-shot actions)
@@ -204,6 +231,17 @@ pub struct UiState {
     /// while shown; cleared by the dialog's Close button.
     pub export_report: Option<ExportReport>,
 
+    /// Pending confirmation for a destructive, non-undoable action.
+    /// Accepting dispatches the carried `UiAction`; cancelling drops it.
+    /// In-app egui, never a native modal — see `show_recovery_prompt`.
+    pub confirm: Option<ConfirmPrompt>,
+
+    /// Unsaved-changes prompt. `Some(what)` while shown, where `what`
+    /// describes the operation being held up ("open another project").
+    /// Raised by `App::guard_then`; the Save / Don't Save / Cancel
+    /// buttons dispatch the `Unsaved*` actions.
+    pub unsaved_prompt: Option<String>,
+
     // One-shot action queue
     pending_actions: Vec<UiAction>,
 
@@ -219,26 +257,6 @@ pub struct UiState {
 }
 
 impl UiState {
-    pub fn new() -> Self {
-        Self {
-            show_stats: true,
-            show_tools: true,
-            show_palette: true,
-            show_viewport_settings: false,
-            show_procgen: false,
-            show_graph: false,
-            show_help: false,
-            show_about: false,
-            show_ai: false,
-            show_recovery_prompt: false,
-            error_dialog: None,
-            export_report: None,
-            pending_actions: Vec::new(),
-            status_message: None,
-            ai_key_input: String::new(),
-        }
-    }
-
     /// Queue an action to be processed
     pub fn request(&mut self, action: UiAction) {
         if !self.pending_actions.contains(&action) {

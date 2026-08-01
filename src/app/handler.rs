@@ -16,12 +16,24 @@ use winit::{
 
 use voxelith::editor::Tool;
 
-use super::App;
+use super::{App, PendingAction};
 
 /// Squared pixel distance the cursor must travel from the left-press
 /// point before drag-paint engages. 8 px tolerates normal click
 /// tremor without blocking deliberate drags.
 const DRAG_THRESHOLD_PX_SQ: f32 = 8.0 * 8.0;
+
+impl App {
+    /// Persist prefs, drop the crash-recovery autosave (a clean exit
+    /// means the next launch shouldn't offer recovery), and stop the
+    /// event loop. Shared by the window's close button and the File ▸
+    /// Exit menu item so the two can't drift apart.
+    fn shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.save_prefs();
+        self.delete_autosave();
+        event_loop.exit();
+    }
+}
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -51,11 +63,16 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => {
-                self.save_prefs();
-                // Clean shutdown: drop the crash-recovery autosave so the
-                // next launch doesn't mistake this for a crash.
-                self.delete_autosave();
-                event_loop.exit();
+                // Route through the unsaved-changes guard: a clean exit
+                // deletes the crash-recovery autosave, so closing with
+                // unsaved work used to destroy the only copy of it
+                // without a word. If the guard defers, it raises the
+                // prompt and `exit_requested` stays false until the
+                // user answers.
+                self.guard_then(PendingAction::Exit);
+                if self.exit_requested {
+                    self.shutdown(event_loop);
+                }
             }
 
             WindowEvent::Resized(size) => {
@@ -79,6 +96,7 @@ impl ApplicationHandler for App {
                     renderer.camera_controller.clear_mouse_buttons();
                 }
                 self.left_button_held = false;
+                self.editor.history.end_stroke();
                 self.last_stroke_voxel = None;
                 self.stroke_start_screen_pos = None;
                 self.stroke_plane = None;
@@ -86,6 +104,15 @@ impl ApplicationHandler for App {
                 self.selection_drag_anchor = None;
                 self.selection_move_anchor = None;
                 self.move_ghost_voxels.clear();
+                // Modifier state is only refreshed by ModifiersChanged,
+                // which is delivered to whoever has focus — so an
+                // alt-tab away leaves `modifiers` claiming Alt is still
+                // down and (if Alt swapped the tool) the eyedropper
+                // latched in. Reset both, mirroring the alt-release arm.
+                self.modifiers = Default::default();
+                if let Some(tool) = self.editor.tool_before_alt.take() {
+                    self.editor.current_tool = tool;
+                }
                 if self.cursor_captured {
                     self.cursor_captured = false;
                     if let Some(window) = &self.window {
@@ -239,13 +266,25 @@ impl ApplicationHandler for App {
                         // two-phase drag); Select commits the AABB; a brush
                         // seals its merged undo entry.
                         if self.left_button_held {
+                            // Seal the stroke unconditionally, before
+                            // the per-tool dispatch. That dispatch asks
+                            // "what tool is active *now*", but the
+                            // gesture was started by whatever tool was
+                            // active at press time — switch with a
+                            // number key mid-drag and the stroke would
+                            // never get sealed, so the next stroke
+                            // within the 200 ms merge window silently
+                            // joined the previous undo entry (one
+                            // Ctrl+Z, two separate strokes gone). It's
+                            // a no-op when no stroke is open, and the
+                            // shape / select paths commit via `execute`,
+                            // which reseals anyway.
+                            self.editor.history.end_stroke();
                             let tool = self.editor.current_tool;
                             if tool.is_shape() {
                                 self.transition_shape_to_height();
                             } else if matches!(tool, Tool::Select) {
                                 self.commit_selection();
-                            } else {
-                                self.editor.history.end_stroke();
                             }
                         }
                         self.left_button_held = false;
@@ -363,6 +402,16 @@ impl ApplicationHandler for App {
                 self.rebuild_all_meshes();
                 self.tick_autosave();
                 self.render_frame(dt);
+
+                // `render_frame` drains the UI action queue, so an Exit
+                // (or an unsaved-changes prompt answered with Discard /
+                // Save) lands here. The event loop can only be stopped
+                // from an `ActiveEventLoop`, which exists in this
+                // callback and not inside `App`.
+                if self.exit_requested {
+                    self.shutdown(event_loop);
+                    return;
+                }
 
                 if let Some(window) = &self.window {
                     window.request_redraw();

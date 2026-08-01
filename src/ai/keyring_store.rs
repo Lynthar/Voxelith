@@ -68,5 +68,22 @@ pub fn clear_api_key(provider: &str) -> Result<(), KeyringError> {
 /// the AI panel to decide whether to enable the Generate button vs
 /// show the "Set API key…" prompt.
 pub fn has_api_key(provider: &str) -> bool {
-    matches!(load_api_key(provider), Ok(s) if !s.is_empty())
+    match load_api_key(provider) {
+        Ok(key) => !key.is_empty(),
+        Err(KeyringError::NotFound) => false,
+        // A locked keychain or an unreachable backend is not the same
+        // thing as "no key set", but the caller only has a bool to work
+        // with. Say so in the log at least — otherwise the panel
+        // invites the user to type their key in again (overwriting a
+        // perfectly good entry) with no clue why it went missing.
+        Err(e) => {
+            log::warn!(
+                "Keychain unavailable while checking the '{}' key \
+                 (treating it as unset): {}",
+                provider,
+                e
+            );
+            false
+        }
+    }
 }

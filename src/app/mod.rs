@@ -245,15 +245,32 @@ pub struct App {
     /// the keyring every frame. Refreshed by save / clear actions.
     pub(super) ai_has_key: bool,
 
-    /// Voxel data changed since the last time anything was persisted
-    /// (manual save *or* autosave). Set from `rebuild_all_meshes` (dirty
-    /// chunks ⟺ a voxel changed) and cleared by save / autosave / open /
-    /// new / import / initial-scene. Drives whether `tick_autosave`
-    /// bothers to write.
+    /// Voxel data changed since the last time the user's *own* file was
+    /// written. Set from `rebuild_all_meshes` (dirty chunks ⟺ a voxel
+    /// changed) and cleared only by manual save / open / new / import /
+    /// initial-scene. Drives the unsaved-changes guard on every path
+    /// that would throw the scene away.
+    ///
+    /// Deliberately NOT cleared by autosave: the autosave is a crash net
+    /// living in the config dir, and a clean exit deletes it. If it
+    /// cleared this flag, the sequence "edit → autosave fires → close"
+    /// would skip the prompt and then delete the only copy.
     pub(super) unsaved_changes: bool,
+    /// Same signal, but scoped to the autosave timer, which *does* want
+    /// "nothing changed since my last write" so it doesn't rewrite an
+    /// identical world every interval.
+    pub(super) autosave_pending: bool,
     /// When the last autosave ran. `tick_autosave` rate-limits writes to
     /// `AUTOSAVE_INTERVAL`.
     pub(super) last_autosave: Instant,
+
+    /// Action deferred while the unsaved-changes prompt is up. Answered
+    /// by the `UnsavedGuard*` actions; see `App::guard_then`.
+    pub(super) pending_guarded: Option<PendingAction>,
+    /// Set when the app should shut down at the end of this frame. The
+    /// actual `event_loop.exit()` happens in `handler`, which is the
+    /// only place holding an `ActiveEventLoop`.
+    pub(super) exit_requested: bool,
 
     /// World-space AABB (inclusive cell coords) of the most recent
     /// procgen / graph / AI generation, powering the "Frame Generated"
@@ -262,6 +279,45 @@ pub struct App {
     /// stale bounds just frames where the geometry was, and the action
     /// guards on `None`.
     pub(super) last_generated_bounds: Option<((i32, i32, i32), (i32, i32, i32))>,
+}
+
+/// An action that throws the current scene away, held until the
+/// unsaved-changes prompt is answered. See `App::guard_then`.
+pub(super) enum PendingAction {
+    NewProject,
+    /// File ▸ Open — the path picker hasn't run yet.
+    OpenPicker,
+    /// Open Recent — the path is already known.
+    OpenPath(PathBuf),
+    ImportVox,
+    Exit,
+    Generate(GenerateKind),
+}
+
+impl PendingAction {
+    /// What the prompt says is about to happen ("Open another project
+    /// anyway?"). Written to fit after "…unsaved changes.".
+    fn describe(&self) -> &'static str {
+        match self {
+            PendingAction::NewProject => "start a new project",
+            PendingAction::OpenPicker | PendingAction::OpenPath(_) => {
+                "open another project"
+            }
+            PendingAction::ImportVox => "import a .vox model",
+            PendingAction::Exit => "quit",
+            PendingAction::Generate(_) => "replace the scene",
+        }
+    }
+}
+
+/// Which built-in scene the Generate menu asked for. A plain marker so
+/// the choice can sit in a `PendingAction` (a closure couldn't).
+#[derive(Clone, Copy)]
+pub(super) enum GenerateKind {
+    TestCube,
+    Ground,
+    Sphere,
+    Pyramid,
 }
 
 impl App {
@@ -354,7 +410,10 @@ impl App {
             ai_handle: None,
             ai_has_key: voxelith::ai::has_api_key("fal_ai"),
             unsaved_changes: false,
+            autosave_pending: false,
             last_autosave: Instant::now(),
+            pending_guarded: None,
+            exit_requested: false,
             last_generated_bounds: None,
         }
     }
@@ -737,6 +796,7 @@ impl App {
         // dialog behaves like the in-loop file dialogs that already work.
         self.create_initial_scene();
         self.unsaved_changes = false;
+        self.autosave_pending = false;
         // If a crash-recovery autosave is on disk, the last session
         // didn't exit cleanly (a clean exit deletes it) — raise the
         // in-app recovery prompt. The default scene is already up behind
@@ -762,6 +822,62 @@ impl App {
         self.recenter_camera_on_scene();
     }
 
+    /// Reset every piece of session state that refers to the geometry
+    /// of the scene being replaced.
+    ///
+    /// Every whole-scene replacement path — New, Open, Import, crash
+    /// recovery, Clear All, Generate\* — must call this. They each used
+    /// to open-code their own subset, and the parts they all forgot
+    /// were the selection and the generated-bounds: project A's marquee
+    /// stayed live over project B, so Delete / Ctrl+X / arrow-nudge hit
+    /// B's voxels at A's coordinates, and Frame Generated flew off to
+    /// where the *previous* scene's geometry had been.
+    ///
+    /// Callers that restore state from a file (open / recover) run this
+    /// first and repopulate sockets afterwards.
+    pub(super) fn reset_scene_session_state(&mut self) {
+        self.editor.history.clear();
+        // Clears the selection plus the drag / move anchors and the
+        // move ghost — see `App::deselect`.
+        self.deselect();
+        self.editor.sockets.clear();
+        self.shape_drag = None;
+        self.stroke_plane = None;
+        self.last_stroke_voxel = None;
+        self.last_generated_bounds = None;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.chunk_meshes.clear();
+        }
+    }
+
+    /// Run `action`, or park it until the user answers the
+    /// unsaved-changes prompt.
+    ///
+    /// Lives on `App` rather than in the UiAction dispatch because
+    /// Ctrl+N / Ctrl+O call `new_project` / `open_project` directly from
+    /// the key handler and would sail straight past a guard installed
+    /// only in the queue.
+    pub(super) fn guard_then(&mut self, action: PendingAction) {
+        if !self.unsaved_changes {
+            self.run_guarded(action);
+            return;
+        }
+        self.ui.state.unsaved_prompt = Some(action.describe().to_string());
+        self.pending_guarded = Some(action);
+    }
+
+    /// Perform a guarded action now that it's cleared to run.
+    pub(super) fn run_guarded(&mut self, action: PendingAction) {
+        match action {
+            PendingAction::NewProject => self.new_project(),
+            PendingAction::OpenPicker => self.open_project(),
+            PendingAction::OpenPath(path) => self.do_open_project(path),
+            PendingAction::ImportVox => self.import_vox(),
+            PendingAction::Exit => self.exit_requested = true,
+            PendingAction::Generate(kind) => self.generate_scene(kind),
+        }
+    }
+
     /// Path of the crash-recovery autosave, next to `prefs.ron` in the
     /// platform config dir. `None` if the OS exposes no config dir.
     fn autosave_path() -> Option<PathBuf> {
@@ -771,18 +887,18 @@ impl App {
 
     /// Per-frame autosave tick. Cheap when idle (one bool + one elapsed
     /// check). Writes at most once per `AUTOSAVE_INTERVAL`, and only when
-    /// there are unsaved changes to a non-empty world. Clears
-    /// `unsaved_changes` on a successful write so we don't rewrite an
-    /// unchanged world every interval; a failed write is logged and
-    /// retried next interval.
+    /// there are changes to a non-empty world. Clears `autosave_pending`
+    /// on a successful write so we don't rewrite an unchanged world every
+    /// interval; a failed write is logged and retried next interval.
+    /// `unsaved_changes` is left alone — see its doc comment.
     pub(super) fn tick_autosave(&mut self) {
-        if !self.unsaved_changes || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+        if !self.autosave_pending || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
             return;
         }
         // Don't autosave (or offer to recover) an empty scene — e.g. just
         // after Clear All. Reset the timer so we don't re-check every frame.
         if self.world.scene_center().is_none() {
-            self.unsaved_changes = false;
+            self.autosave_pending = false;
             self.last_autosave = Instant::now();
             return;
         }
@@ -805,7 +921,7 @@ impl App {
         match result {
             Ok(()) => {
                 log::info!("Autosaved to {}", path.display());
-                self.unsaved_changes = false;
+                self.autosave_pending = false;
             }
             Err(e) => {
                 log::warn!("Autosave failed: {}", e);
@@ -864,10 +980,11 @@ impl App {
         // Dirty chunks this frame ⟺ voxel data changed (a write marks its
         // chunk dirty; boundary writes also mark neighbors). This is the
         // single chokepoint every edit / generation / AI / paste funnels
-        // through, so it's where we flag the document for autosave. The
-        // load / new / initial-scene paths clear the flag again after
+        // through, so it's where we flag the document as modified. The
+        // load / new / initial-scene paths clear the flags again after
         // their own rebuild.
         self.unsaved_changes = true;
+        self.autosave_pending = true;
 
         // Concurrent reads only: mesher acquires read locks on the dirty
         // chunk + its 26 Moore neighbors (3³−1 — per-vertex AO samples

@@ -28,8 +28,12 @@
 //!   packed via `mesh::ao::pack_ao`
 //!
 //! `0` is reserved as the "no visible face" sentinel — safe because
-//! every editor-placed voxel has α = 255, so a non-air visible face
-//! always packs to a non-zero `packed_rgba`. Two cells merge only
+//! every voxel that reaches the world has α = 255, so a non-air visible
+//! face always packs to a non-zero `packed_rgba`. That holds for the
+//! editor's own brushes by construction, and for imports because
+//! `io::vox` normalizes palette alpha on the way in (a transparent
+//! palette entry otherwise produced a solid voxel that packed to
+//! exactly zero). Two cells merge only
 //! when the entire `u64` matches — color, all 4 corner AO values, and
 //! tint zone — without which the merged quad's bilinear-interpolated AO
 //! would disagree with per-cell AO, or a quad would span two zones.

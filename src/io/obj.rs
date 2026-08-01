@@ -24,12 +24,14 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::core::World;
-use crate::mesh::{mesh_world_smoothed, ChunkMesh, GreedyMesher, Mesher};
+use crate::mesh::{mesh_world_smoothed, ChunkMesh, GreedyMesher, Mesher, SmoothMeshError};
 
 #[derive(Debug, Error)]
 pub enum ObjError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Smoothing(#[from] SmoothMeshError),
 }
 
 /// Summary stats from an OBJ export. Used by the UI to surface a
@@ -151,7 +153,7 @@ pub fn export_obj_smoothed(
     path: &Path,
     blur: bool,
 ) -> Result<ObjStats, ObjError> {
-    let mesh = mesh_world_smoothed(world, blur);
+    let mesh = mesh_world_smoothed(world, blur)?;
     let stats = ObjStats {
         vertex_count: mesh.vertex_count(),
         triangle_count: mesh.triangle_count(),

@@ -17,17 +17,63 @@ fn sockets_from_state(state: &io::EditorState) -> Vec<Socket> {
         .collect()
 }
 
+/// Which remembered directory a file dialog should open in. Keeping
+/// the mapping in one place stops each dialog site from inventing its
+/// own idea of "where should this start".
+pub(super) enum DialogStart {
+    /// Project open / save — the folder of the most recent project.
+    Project,
+    /// Any asset export — where the user last wrote one.
+    Export,
+    /// `.vox` import — where the user last read one.
+    Import,
+}
+
 impl App {
-    /// Create a new empty project.
+    /// Build a native file dialog owned by the main window.
+    ///
+    /// `set_parent` is load-bearing, not cosmetic. An ownerless
+    /// `IFileDialog` on Windows is an independent top-level window with
+    /// no guarantee of sitting above ours, and it regularly opened
+    /// *behind* the main window. Because the dialog runs its own modal
+    /// message loop, the app stops rendering and ignores input while
+    /// it's up — so what the user saw was a frozen program with no
+    /// dialog anywhere on screen, indistinguishable from a hang, with
+    /// force-quit (and every unsaved edit) as the obvious next step.
+    /// Every dialog goes through here so a new call site can't
+    /// reintroduce it.
+    pub(super) fn file_dialog(&self, start: DialogStart) -> rfd::FileDialog {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(window) = &self.window {
+            dialog = dialog.set_parent(window.as_ref());
+        }
+        let dir = match start {
+            DialogStart::Project => self
+                .prefs
+                .recent_files
+                .first()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf()),
+            DialogStart::Export => self.prefs.last_export_dir.clone(),
+            DialogStart::Import => self.prefs.last_import_dir.clone(),
+        };
+        // Skip a remembered directory that has since been deleted or
+        // unmounted; rfd would land somewhere arbitrary rather than at
+        // its own sensible default.
+        if let Some(dir) = dir.filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog
+    }
+
+    /// Create a new empty project. Guarded by `App::guard_then` —
+    /// callers must not invoke this directly.
     pub(super) fn new_project(&mut self) {
         self.world.clear();
-        self.editor.history.clear();
-        self.editor.sockets.clear();
+        self.reset_scene_session_state();
         self.project_path = None;
         self.unsaved_changes = false;
-        if let Some(renderer) = &mut self.renderer {
-            renderer.chunk_meshes.clear();
-        }
+        self.autosave_pending = false;
         self.ui.set_status("New project created");
     }
 
@@ -111,7 +157,7 @@ impl App {
             }
         };
         self.world = world;
-        self.editor.history.clear();
+        self.reset_scene_session_state();
         self.project_path = None;
         self.editor.brush_color = Voxel::from_rgba(
             editor_state.brush_color[0],
@@ -134,7 +180,6 @@ impl App {
         self.editor.current_tool = super::tool_from_index(editor_state.selected_tool as u8);
         self.editor.sockets = sockets_from_state(&editor_state);
         if let Some(renderer) = &mut self.renderer {
-            renderer.chunk_meshes.clear();
             renderer.camera.position = glam::Vec3::new(
                 editor_state.camera_position[0],
                 editor_state.camera_position[1],
@@ -166,7 +211,8 @@ impl App {
 
     /// Prompt for a path and save.
     pub(super) fn save_project_as(&mut self) {
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Project)
             .add_filter("Voxelith Project", &["vxlt"])
             .set_title("Save Project As");
 
@@ -182,6 +228,7 @@ impl App {
             Ok(_) => {
                 self.project_path = Some(path.clone());
                 self.unsaved_changes = false;
+                self.autosave_pending = false;
                 self.touch_recent(&path);
                 let filename = path
                     .file_name()
@@ -191,7 +238,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to save project {:?}: {}", path, e);
-                self.show_write_error("Save failed", &path, "save", &e);
+                self.show_write_error("Save failed", &path, "save", &e, true);
                 self.ui.set_status(format!(
                     "Save failed: {} — your work is NOT saved",
                     file_label(&path)
@@ -202,7 +249,8 @@ impl App {
 
     /// Prompt for a path and open a project.
     pub(super) fn open_project(&mut self) {
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Project)
             .add_filter("Voxelith Project", &["vxlt"])
             .add_filter("All Files", &["*"])
             .set_title("Open Project");
@@ -219,7 +267,7 @@ impl App {
         match io::load_world_with_state(&path) {
             Ok((world, editor_state)) => {
                 self.world = world;
-                self.editor.history.clear();
+                self.reset_scene_session_state();
                 self.project_path = Some(path.clone());
 
                 self.editor.brush_color = Voxel::from_rgba(
@@ -246,7 +294,6 @@ impl App {
                 self.editor.sockets = sockets_from_state(&editor_state);
 
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.chunk_meshes.clear();
                     renderer.camera.position = glam::Vec3::new(
                         editor_state.camera_position[0],
                         editor_state.camera_position[1],
@@ -269,6 +316,7 @@ impl App {
 
                 self.rebuild_all_meshes();
                 self.unsaved_changes = false;
+                self.autosave_pending = false;
                 self.touch_recent(&path);
                 let filename = path
                     .file_name()
@@ -290,7 +338,8 @@ impl App {
         // Read the UI's Z-up→Y-up toggle (default on) up front so the
         // borrow doesn't tangle with the `&mut self` writes below.
         let convert_axes = self.ui.convert_vox_axes;
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Import)
             .add_filter("MagicaVoxel", &["vox"])
             .set_title("Import MagicaVoxel File");
 
@@ -302,7 +351,7 @@ impl App {
             Ok(mut file) => match io::import_vox(&mut file, convert_axes) {
                 Ok(world) => {
                     self.world = world;
-                    self.editor.history.clear();
+                    self.reset_scene_session_state();
                     // Detach from any previously-open .vxlt: the imported
                     // model is a new document, so a later Save must prompt
                     // for a location instead of silently overwriting the
@@ -311,12 +360,6 @@ impl App {
                     // `unsaved_changes` is left false; the first edit arms
                     // autosave.
                     self.project_path = None;
-                    // A .vox carries no sockets; the imported model
-                    // replaces the scene, so drop any from the old one.
-                    self.editor.sockets.clear();
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.chunk_meshes.clear();
-                    }
                     self.rebuild_all_meshes();
                     // Imported world replaces everything; the previous
                     // camera target is now meaningless. Anchor orbit
@@ -327,7 +370,10 @@ impl App {
                     // camera state.)
                     self.recenter_camera_on_scene();
                     self.unsaved_changes = false;
-                    self.touch_recent(&path);
+                    self.autosave_pending = false;
+                    // Imports seed the next import dialog rather than
+                    // the project MRU — see `Prefs::touch_recent`.
+                    self.prefs.remember_import_dir(&path);
                     let filename = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -366,7 +412,8 @@ impl App {
         } else {
             "Export Smoothed OBJ (light / preserve detail)"
         };
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Export)
             .add_filter("Wavefront OBJ", &["obj"])
             .set_title(title);
 
@@ -376,7 +423,7 @@ impl App {
 
         match io::export_obj_smoothed(&self.world, &path, blur) {
             Ok(stats) => {
-                self.touch_recent(&path);
+                self.prefs.remember_export_dir(&path);
                 let filename = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -408,7 +455,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export smoothed OBJ: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::ObjError::Io(_)));
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -424,7 +471,8 @@ impl App {
         } else {
             "Export Smoothed glTF Binary (light / preserve detail)"
         };
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Export)
             .add_filter("glTF Binary", &["glb"])
             .set_title(title);
 
@@ -435,7 +483,7 @@ impl App {
         let sockets = self.socket_export_nodes();
         match io::export_glb_smoothed(&self.world, &sockets, &path, blur) {
             Ok(stats) => {
-                self.touch_recent(&path);
+                self.prefs.remember_export_dir(&path);
                 let filename = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -469,7 +517,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export smoothed GLB: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::GlbError::Io(_)));
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -483,7 +531,8 @@ impl App {
     /// reports vertex / triangle / chunk counts and the resulting
     /// file size so the user can sanity-check large exports.
     pub(super) fn export_glb(&mut self) {
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Export)
             .add_filter("glTF Binary", &["glb"])
             .set_title("Export as glTF Binary");
 
@@ -494,7 +543,7 @@ impl App {
         let sockets = self.socket_export_nodes();
         match io::export_glb(&self.world, &sockets, &path) {
             Ok(stats) => {
-                self.touch_recent(&path);
+                self.prefs.remember_export_dir(&path);
                 let filename = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -527,7 +576,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export GLB: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::GlbError::Io(_)));
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -540,7 +589,8 @@ impl App {
     /// files MRU on success and surfaces triangle counts in the status
     /// bar so the user knows the export wasn't silently empty.
     pub(super) fn export_obj(&mut self) {
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Export)
             .add_filter("Wavefront OBJ", &["obj"])
             .set_title("Export as Wavefront OBJ");
 
@@ -550,7 +600,7 @@ impl App {
 
         match io::export_obj(&self.world, &path) {
             Ok(stats) => {
-                self.touch_recent(&path);
+                self.prefs.remember_export_dir(&path);
                 let filename = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -581,7 +631,7 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export OBJ: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e);
+                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::ObjError::Io(_)));
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -593,7 +643,8 @@ impl App {
         // Mirror the import convention on the way out (default on) so a
         // model exported to .vox opens upright in MagicaVoxel.
         let convert_axes = self.ui.convert_vox_axes;
-        let dialog = rfd::FileDialog::new()
+        let dialog = self
+            .file_dialog(DialogStart::Export)
             .add_filter("MagicaVoxel", &["vox"])
             .set_title("Export as MagicaVoxel");
 
@@ -604,7 +655,7 @@ impl App {
         match std::fs::File::create(&path) {
             Ok(mut file) => match io::export_vox(&self.world, &mut file, convert_axes) {
                 Ok(overflow) => {
-                    self.touch_recent(&path);
+                    self.prefs.remember_export_dir(&path);
                     let filename = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -638,14 +689,14 @@ impl App {
                 }
                 Err(e) => {
                     log::error!("Failed to export VOX: {}", e);
-                    self.show_write_error("Export failed", &path, "export", &e);
+                    self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::VoxError::Io(_)));
                     self.ui
                         .set_status(format!("Export failed: {}", file_label(&path)));
                 }
             },
             Err(e) => {
                 log::error!("Failed to create file {:?}: {}", path, e);
-                self.show_write_error("Export failed", &path, "create", &e);
+                self.show_write_error("Export failed", &path, "create", &e, true);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(&path)));
             }
@@ -707,14 +758,25 @@ impl App {
         path: &Path,
         verb: &str,
         err: &dyn std::fmt::Display,
+        writable_hint_applies: bool,
     ) {
-        let detail = format!(
-            "Couldn't {} \"{}\" — {}.\n\nCheck you have write permission and free \
-             disk space, then try a different location.",
-            verb,
-            file_label(path),
-            err
-        );
+        // The recovery hint is about the filesystem, so only offer it
+        // for filesystem failures. Exports can also fail for reasons
+        // that have nothing to do with the disk — a scene too spread
+        // out to smooth, a mesh past GLB's 4 GiB ceiling — and those
+        // errors already say what to do; telling the user to check
+        // their permissions on top of that just misleads.
+        let detail = if writable_hint_applies {
+            format!(
+                "Couldn't {} \"{}\" — {}.\n\nCheck you have write permission and \
+                 free disk space, then try a different location.",
+                verb,
+                file_label(path),
+                err
+            )
+        } else {
+            format!("Couldn't {} \"{}\" — {}.", verb, file_label(path), err)
+        };
         self.show_error_dialog(title, &detail);
     }
 
@@ -754,6 +816,10 @@ fn describe_vox_import_error(e: &io::VoxError, path: &Path) -> (String, String) 
         io::VoxError::InvalidChunkId(id) => (
             format!("an unexpected chunk tag {:?}", id),
             "The file is likely corrupt or uses an unsupported extension.",
+        ),
+        io::VoxError::InvalidChunkSize(id) => (
+            format!("a corrupt {:?} chunk header (bad length)", id),
+            "The .vox is damaged — re-download or re-export it.",
         ),
         io::VoxError::InvalidPaletteIndex(i) => (
             format!("an invalid palette index {}", i),

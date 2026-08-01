@@ -46,13 +46,23 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
         bail!("Resolution must be in 4..=256, got {}", resolution);
     }
 
-    let (document, buffers, images) =
-        gltf::import_slice(bytes).context("Parsing GLB")?;
-
-    let textures: Vec<DecodedImage> = images
-        .iter()
-        .map(decode_image)
-        .collect::<Result<Vec<_>>>()?;
+    // Parse structure first, decode pixels ourselves.
+    //
+    // `gltf::import_slice` would do both in one call, but it decodes
+    // *every* embedded image eagerly, keeps them all resident, and
+    // offers nowhere to hand the image crate a `Limits`. The GLB comes
+    // off the network, so a few-hundred-KB file can declare a
+    // 20000×20000 PNG and turn into a multi-gigabyte allocation on a
+    // `spawn_blocking` thread — where a failed allocation aborts the
+    // whole process. Splitting the two steps lets us decode only the
+    // textures a material actually samples, under explicit limits.
+    let gltf::Gltf { document, blob } =
+        gltf::Gltf::from_slice(bytes).context("Parsing GLB")?;
+    // `None` base path: any image or buffer referencing an external
+    // file URI is refused rather than read off the local disk.
+    let buffers = gltf::import_buffers(&document, None, blob)
+        .context("Reading GLB buffers")?;
+    let textures = decode_base_color_textures(&document, &buffers);
 
     // Prefer the explicit default scene; fall back to the first scene;
     // if neither exists, walk all meshes directly (some exporters
@@ -110,52 +120,102 @@ struct DecodedImage {
     height: u32,
 }
 
-fn decode_image(image: &gltf::image::Data) -> Result<DecodedImage> {
-    use gltf::image::Format::*;
-    let (width, height) = (image.width, image.height);
-    let pixel_count = (width as usize) * (height as usize);
-    let rgba = match image.format {
-        R8G8B8A8 => image.pixels.clone(),
-        R8G8B8 => {
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for chunk in image.pixels.chunks_exact(3) {
-                out.extend_from_slice(chunk);
-                out.push(255);
+/// Per-axis ceiling on a decoded texture. Hunyuan3D ships 4K at most;
+/// 8192² is generous and still bounds one decode at 256 MiB of RGBA.
+const MAX_TEXTURE_DIM: u32 = 8192;
+/// Ceiling on a single decode's own allocations.
+const MAX_TEXTURE_ALLOC: u64 = 256 * 1024 * 1024;
+/// Ceiling on all base-color textures we keep resident at once.
+const MAX_TEXTURE_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// Decode the base-color textures the materials actually sample, keyed
+/// by image index.
+///
+/// Only referenced images are touched: a GLB can carry normal /
+/// occlusion / unused maps we'd never read, and decoding those was pure
+/// cost and pure risk. A texture that fails to decode (unsupported
+/// format, over the limits, a decompression bomb) is logged and
+/// skipped — the model still voxelizes, just with the material's factor
+/// or vertex colors instead of that map.
+fn decode_base_color_textures(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> HashMap<usize, DecodedImage> {
+    let wanted: HashSet<usize> = document
+        .materials()
+        .filter_map(|m| m.pbr_metallic_roughness().base_color_texture())
+        .map(|info| info.texture().source().index())
+        .collect();
+
+    let mut out = HashMap::new();
+    let mut budget = MAX_TEXTURE_BUDGET;
+    for image in document.images() {
+        let index = image.index();
+        if !wanted.contains(&index) {
+            continue;
+        }
+        let gltf::image::Source::View { view, .. } = image.source() else {
+            // An external file URI: `import_buffers(None)` refuses those
+            // too, and we're not about to read local files on behalf of
+            // a downloaded asset.
+            log::warn!("Skipping texture {index}: external image URIs aren't read");
+            continue;
+        };
+        let Some(buffer) = buffers.get(view.buffer().index()) else {
+            log::warn!("Skipping texture {index}: buffer out of range");
+            continue;
+        };
+        let Some(encoded) = buffer.get(view.offset()..view.offset() + view.length())
+        else {
+            log::warn!("Skipping texture {index}: view out of range");
+            continue;
+        };
+        match decode_texture(encoded, &mut budget) {
+            Ok(decoded) => {
+                out.insert(index, decoded);
             }
-            out
+            Err(e) => log::warn!("Skipping texture {index}: {e:#}"),
         }
-        R8 => {
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for &g in &image.pixels {
-                out.extend_from_slice(&[g, g, g, 255]);
-            }
-            out
-        }
-        R8G8 => {
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for chunk in image.pixels.chunks_exact(2) {
-                out.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
-            }
-            out
-        }
-        other => {
-            // 16-bit and float formats are technically allowed by glTF
-            // but extremely rare for baseColorTexture. Falling back to
-            // a neutral gray avoids failing the whole pipeline on an
-            // unexpected texture — user sees a gray model and can
-            // tell us if it matters.
-            log::warn!("Unsupported texture format {:?}; using gray fallback", other);
-            vec![200; pixel_count * 4]
-        }
-    };
-    Ok(DecodedImage { rgba, width, height })
+    }
+    out
+}
+
+/// Decode one encoded image under explicit limits, charging its size
+/// against the shared `budget`.
+fn decode_texture(encoded: &[u8], budget: &mut u64) -> Result<DecodedImage> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_TEXTURE_DIM);
+    limits.max_image_height = Some(MAX_TEXTURE_DIM);
+    limits.max_alloc = Some(MAX_TEXTURE_ALLOC);
+
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(encoded))
+        .with_guessed_format()
+        .context("Sniffing texture format")?;
+    reader.limits(limits);
+    let decoded = reader.decode().context("Decoding texture")?;
+
+    // Charge the RGBA conversion before performing it — that's the
+    // allocation the image crate's own limits don't cover.
+    let (width, height) = (decoded.width(), decoded.height());
+    let cost = u64::from(width) * u64::from(height) * 4;
+    if cost > *budget {
+        bail!("would exceed the {MAX_TEXTURE_BUDGET} byte texture budget");
+    }
+    *budget -= cost;
+
+    let rgba = decoded.to_rgba8();
+    Ok(DecodedImage {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
 }
 
 fn walk_node(
     node: &gltf::Node,
     parent_transform: Mat4,
     buffers: &[gltf::buffer::Data],
-    textures: &[DecodedImage],
+    textures: &HashMap<usize, DecodedImage>,
     triangles: &mut Vec<Triangle>,
 ) {
     let local = mat4_from_transform(node.transform());
@@ -191,7 +251,7 @@ fn extract_from_mesh(
     mesh: &gltf::Mesh,
     transform: Mat4,
     buffers: &[gltf::buffer::Data],
-    textures: &[DecodedImage],
+    textures: &HashMap<usize, DecodedImage>,
     triangles: &mut Vec<Triangle>,
 ) {
     for primitive in mesh.primitives() {
@@ -226,7 +286,7 @@ fn extract_from_mesh(
         let base_factor = pbr.base_color_factor();
         let base_texture: Option<&DecodedImage> = pbr
             .base_color_texture()
-            .and_then(|info| textures.get(info.texture().source().index()));
+            .and_then(|info| textures.get(&info.texture().source().index()));
 
         let color_at_vertex = |i: usize| -> [u8; 4] {
             let vertex = vertex_colors
@@ -412,20 +472,24 @@ fn rasterize_triangles(
     grid
 }
 
+/// Average each cell's accumulated samples into a voxel.
+///
+/// Alpha is dropped, not averaged. Every voxel that reaches the world
+/// is opaque (the greedy mesher's zero-key sentinel depends on it, and
+/// `io::vox` normalizes imports the same way); nothing downstream reads
+/// voxel alpha, so a texture's transparency would only have travelled
+/// into the glTF export's `COLOR_0.a` to confuse an engine shader — or,
+/// for a fully transparent black texel, produced a solid voxel that
+/// packs to exactly the "no face here" sentinel.
 fn finalize_surface(
     grid: HashMap<(i32, i32, i32), ColorAccum>,
 ) -> HashMap<(i32, i32, i32), Voxel> {
     grid.into_iter()
-        .map(|(pos, [r, g, b, a, count])| {
+        .map(|(pos, [r, g, b, _a, count])| {
             let count = count.max(1); // can't be 0, but be paranoid
             (
                 pos,
-                Voxel::from_rgba(
-                    (r / count) as u8,
-                    (g / count) as u8,
-                    (b / count) as u8,
-                    (a / count) as u8,
-                ),
+                Voxel::from_rgb((r / count) as u8, (g / count) as u8, (b / count) as u8),
             )
         })
         .collect()
@@ -555,8 +619,15 @@ fn build_patch(voxels: HashMap<(i32, i32, i32), Voxel>) -> VoxelPatch {
     let min_x = voxels.keys().map(|&(x, _, _)| x).min().unwrap();
     let min_y = voxels.keys().map(|&(_, y, _)| y).min().unwrap();
     let min_z = voxels.keys().map(|&(_, _, z)| z).min().unwrap();
-    let mut patch = VoxelPatch::with_capacity(voxels.len());
-    for ((x, y, z), v) in voxels {
+    // Sorted so the patch is byte-reproducible for a given input.
+    // `HashMap` iteration order is randomized per instance, which would
+    // otherwise make two voxelizations of the same GLB differ in
+    // ordering alone. Positions are unique here (they're map keys), so
+    // sorting can't disturb any same-cell write ordering.
+    let mut cells: Vec<_> = voxels.into_iter().collect();
+    cells.sort_unstable_by_key(|&(pos, _)| pos);
+    let mut patch = VoxelPatch::with_capacity(cells.len());
+    for ((x, y, z), v) in cells {
         patch.set(x - min_x, y - min_y, z - min_z, v);
     }
     patch
@@ -737,5 +808,21 @@ mod tests {
         assert_eq!(v.g, 50);
         assert_eq!(v.b, 150);
         assert_eq!(v.a, 255);
+    }
+
+    #[test]
+    fn finalize_surface_ignores_texture_alpha() {
+        // Voxels in the world are always opaque; a semi- or fully
+        // transparent texel must not carry its alpha through. The
+        // fully-transparent black case is the dangerous one — it would
+        // otherwise pack to the greedy mesher's "no face" sentinel.
+        let mut grid: HashMap<(i32, i32, i32), ColorAccum> = HashMap::new();
+        grid.insert((0, 0, 0), [120, 130, 140, 40, 1]);
+        grid.insert((1, 0, 0), [0, 0, 0, 0, 1]);
+        let surface = finalize_surface(grid);
+        assert_eq!(surface[&(0, 0, 0)].a, 255);
+        let black = surface[&(1, 0, 0)];
+        assert_eq!(black.color(), [0, 0, 0, 255]);
+        assert!(black.is_solid());
     }
 }

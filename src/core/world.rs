@@ -165,15 +165,25 @@ impl World {
         chunk.write().set(lx, ly, lz, voxel);
         self.any_dirty = true;
 
-        // If the write touched a chunk-boundary cell, the affected
-        // boundary face on the neighbor chunk's mesh may flip
-        // visibility. Mark loaded neighbors dirty so they re-mesh.
-        // Missing neighbors aren't created — there's nothing to
-        // re-mesh and we don't want to spawn empty chunks.
+        // If the write touched a chunk-boundary cell, the neighbors'
+        // meshes may be stale: their boundary faces can flip visibility,
+        // and their per-vertex AO can change. Mark loaded neighbors
+        // dirty so they re-mesh. Missing neighbors aren't created —
+        // there's nothing to re-mesh and we don't want to spawn empty
+        // chunks.
         self.mark_boundary_neighbors_dirty(chunk_pos, lx, ly, lz);
     }
 
-    /// Mark the (up to three) face-neighbors of a boundary write dirty.
+    /// Mark every loaded neighbor chunk a boundary write can affect.
+    ///
+    /// Scope is the full Moore neighborhood, not just the 6 face-
+    /// neighbors: per-vertex AO samples the 26 chunks around the one
+    /// being meshed (`mesh::compute_face_ao` offsets all three axes at
+    /// once for corner samples), so a write in a chunk *corner* changes
+    /// AO in the diagonal neighbors too. Marking faces only left those
+    /// diagonals rendering stale AO until some unrelated edit happened
+    /// to dirty them. A write on a face reaches 1 neighbor, on an edge
+    /// 3, in a corner 7.
     fn mark_boundary_neighbors_dirty(
         &self,
         chunk_pos: ChunkPos,
@@ -182,21 +192,29 @@ impl World {
         lz: usize,
     ) {
         let last = CHUNK_SIZE - 1;
-        let candidates: [(bool, i32, i32, i32); 6] = [
-            (lx == 0, -1, 0, 0),
-            (lx == last, 1, 0, 0),
-            (ly == 0, 0, -1, 0),
-            (ly == last, 0, 1, 0),
-            (lz == 0, 0, 0, -1),
-            (lz == last, 0, 0, 1),
-        ];
-        for (active, dx, dy, dz) in candidates {
-            if !active {
-                continue;
+        // Per axis: the neighbor offsets this coordinate reaches into.
+        // An interior coordinate reaches none, so for a non-boundary
+        // write the product below is just `(0, 0, 0)` — skipped.
+        let axis_offsets = |l: usize| -> &'static [i32] {
+            if l == 0 {
+                &[0, -1]
+            } else if l == last {
+                &[0, 1]
+            } else {
+                &[0]
             }
-            let neighbor_pos = chunk_pos.neighbor(dx, dy, dz);
-            if let Some(neighbor) = self.chunks.get(&neighbor_pos) {
-                neighbor.write().mark_dirty();
+        };
+        for &dx in axis_offsets(lx) {
+            for &dy in axis_offsets(ly) {
+                for &dz in axis_offsets(lz) {
+                    if (dx, dy, dz) == (0, 0, 0) {
+                        continue;
+                    }
+                    let neighbor_pos = chunk_pos.neighbor(dx, dy, dz);
+                    if let Some(neighbor) = self.chunks.get(&neighbor_pos) {
+                        neighbor.write().mark_dirty();
+                    }
+                }
             }
         }
     }
@@ -455,6 +473,62 @@ mod tests {
         let dirty: std::collections::HashSet<_> = world.dirty_chunks().into_iter().collect();
         assert!(dirty.contains(&ChunkPos::new(0, 0, 0)));
         assert!(dirty.contains(&ChunkPos::new(1, 0, 0)));
+    }
+
+    #[test]
+    fn corner_write_marks_diagonal_neighbors_dirty() {
+        // AO samples the full 26-chunk Moore neighborhood, so a write
+        // in a chunk corner changes AO in the diagonal neighbors as
+        // well — they have to re-mesh too, or that corner keeps
+        // rendering stale shading.
+        let mut world = World::new();
+        // Pre-create every chunk around the (0,0,0)/(1,1,1) corner.
+        for &(cx, cy, cz) in &[
+            (1, 0, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 1, 0),
+            (1, 0, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+        ] {
+            world.set_voxel(cx * 32, cy * 32, cz * 32, Voxel::from_rgb(1, 2, 3));
+        }
+        world.clear_dirty_flags();
+
+        // The (31,31,31) corner of chunk (0,0,0) touches all 7.
+        world.set_voxel(31, 31, 31, Voxel::from_rgb(255, 0, 0));
+
+        let dirty: std::collections::HashSet<_> =
+            world.dirty_chunks().into_iter().collect();
+        for &(cx, cy, cz) in &[
+            (0, 0, 0),
+            (1, 0, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 1, 0),
+            (1, 0, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+        ] {
+            assert!(
+                dirty.contains(&ChunkPos::new(cx, cy, cz)),
+                "chunk ({cx},{cy},{cz}) should be dirty"
+            );
+        }
+    }
+
+    #[test]
+    fn interior_write_marks_only_its_own_chunk() {
+        // The Moore-neighborhood sweep must not turn every edit into a
+        // 27-chunk re-mesh: only boundary cells reach out at all.
+        let mut world = World::new();
+        world.set_voxel(32, 0, 0, Voxel::from_rgb(0, 255, 0));
+        world.clear_dirty_flags();
+
+        world.set_voxel(16, 16, 16, Voxel::from_rgb(255, 0, 0));
+
+        assert_eq!(world.dirty_chunks(), vec![ChunkPos::new(0, 0, 0)]);
     }
 
     #[test]

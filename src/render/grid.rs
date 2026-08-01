@@ -44,29 +44,47 @@ pub struct GridMesh {
     pub vertex_count: u32,
 }
 
+/// Line vertices for a square grid on the XZ plane at y=0, spanning
+/// `±size * spacing` on both axes.
+///
+/// The extent must match the line *placement* range: lines sit at
+/// `i * spacing` for `i ∈ [-size, size]`, so they have to run the same
+/// distance to actually cross. Halving it (an old off-by-two) drew a
+/// correct grid only in the central quarter and left the outer ring as
+/// non-intersecting parallel stripes — visible in every screenshot as a
+/// "comb" around the scene.
+///
+/// Split out of `GridMesh::new` so the geometry is testable without a
+/// GPU device.
+fn grid_vertices(size: i32, spacing: f32) -> Vec<LineVertex> {
+    let mut vertices = Vec::new();
+    let half = size as f32 * spacing;
+    let grid_color = [0.3, 0.3, 0.3, 0.6];
+    let origin_color = [0.5, 0.5, 0.5, 0.8];
+
+    // Grid lines along X axis
+    for i in -size..=size {
+        let z = i as f32 * spacing;
+        let color = if i == 0 { origin_color } else { grid_color };
+        vertices.push(LineVertex::new([-half, 0.0, z], color));
+        vertices.push(LineVertex::new([half, 0.0, z], color));
+    }
+
+    // Grid lines along Z axis
+    for i in -size..=size {
+        let x = i as f32 * spacing;
+        let color = if i == 0 { origin_color } else { grid_color };
+        vertices.push(LineVertex::new([x, 0.0, -half], color));
+        vertices.push(LineVertex::new([x, 0.0, half], color));
+    }
+
+    vertices
+}
+
 impl GridMesh {
     /// Create a grid mesh on the XZ plane at y=0
     pub fn new(device: &wgpu::Device, size: i32, spacing: f32) -> Self {
-        let mut vertices = Vec::new();
-        let half = size as f32 * spacing / 2.0;
-        let grid_color = [0.3, 0.3, 0.3, 0.6];
-        let origin_color = [0.5, 0.5, 0.5, 0.8];
-
-        // Grid lines along X axis
-        for i in -size..=size {
-            let z = i as f32 * spacing;
-            let color = if i == 0 { origin_color } else { grid_color };
-            vertices.push(LineVertex::new([-half, 0.0, z], color));
-            vertices.push(LineVertex::new([half, 0.0, z], color));
-        }
-
-        // Grid lines along Z axis
-        for i in -size..=size {
-            let x = i as f32 * spacing;
-            let color = if i == 0 { origin_color } else { grid_color };
-            vertices.push(LineVertex::new([x, 0.0, -half], color));
-            vertices.push(LineVertex::new([x, 0.0, half], color));
-        }
+        let vertices = grid_vertices(size, spacing);
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Grid Vertex Buffer"),
@@ -182,5 +200,50 @@ impl LinePipeline {
         });
 
         Self { render_pipeline }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lines must be placed and drawn over the same range, or the outer
+    /// ring degenerates into non-crossing stripes.
+    #[test]
+    fn grid_lines_span_the_full_extent() {
+        let size = 20;
+        let spacing = 1.0;
+        let extent = size as f32 * spacing;
+        let verts = grid_vertices(size, spacing);
+
+        // 2 directions × (2·size + 1) lines × 2 endpoints.
+        assert_eq!(verts.len(), 2 * 2 * (2 * size as usize + 1));
+
+        let (mut min_x, mut max_x) = (f32::MAX, f32::MIN);
+        let (mut min_z, mut max_z) = (f32::MAX, f32::MIN);
+        for v in &verts {
+            min_x = min_x.min(v.position[0]);
+            max_x = max_x.max(v.position[0]);
+            min_z = min_z.min(v.position[2]);
+            max_z = max_z.max(v.position[2]);
+            assert_eq!(v.position[1], 0.0, "grid must be flat at y = 0");
+        }
+        assert_eq!((min_x, max_x), (-extent, extent));
+        assert_eq!((min_z, max_z), (-extent, extent));
+    }
+
+    /// Every individual line must run the grid's full width, so lines
+    /// in the two directions intersect everywhere rather than only in
+    /// the middle.
+    #[test]
+    fn every_line_crosses_the_whole_grid() {
+        let size = 20;
+        let spacing = 1.0;
+        let width = 2.0 * size as f32 * spacing;
+        for pair in grid_vertices(size, spacing).chunks_exact(2) {
+            let (a, b) = (pair[0].position, pair[1].position);
+            let len = (b[0] - a[0]).abs().max((b[2] - a[2]).abs());
+            assert_eq!(len, width, "line {:?}..{:?} is short", a, b);
+        }
     }
 }

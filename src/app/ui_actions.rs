@@ -5,31 +5,30 @@ use voxelith::editor::{Command, VoxelChange};
 use voxelith::procgen::{GenResult, VoxelGenerator, VoxelPatch};
 use voxelith::ui::{CameraView, GeneratorChoice, UiAction};
 
-use super::App;
+use super::{App, GenerateKind, PendingAction};
 
 impl App {
     /// Process all queued UI actions for this frame.
     pub(super) fn handle_ui_actions(&mut self) {
         for action in self.ui.state.take_actions() {
             match action {
-                UiAction::Exit => {
-                    self.save_prefs();
-                    self.delete_autosave();
-                    std::process::exit(0)
-                }
+                // Exit routes through the same guard and the same
+                // shutdown path as the window's close button, instead
+                // of the `process::exit` it used to call — that skipped
+                // every destructor and made the menu item behave
+                // differently from the X.
+                UiAction::Exit => self.guard_then(PendingAction::Exit),
                 UiAction::Undo => {
                     self.editor.undo(&mut self.world);
                 }
                 UiAction::Redo => {
                     self.editor.redo(&mut self.world);
                 }
+                // Confirmed by the caller (the menu raises a confirm
+                // dialog first) — this arm just does it.
                 UiAction::ClearAll => {
                     self.world.clear();
-                    self.editor.history.clear();
-                    self.editor.sockets.clear();
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.chunk_meshes.clear();
-                    }
+                    self.reset_scene_session_state();
                 }
                 UiAction::CopySelection => self.copy_selection(),
                 UiAction::CutSelection => self.cut_selection(),
@@ -43,21 +42,19 @@ impl App {
                 UiAction::MirrorSelection { axis } => {
                     self.mirror_selection(axis);
                 }
-                // Each Generate* replaces the whole scene. `replace_scene`
-                // wipes world + history + stale GPU meshes before building
-                // the new geometry (see its doc comment for why the mesh
-                // wipe matters).
+                // Each Generate* discards the whole scene, so it goes
+                // through the unsaved-changes guard like New / Open.
                 UiAction::GenerateTestCube => {
-                    self.replace_scene(|app| app.world.create_test_cube((0, 8, 0), 4));
+                    self.guard_then(PendingAction::Generate(GenerateKind::TestCube));
                 }
                 UiAction::GenerateGround => {
-                    self.replace_scene(|app| app.world.create_test_ground(20, 2));
+                    self.guard_then(PendingAction::Generate(GenerateKind::Ground));
                 }
                 UiAction::GenerateSphere => {
-                    self.replace_scene(|app| app.create_sphere((0, 10, 0), 6));
+                    self.guard_then(PendingAction::Generate(GenerateKind::Sphere));
                 }
                 UiAction::GeneratePyramid => {
-                    self.replace_scene(|app| app.create_pyramid((0, 0, 0), 10));
+                    self.guard_then(PendingAction::Generate(GenerateKind::Pyramid));
                 }
                 UiAction::ResetCamera => {
                     // "Reset Camera" recenters the orbit pivot on the
@@ -100,7 +97,14 @@ impl App {
                 UiAction::RecoverAutosave => {
                     if let Some(path) = Self::autosave_path() {
                         if self.recover_from_autosave(&path) {
-                            self.unsaved_changes = false;
+                            // Recovered work has no file of its own
+                            // (`project_path` stays None), so relative to
+                            // anything on disk it *is* unsaved — say so,
+                            // or the guard would wave a clean exit
+                            // through and the exit would then delete the
+                            // autosave that held the only copy.
+                            self.unsaved_changes = true;
+                            self.autosave_pending = false;
                             self.last_autosave = std::time::Instant::now();
                         } else {
                             // Corrupt / unreadable: drop it, keep the
@@ -115,12 +119,14 @@ impl App {
                     self.delete_autosave();
                     self.ui.set_status("Discarded recovered work");
                 }
-                UiAction::NewProject => self.new_project(),
-                UiAction::OpenProject => self.open_project(),
-                UiAction::OpenRecent(path) => self.do_open_project(path),
+                UiAction::NewProject => self.guard_then(PendingAction::NewProject),
+                UiAction::OpenProject => self.guard_then(PendingAction::OpenPicker),
+                UiAction::OpenRecent(path) => {
+                    self.guard_then(PendingAction::OpenPath(path));
+                }
                 UiAction::SaveProject => self.save_project(),
                 UiAction::SaveAs => self.save_project_as(),
-                UiAction::ImportVox => self.import_vox(),
+                UiAction::ImportVox => self.guard_then(PendingAction::ImportVox),
                 UiAction::ExportVox => self.export_vox(),
                 UiAction::ExportObj => self.export_obj(),
                 UiAction::ExportObjSmoothedLight => self.export_obj_smoothed(false),
@@ -134,31 +140,51 @@ impl App {
                 UiAction::AiCancel => self.cancel_ai_job(),
                 UiAction::AiSaveKey(key) => self.save_ai_key(key),
                 UiAction::AiClearKey => self.clear_ai_key(),
+
+                // --- unsaved-changes prompt answers ---
+                UiAction::UnsavedSave => {
+                    self.save_project();
+                    // `do_save_project` clears the flag on success. If
+                    // it's still set the write failed or the user backed
+                    // out of the Save As picker — either way, don't go
+                    // ahead and destroy the scene.
+                    if self.unsaved_changes {
+                        self.pending_guarded = None;
+                        self.ui.set_status("Not saved — your work is still open");
+                    } else if let Some(action) = self.pending_guarded.take() {
+                        self.run_guarded(action);
+                    }
+                }
+                UiAction::UnsavedDiscard => {
+                    if let Some(action) = self.pending_guarded.take() {
+                        self.run_guarded(action);
+                    }
+                }
+                UiAction::UnsavedCancel => {
+                    self.pending_guarded = None;
+                }
             }
         }
     }
 
-    /// Wholesale-replace the scene with freshly-built geometry: wipe
-    /// the world, undo history, **and the stale GPU chunk meshes**,
-    /// run `build`, re-mesh the new chunks, and re-anchor the orbit
-    /// pivot on the new scene.
+    /// Replace the scene with one of the built-in demo shapes.
     ///
-    /// The `chunk_meshes.clear()` is the load-bearing step. `World::
-    /// clear()` only drops the chunks; `rebuild_all_meshes()` then
-    /// re-meshes the *new* world's dirty chunks. Any chunk position the
-    /// previous scene occupied but the new one doesn't is never visited
-    /// again, so without this wipe its GPU mesh lingers and renders as
-    /// ghost geometry over an otherwise-correct world. The file-ops
-    /// paths (new/open/import) and ClearAll already do this; the
-    /// Generate* menu items used to skip it.
-    fn replace_scene(&mut self, build: impl FnOnce(&mut Self)) {
+    /// `reset_scene_session_state` does the wipe, including the GPU
+    /// chunk meshes — that part is load-bearing. `World::clear()` only
+    /// drops the chunks; `rebuild_all_meshes()` then re-meshes the
+    /// *new* world's dirty ones. Any chunk position the previous scene
+    /// occupied but the new one doesn't is never visited again, so
+    /// without the wipe its GPU mesh lingers and renders as ghost
+    /// geometry over an otherwise-correct world.
+    pub(super) fn generate_scene(&mut self, kind: GenerateKind) {
         self.world.clear();
-        self.editor.history.clear();
-        self.editor.sockets.clear();
-        if let Some(renderer) = &mut self.renderer {
-            renderer.chunk_meshes.clear();
+        self.reset_scene_session_state();
+        match kind {
+            GenerateKind::TestCube => self.world.create_test_cube((0, 8, 0), 4),
+            GenerateKind::Ground => self.world.create_test_ground(20, 2),
+            GenerateKind::Sphere => self.create_sphere((0, 10, 0), 6),
+            GenerateKind::Pyramid => self.create_pyramid((0, 0, 0), 10),
         }
-        build(self);
         self.rebuild_all_meshes();
         self.recenter_camera_on_scene();
     }

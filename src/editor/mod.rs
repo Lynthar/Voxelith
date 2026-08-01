@@ -179,9 +179,19 @@ impl Editor {
         ]
     }
 
-    /// Set current tool
-    pub fn set_tool(&mut self, tool: Tool) {
+    /// Switch to `tool` because the user asked for it (number key,
+    /// toolbar, Tools panel).
+    ///
+    /// Also drops `tool_before_alt`, and that's the whole point of
+    /// routing every explicit switch through here. Alt holds a
+    /// temporary eyedropper and stashes the outgoing tool to restore on
+    /// release — but if the user picked a *new* tool while Alt was
+    /// down, that release used to roll their choice straight back. An
+    /// explicit pick supersedes the stash; only the Alt handler itself
+    /// writes `current_tool` directly.
+    pub fn select_tool(&mut self, tool: Tool) {
         self.current_tool = tool;
+        self.tool_before_alt = None;
     }
 
     /// Set brush color from palette index. Preserves the brush's

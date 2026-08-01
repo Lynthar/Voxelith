@@ -22,9 +22,15 @@ use tokio::runtime::Handle;
 /// Cheap to clone the handle out via [`Self::handle`].
 pub struct AiRuntime {
     handle: Handle,
-    // Hold the join handle so the thread isn't detached and a panic
-    // there is observable to the OS for crash reports. We never
-    // actually join — the thread exits with the process.
+    // Kept only to document that this thread is owned for the life of
+    // the process. Holding the handle without joining is behaviourally
+    // identical to detaching, and in particular does NOT make a panic
+    // any more visible — the panic hook prints either way. The one
+    // realistic panic here (the runtime failing to build) happens
+    // before the handle handshake below and is already surfaced by the
+    // `recv().expect`. A worker task's panic never reaches this thread
+    // at all: tokio catches it per-task, and the AI job notices via the
+    // event channel closing (`app::ai_actions::drain_events`).
     _runtime_thread: thread::JoinHandle<()>,
 }
 

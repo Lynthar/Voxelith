@@ -26,6 +26,14 @@ pub const MAX_RECENT_FILES: usize = 10;
 /// Maximum entries kept in the recent AI-prompts MRU.
 pub const MAX_RECENT_PROMPTS: usize = 10;
 
+/// True if `path` names a Voxelith project (`.vxlt`, case-insensitive
+/// so a `.VXLT` typed into a save dialog still counts).
+fn is_project_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("vxlt"))
+}
+
 /// Top-level preferences container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,6 +48,14 @@ pub struct Prefs {
     /// Recent AI-generation prompts, most-recent first. Surfaced as a
     /// History dropdown in the AI panel.
     pub recent_ai_prompts: Vec<String>,
+    /// Directory of the last successful export. Seeds the next export
+    /// dialog so an export-heavy workflow doesn't re-navigate to the
+    /// asset folder every time. Exports deliberately do NOT go into
+    /// `recent_files` (see `touch_recent`), so this is where that
+    /// "where was I working" information lives instead.
+    pub last_export_dir: Option<PathBuf>,
+    /// Directory of the last successful `.vox` import, same rationale.
+    pub last_import_dir: Option<PathBuf>,
 }
 
 impl Default for Prefs {
@@ -53,6 +69,8 @@ impl Default for Prefs {
             editor: EditorPrefs::default(),
             recent_files: Vec::new(),
             recent_ai_prompts: Vec::new(),
+            last_export_dir: None,
+            last_import_dir: None,
         }
     }
 }
@@ -192,11 +210,37 @@ impl Prefs {
     /// Insert `path` at the head of `recent_files`, dedup, cap at
     /// `MAX_RECENT_FILES`. Idempotent for paths already in the list
     /// (just promotes them to the head).
+    ///
+    /// Only `.vxlt` projects are accepted. The MRU's sole consumer is
+    /// the Open Recent menu, which hands every entry straight to the
+    /// project loader — so an exported `.glb` in the list is an item
+    /// that can only ever fail with "bad magic bytes". Exports and
+    /// `.vox` imports used to land here too, which meant an
+    /// export-heavy session pushed every real project off the ten-entry
+    /// list and left the menu completely useless. Their directories are
+    /// remembered separately in `last_export_dir` / `last_import_dir`.
     pub fn touch_recent(&mut self, path: &Path) {
+        if !is_project_file(path) {
+            return;
+        }
         let path = path.to_path_buf();
         self.recent_files.retain(|p| p != &path);
         self.recent_files.insert(0, path);
         self.recent_files.truncate(MAX_RECENT_FILES);
+    }
+
+    /// Remember where the user last wrote an exported asset.
+    pub fn remember_export_dir(&mut self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            self.last_export_dir = Some(parent.to_path_buf());
+        }
+    }
+
+    /// Remember where the user last read a `.vox` from.
+    pub fn remember_import_dir(&mut self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            self.last_import_dir = Some(parent.to_path_buf());
+        }
     }
 
     /// Insert `prompt` at the head of `recent_ai_prompts`, dedup, cap at
@@ -282,5 +326,36 @@ mod tests {
         p.touch_recent(Path::new("/tmp/file10.vxlt"));
         assert_eq!(p.recent_files.len(), MAX_RECENT_FILES);
         assert_eq!(p.recent_files[0], PathBuf::from("/tmp/file10.vxlt"));
+    }
+
+    #[test]
+    fn test_touch_recent_only_accepts_projects() {
+        // Open Recent feeds every entry to the project loader, so
+        // anything that isn't a .vxlt would be an entry that can only
+        // error out — and would evict a real project on the way in.
+        let mut p = Prefs::default();
+        p.touch_recent(Path::new("/tmp/keeper.vxlt"));
+        for junk in [
+            "/tmp/model.glb",
+            "/tmp/model.obj",
+            "/tmp/model.vox",
+            "/tmp/no-extension",
+        ] {
+            p.touch_recent(Path::new(junk));
+        }
+        assert_eq!(p.recent_files, vec![PathBuf::from("/tmp/keeper.vxlt")]);
+
+        // Extension matching is case-insensitive.
+        p.touch_recent(Path::new("/tmp/Shouty.VXLT"));
+        assert_eq!(p.recent_files[0], PathBuf::from("/tmp/Shouty.VXLT"));
+    }
+
+    #[test]
+    fn test_remember_dirs_store_parent() {
+        let mut p = Prefs::default();
+        p.remember_export_dir(Path::new("/tmp/assets/model.glb"));
+        p.remember_import_dir(Path::new("/tmp/source/model.vox"));
+        assert_eq!(p.last_export_dir, Some(PathBuf::from("/tmp/assets")));
+        assert_eq!(p.last_import_dir, Some(PathBuf::from("/tmp/source")));
     }
 }

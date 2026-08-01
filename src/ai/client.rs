@@ -15,16 +15,17 @@
 //! 4. **Download GLB** — GET that url, return bytes.
 //!
 //! The whole pipeline runs as a single async task on `App::ai_runtime`.
-//! Cancellation is cooperative, checked between stages. During the poll
-//! phase — where the remote GPU job actually runs and bills — a Cancel
-//! is observed at the top of the next poll iteration (≈ 2 s typically,
-//! and at most one status-GET timeout — `STATUS_POLL_TIMEOUT`, ~30 s — if
-//! a poll happens to be in flight) and also fires a best-effort `PUT` to
-//! the queue `cancel_url`, so fal.ai drops/stops the job instead of
-//! finishing it for nothing. After the job has
-//! COMPLETED (result fetch → GLB download → voxelize) a Cancel just
-//! discards local work at the next checkpoint; those stages aren't
-//! interrupted mid-flight, but there's no remote cost left to save.
+//! Cancellation is cooperative. During the poll phase — where the
+//! remote GPU job actually runs and bills — a Cancel is observed at the
+//! top of the next poll iteration (≈ 2 s typically, and at most one
+//! status-GET timeout — `STATUS_POLL_TIMEOUT`, ~30 s — if a poll happens
+//! to be in flight) and also fires a best-effort `PUT` to the queue
+//! `cancel_url`, so fal.ai drops/stops the job instead of finishing it
+//! for nothing. The other three network stages (submit, result fetch,
+//! GLB download) run inside `cancellable`, which races them against the
+//! cancel flag and abandons the request within
+//! `CANCEL_POLL_INTERVAL`. Only the voxelize step is uninterruptible,
+//! and by then there's no remote cost left to save.
 //!
 //! API keys come from the OS keychain at submit time (so a user
 //! who clicks Save in the panel doesn't need to restart). The key
@@ -69,6 +70,35 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(300);
 /// generous global timeout (which is sized for the multi-MB GLB
 /// download). Bounds each poll so `POLL_TIMEOUT` is actually honored.
 const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-request timeout for the small JSON calls (submit, result fetch).
+/// Both are a few kilobytes; without their own timeout they inherited
+/// the client's 300 s window, which is sized for the GLB download — so
+/// a hung gateway on submit could sit there for five minutes.
+const JSON_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling on a downloaded GLB. The 300 s client timeout limits how
+/// *long* a download runs but not how *large* it gets, and the body was
+/// buffered whole — a fast link could push tens of gigabytes into
+/// memory. Real Hunyuan3D output is ~60 MiB, so this is 4× headroom.
+const MAX_GLB_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Ceiling on the queue API's JSON bodies. They're a few KB.
+const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Cap on the initial `Vec` reservation when a response declares its
+/// length. The declared value is remote input, so it seeds the capacity
+/// hint only up to this — the read still grows as needed.
+const ALLOC_HINT_CAP: u64 = 8 * 1024 * 1024;
+
+/// How many consecutive unrecognized queue statuses to tolerate before
+/// giving up. fal.ai documents IN_QUEUE / IN_PROGRESS / COMPLETED; an
+/// unknown value used to just keep polling until the 300 s cap, and
+/// then report a misleading timeout.
+const MAX_UNKNOWN_STATUS_STREAK: u32 = 5;
+
+/// How often the cancel flag is sampled while a request is in flight.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Built-in fal.ai provider. Stateless except for a connection-pooled
 /// reqwest client; loads the API key from the OS keychain on each
@@ -149,7 +179,12 @@ async fn run_pipeline(
         .context("Loading API key from OS keychain")?;
 
     check_cancel(cancel)?;
-    let queue = fal_submit(http, &api_key, &request.prompt).await?;
+    // Race every network stage against the cancel flag. A one-shot
+    // check before the await only helps if the request returns: submit
+    // and the result fetch each have their own timeout, and without
+    // this a Cancel during one of them wasn't observed until it
+    // finished.
+    let queue = cancellable(cancel, fal_submit(http, &api_key, &request.prompt)).await?;
     let _ = events_tx.send(JobEvent::Submitted);
 
     fal_poll_until_done(
@@ -163,10 +198,16 @@ async fn run_pipeline(
     .await?;
 
     check_cancel(cancel)?;
-    let glb_url = fal_fetch_result(http, &api_key, &queue.response_url).await?;
+    let glb =
+        cancellable(cancel, fal_fetch_result(http, &api_key, &queue.response_url))
+            .await?;
 
     check_cancel(cancel)?;
-    let glb_bytes = fal_download_glb(http, &glb_url).await?;
+    let glb_bytes = cancellable(
+        cancel,
+        fal_download_glb(http, &glb.url, glb.file_size),
+    )
+    .await?;
     let byte_count = glb_bytes.len();
     let _ = events_tx.send(JobEvent::GlbReady { byte_count });
 
@@ -202,6 +243,105 @@ async fn run_pipeline(
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Acquire) {
         bail!("Cancelled");
+    }
+    Ok(())
+}
+
+/// Resolve as soon as `cancel` is set. Cancellation is a plain
+/// `AtomicBool` (shared with the UI thread, which just flips it), so
+/// there's nothing to await on directly — poll it instead.
+async fn until_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Acquire) {
+        sleep(CANCEL_POLL_INTERVAL).await;
+    }
+}
+
+/// Run `work`, abandoning it the moment the user cancels.
+///
+/// Dropping an in-flight reqwest future aborts the request. The remote
+/// side may still have received it — for submit that means fal.ai could
+/// start a job we never learn the id of, and so can't cancel remotely.
+/// That window is one request wide and the alternative is making the
+/// user wait out a hung gateway, so we take it.
+async fn cancellable<T>(
+    cancel: &AtomicBool,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        _ = until_cancelled(cancel) => bail!("Cancelled"),
+        result = work => result,
+    }
+}
+
+/// Read a response body with a hard ceiling.
+///
+/// A declared `Content-Length` over the cap fails before a single byte
+/// is read, but it's remote input and may be absent (chunked) or a lie,
+/// so the running total is what actually enforces the limit.
+async fn read_capped(resp: reqwest::Response, cap: u64, what: &str) -> Result<Vec<u8>> {
+    let declared = resp.content_length();
+    if let Some(len) = declared {
+        if len > cap {
+            bail!("{} is {} bytes, over the {} byte limit", what, len, cap);
+        }
+    }
+    let hint = declared.unwrap_or(0).min(ALLOC_HINT_CAP) as usize;
+    let mut buf = Vec::with_capacity(hint);
+    let mut resp = resp;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .with_context(|| format!("Reading {}", what))?
+    {
+        if buf.len() as u64 + chunk.len() as u64 > cap {
+            bail!("{} exceeds the {} byte limit", what, cap);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Whether a non-2xx status while polling is worth retrying.
+enum PollAction {
+    Retry,
+    /// Give up now, with this hint appended to the error.
+    Fail(&'static str),
+}
+
+/// Retrying a 401 for five minutes and then reporting a timeout tells
+/// the user nothing. Only statuses that can plausibly change on their
+/// own are worth waiting on.
+fn poll_disposition(code: u16) -> PollAction {
+    match code {
+        // The server is explicitly asking us to come back later, which
+        // is what the loop already does.
+        408 | 429 => PollAction::Retry,
+        401 | 403 => PollAction::Fail("check your fal.ai API key in the AI panel"),
+        404 => PollAction::Fail("the queued request is gone (expired or already collected)"),
+        400..=499 => PollAction::Fail("the provider rejected the status request"),
+        // 5xx and anything else: usually an overloaded gateway.
+        _ => PollAction::Retry,
+    }
+}
+
+/// Reject a GLB URL we shouldn't follow.
+///
+/// https is mandatory: over plain http an on-path attacker could swap
+/// in any payload, and the GLB feeds a parser. The host is only warned
+/// about — fal has already moved this CDN across subdomains
+/// (`fal.media` → `v3.fal.media` → `v3b.fal.media`), and hard-failing
+/// on the next move would break generation until we shipped a release.
+/// The URL itself arrives inside an authenticated https response, so a
+/// forged host means fal's API is already compromised.
+fn validate_glb_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).context("Parsing GLB URL")?;
+    if parsed.scheme() != "https" {
+        bail!("GLB URL is not https: {}", short(url, 120));
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    if host != "fal.media" && !host.ends_with(".fal.media") {
+        log::warn!("GLB download from an unexpected host: {}", host);
     }
     Ok(())
 }
@@ -252,19 +392,20 @@ struct ModelUrls {
 }
 
 impl HunyuanResult {
-    /// Resolve the GLB download URL, preferring the top-level
-    /// `model_glb` and falling back to `model_urls.glb`.
-    fn glb_url(self) -> Option<String> {
+    /// Resolve the GLB reference, preferring the top-level `model_glb`
+    /// and falling back to `model_urls.glb`.
+    fn glb_file(self) -> Option<ModelFile> {
         self.model_glb
             .or_else(|| self.model_urls.and_then(|u| u.glb))
-            .map(|f| f.url)
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct ModelFile {
     url: String,
-    #[allow(dead_code)]
+    /// The provider's claim about the file's size. Advisory only — it
+    /// lets an oversized download be refused before it starts, but the
+    /// download itself is what enforces the ceiling.
     #[serde(default)]
     file_size: Option<u64>,
 }
@@ -278,6 +419,7 @@ async fn fal_submit(
     let resp = http
         .post(TEXT_TO_3D_ENDPOINT)
         .header("Authorization", format!("Key {}", api_key))
+        .timeout(JSON_REQUEST_TIMEOUT)
         .json(&body)
         .send()
         .await
@@ -295,9 +437,8 @@ async fn fal_submit(
         };
         bail!("Submit {}: {}{}", code, short(&body_text, 200), hint);
     }
-    resp.json::<QueueSubmitResponse>()
-        .await
-        .context("Parsing submit response")
+    let body = read_capped(resp, MAX_JSON_BYTES, "submit response").await?;
+    serde_json::from_slice(&body).context("Parsing submit response")
 }
 
 async fn fal_poll_until_done(
@@ -310,6 +451,7 @@ async fn fal_poll_until_done(
 ) -> Result<()> {
     let start = Instant::now();
     let mut polls: u32 = 0;
+    let mut unknown_streak: u32 = 0;
     loop {
         if cancel.load(Ordering::Acquire) {
             // User cancelled while the remote job is queued/running.
@@ -351,36 +493,72 @@ async fn fal_poll_until_done(
             Err(_) => continue,
         };
 
-        if !resp.status().is_success() {
-            // Same logic for HTTP errors: usually a 502 from an
-            // overloaded gateway. Skip and retry.
-            continue;
+        let code = resp.status();
+        if !code.is_success() {
+            match poll_disposition(code.as_u16()) {
+                PollAction::Retry => continue,
+                // Retrying something that can't fix itself just burns
+                // the 300 s budget and then blames a timeout.
+                PollAction::Fail(hint) => {
+                    bail!("Status poll {} — {}", code.as_u16(), hint)
+                }
+            }
         }
 
-        let status = match resp.json::<QueueStatusResponse>().await {
+        let body = match read_capped(resp, MAX_JSON_BYTES, "status response").await {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let status: QueueStatusResponse = match serde_json::from_slice(&body) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        // Translate fal.ai status into a UI progress estimate. Without
-        // real percent reporting we just give the user "queued" /
-        // "running" / "almost done" steps.
-        let progress = match status.status.as_str() {
-            "IN_QUEUE" => 0.1,
-            "IN_PROGRESS" => 0.5,
-            "COMPLETED" => 0.9,
-            _ => 0.3,
-        };
-        let _ = events_tx.send(JobEvent::Progress(progress));
-
         match status.status.as_str() {
-            "COMPLETED" => return Ok(()),
+            "COMPLETED" => {
+                let _ = events_tx.send(JobEvent::Progress(0.9));
+                return Ok(());
+            }
             "FAILED" | "ERROR" => bail!(
                 "Provider job failed (after {} polls, queue_position={:?})",
                 polls,
                 status.queue_position
             ),
-            _ => {} // IN_QUEUE / IN_PROGRESS — keep polling
+            // Not in fal.ai's documented set, but a job cancelled from
+            // their dashboard has to end somewhere other than our
+            // timeout.
+            "CANCELLED" | "CANCELED" => {
+                bail!("Provider job was cancelled remotely (after {} polls)", polls)
+            }
+            // Translate the running states into a UI progress estimate.
+            // Without real percent reporting we just give the user
+            // "queued" / "running" steps.
+            "IN_QUEUE" => {
+                unknown_streak = 0;
+                let _ = events_tx.send(JobEvent::Progress(0.1));
+            }
+            "IN_PROGRESS" => {
+                unknown_streak = 0;
+                let _ = events_tx.send(JobEvent::Progress(0.5));
+            }
+            other => {
+                // Don't report progress for a state we don't
+                // understand — a remotely-cancelled job used to flash
+                // 30% on its way to a bogus timeout.
+                unknown_streak += 1;
+                log::warn!(
+                    "fal.ai returned unrecognized status {:?} ({} in a row)",
+                    short(other, 60),
+                    unknown_streak
+                );
+                if unknown_streak >= MAX_UNKNOWN_STATUS_STREAK {
+                    bail!(
+                        "Provider returned unrecognized status {:?} {} times",
+                        short(other, 60),
+                        unknown_streak
+                    );
+                }
+            }
         }
     }
 }
@@ -389,10 +567,11 @@ async fn fal_fetch_result(
     http: &Client,
     api_key: &str,
     response_url: &str,
-) -> Result<String> {
+) -> Result<ModelFile> {
     let resp = http
         .get(response_url)
         .header("Authorization", format!("Key {}", api_key))
+        .timeout(JSON_REQUEST_TIMEOUT)
         .send()
         .await
         .context("HTTP fetch result")?;
@@ -405,25 +584,40 @@ async fn fal_fetch_result(
             short(&body_text, 200)
         );
     }
-    let result = resp
-        .json::<HunyuanResult>()
-        .await
-        .context("Parsing result JSON")?;
-    result.glb_url().ok_or_else(|| {
+    let body = read_capped(resp, MAX_JSON_BYTES, "result response").await?;
+    let result: HunyuanResult =
+        serde_json::from_slice(&body).context("Parsing result JSON")?;
+    result.glb_file().ok_or_else(|| {
         anyhow!("Result JSON had no GLB URL (model_glb / model_urls.glb)")
     })
 }
 
-async fn fal_download_glb(http: &Client, url: &str) -> Result<Vec<u8>> {
+/// Download the GLB. `declared_size` is the provider's own claim about
+/// the file, used only to refuse an oversized download before opening
+/// the connection — `read_capped` is what actually enforces the limit.
+async fn fal_download_glb(
+    http: &Client,
+    url: &str,
+    declared_size: Option<u64>,
+) -> Result<Vec<u8>> {
     // GLB downloads use the fal.ai CDN host (e.g. v3.fal.media). No
     // auth needed for these URLs; they're pre-signed and short-lived.
+    validate_glb_url(url)?;
+    if let Some(size) = declared_size {
+        if size > MAX_GLB_BYTES {
+            bail!(
+                "Provider reports a {} byte GLB, over the {} byte limit",
+                size,
+                MAX_GLB_BYTES
+            );
+        }
+    }
     let resp = http.get(url).send().await.context("HTTP download GLB")?;
     let status = resp.status();
     if !status.is_success() {
         bail!("Download {}", status.as_u16());
     }
-    let bytes = resp.bytes().await.context("Reading GLB body")?;
-    Ok(bytes.to_vec())
+    read_capped(resp, MAX_GLB_BYTES, "GLB").await
 }
 
 /// Best-effort remote cancel: `PUT` the queue cancel URL so fal.ai drops
@@ -499,10 +693,10 @@ mod tests {
             "seed": 42
         }"#;
         let result: HunyuanResult = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            result.glb_url().as_deref(),
-            Some("https://v3b.fal.media/files/b/abc/model.glb")
-        );
+        let file = result.glb_file().expect("model_glb resolves");
+        assert_eq!(file.url, "https://v3b.fal.media/files/b/abc/model.glb");
+        // The declared size feeds the pre-download size check.
+        assert_eq!(file.file_size, Some(64_724_836));
     }
 
     #[test]
@@ -516,7 +710,10 @@ mod tests {
             }
         }"#;
         let result: HunyuanResult = serde_json::from_str(json).unwrap();
-        assert_eq!(result.glb_url().as_deref(), Some("https://cdn/alt.glb"));
+        assert_eq!(
+            result.glb_file().map(|f| f.url).as_deref(),
+            Some("https://cdn/alt.glb")
+        );
     }
 
     #[test]
@@ -525,6 +722,34 @@ mod tests {
         // "no GLB URL" error instead of downloading garbage.
         let json = r#"{ "thumbnail": { "url": "https://cdn/preview.png" }, "seed": 7 }"#;
         let result: HunyuanResult = serde_json::from_str(json).unwrap();
-        assert!(result.glb_url().is_none());
+        assert!(result.glb_file().is_none());
+    }
+
+    #[test]
+    fn poll_disposition_retries_only_what_can_change() {
+        // 4xx (except the "come back later" pair) can't fix itself —
+        // retrying just burns the 300 s budget and then reports a
+        // misleading timeout instead of "bad key".
+        assert!(matches!(poll_disposition(401), PollAction::Fail(_)));
+        assert!(matches!(poll_disposition(403), PollAction::Fail(_)));
+        assert!(matches!(poll_disposition(404), PollAction::Fail(_)));
+        assert!(matches!(poll_disposition(422), PollAction::Fail(_)));
+        assert!(matches!(poll_disposition(408), PollAction::Retry));
+        assert!(matches!(poll_disposition(429), PollAction::Retry));
+        assert!(matches!(poll_disposition(500), PollAction::Retry));
+        assert!(matches!(poll_disposition(502), PollAction::Retry));
+        assert!(matches!(poll_disposition(503), PollAction::Retry));
+    }
+
+    #[test]
+    fn glb_url_must_be_https() {
+        assert!(validate_glb_url("https://v3b.fal.media/files/a.glb").is_ok());
+        // A different host is allowed (fal has moved this CDN before)
+        // but logged.
+        assert!(validate_glb_url("https://cdn.example.com/a.glb").is_ok());
+        // Plain http is refused outright: the body feeds a parser.
+        assert!(validate_glb_url("http://v3b.fal.media/files/a.glb").is_err());
+        assert!(validate_glb_url("file:///etc/passwd").is_err());
+        assert!(validate_glb_url("not a url").is_err());
     }
 }

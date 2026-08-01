@@ -37,6 +37,7 @@
 //! optimize), so a minimal `{ "items": [...] }` reproduces the interactive
 //! export. Paths are resolved relative to the spec file's directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,13 @@ pub struct BakeSpec {
     pub defaults: Settings,
     #[serde(default)]
     pub items: Vec<RawItem>,
+    /// Top-level keys we don't recognize, captured so a typo can be
+    /// reported instead of silently doing nothing. `deny_unknown_fields`
+    /// isn't an option here — serde doesn't support it alongside the
+    /// `flatten` in `RawItem` (it rejects the *valid* flattened keys
+    /// too), so catching the leftovers is the workable equivalent.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// The tunable knobs, all optional so the `defaults` block and per-item
@@ -82,6 +90,9 @@ pub struct BakeSpec {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Unrecognized keys in this block — see `BakeSpec::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
     pub mesher: Option<String>,
     pub smoothing: Option<String>,
     pub up_axis: Option<String>,
@@ -178,8 +189,10 @@ impl ResolvedItem {
 // Reports
 // ===========================================================================
 
-/// Per-item outcome, written next to the output as `<out>.report.json`
-/// (the headless analogue of the interactive post-export dialog) and
+/// Per-item outcome, written beside the output with the output's
+/// extension replaced by `.report.json` (`farm.glb` → `farm.report.json`
+/// — `Path::with_extension` semantics, not an appended suffix). The
+/// headless analogue of the interactive post-export dialog; also
 /// returned in the [`BakeOutcome`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemReport {
@@ -235,6 +248,19 @@ impl BakeOutcome {
         } else {
             let _ = writeln!(out, "Baked {ok}/{total} item(s) ({failed} failed).");
         }
+        if total == 0 {
+            // "Baked 0/0 item(s)." on its own reads like success, and
+            // the exit code is 0, so a CI step that silently baked
+            // nothing looks identical to one that worked. Unknown spec
+            // keys are ignored by design, so a typo'd "Items" lands
+            // here too.
+            let _ = writeln!(
+                out,
+                "warning: nothing to bake — \"items\" is empty, or --shard \
+                 selected none of them (note that unrecognized spec keys \
+                 are ignored, so check for typos)."
+            );
+        }
         for r in &self.reports {
             if r.ok {
                 let size = if r.bytes_final != r.bytes_raw {
@@ -288,6 +314,12 @@ pub fn run_bake(spec_path: &Path, shard: Option<&str>) -> Result<BakeOutcome, Ba
     let spec: BakeSpec = serde_json::from_str(&text)
         .map_err(|e| BakeError::Spec(format!("invalid spec {}: {e}", spec_path.display())))?;
 
+    warn_unknown_keys("spec", &spec.unknown);
+    warn_unknown_keys("defaults", &spec.defaults.unknown);
+    for (i, raw) in spec.items.iter().enumerate() {
+        warn_unknown_keys(&format!("item {i}"), &raw.settings.unknown);
+    }
+
     // Paths in the spec are relative to the spec file's directory.
     let base_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
     let mut items = expand_items(&spec, base_dir)?;
@@ -309,6 +341,23 @@ pub fn run_bake(spec_path: &Path, shard: Option<&str>) -> Result<BakeOutcome, Ba
 // ===========================================================================
 // Spec resolution
 // ===========================================================================
+
+/// Report keys the spec carried that we don't act on. Ignoring them is
+/// deliberate (forward compatibility with future spec versions), but
+/// ignoring them *silently* means a typo'd `"smoothng"` produces an
+/// asset that looks fine and isn't what was asked for.
+fn warn_unknown_keys(where_: &str, unknown: &BTreeMap<String, serde_json::Value>) {
+    if unknown.is_empty() {
+        return;
+    }
+    let keys: Vec<&str> = unknown.keys().map(String::as_str).collect();
+    log::warn!("bake: ignoring unrecognized {} key(s): {}", where_, keys.join(", "));
+    eprintln!(
+        "warning: ignoring unrecognized {} key(s): {}",
+        where_,
+        keys.join(", ")
+    );
+}
 
 fn expand_items(spec: &BakeSpec, base: &Path) -> Result<Vec<ResolvedItem>, BakeError> {
     let mut out = Vec::new();
@@ -370,6 +419,9 @@ fn expand_items(spec: &BakeSpec, base: &Path) -> Result<Vec<ResolvedItem>, BakeE
 /// Item settings win over defaults, field by field.
 fn merge(defaults: &Settings, item: &Settings) -> Settings {
     Settings {
+        // Unknown keys are reported at parse time, not merged — the
+        // merged value only feeds `parse_settings`.
+        unknown: BTreeMap::new(),
         mesher: item.mesher.clone().or_else(|| defaults.mesher.clone()),
         smoothing: item.smoothing.clone().or_else(|| defaults.smoothing.clone()),
         up_axis: item.up_axis.clone().or_else(|| defaults.up_axis.clone()),

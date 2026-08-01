@@ -10,7 +10,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 326 (`cargo test`) |
+| **Tests** | 363 (`cargo test`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan |
 | **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI). Full list in `Cargo.toml` |
@@ -31,12 +31,12 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 ### Core
 - **32³ chunks**, **8-byte voxel** = `material:u16 + RGBA + flags(bit0 emissive / bit1 metallic) + _reserved`; `Pod`/`Zeroable` for direct GPU upload.
 - `World` = chunk hashmap (`Arc<RwLock<Chunk>>`), optional bounds.
-- Two-layer dirty tracking with cross-chunk boundary propagation.
+- Per-chunk dirty tracking, propagated across chunk boundaries over the **full Moore neighborhood** (a corner write dirties up to 7 neighbors) — per-vertex AO samples all 26 surrounding chunks, so face-neighbors alone leave diagonals with stale AO.
 
 ### Mesh
 - **`GreedyMesher`** (default render + OBJ/GLB): per-voxel-RGBA face merging (Lysenko) + **per-vertex AO** (0fps 12-sample); greedy key = `(tint_zone << 40) | (rgba << 8) | ao` with diagonal-flip. Winding reversed from ABCD walk → **CCW-from-outside** (wgpu/glTF standard).
 - **`NaiveMesher`** — reference / fallback (shared quad helper, seam-consistent).
-- **`mesh_world_smoothed`** (Marching Cubes, **export-only**): `light` (rounded cubes, keeps thin features) / `heavy` (3×3×3 blur, clay) + per-triangle winding correction.
+- **`mesh_world_smoothed`** (Marching Cubes, **export-only**): `light` (rounded cubes, keeps thin features) / `heavy` (3×3×3 blur, clay) + per-triangle winding correction; vertices shared per cube edge; refuses (`SmoothMeshError::SceneTooLarge`) rather than allocating a density field bigger than `MAX_DENSITY_CELLS`, since the field is dense over the scene's whole bounding box.
 - Cross-chunk face culling; rayon-parallel re-mesh (sequential GPU upload).
 
 ### Render
@@ -51,23 +51,24 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 ### I/O
 - **`.vxlt`** — native gzip format (magic `VXLT` v1), embeds `EditorState` (camera / brush / palette / sockets; `#[serde(default)]` so pre-socket files still load).
-- **`.vox`** — MagicaVoxel import (v150 + v200 scene-graph flatten) / export (v150, 254-color, palette-overflow report).
+- **`.vox`** — MagicaVoxel import (v150 + v200 scene-graph flatten) / export (v150, 254-color, palette-overflow report), with a File ▸ Import toggle for the Z-up↔Y-up conversion (default on, applied as one global rotation after flattening). Import is hardened for untrusted files: chunk bodies are read through a length-limited reader and drained (unknown trailing fields from a newer MagicaVoxel can't desync the stream), the scene graph is walked as a real DAG under depth/visit/chunk budgets, the official 256-color default palette is used when `RGBA` is absent, and palette alpha is normalized opaque.
 - **`.obj`** — export (greedy + MC light/heavy), per-chunk groups, vertex-color extension (per-vertex AO baked into RGB).
-- **`.glb`** — glTF 2.0 binary export (greedy + MC light/heavy): `POSITION / NORMAL / COLOR_0` (per-vertex AO baked into RGB) `/ _TINTZONE` + `TEXCOORD_0.x` (per-vertex faction tint zone — the custom attr plus a UV mirror Unity glTFast can read), u32 indices; geometry is split into **per-material-group primitives with glTF `materials[]`** — plain (explicit non-metallic, since the glTF default is metallic), emissive (white `emissiveFactor`), and metallic (`metallicFactor` 1). **Named sockets** export as **empty nodes** (`name` + `translation` + `rotation`, no mesh; `+Y→normal` quaternion) — even for a geometry-free scene. Imports directly into Unity / Unreal / Godot / Blender. The engine-side consumption contract (every attribute / material / node field, color space, per-engine support) is specified in [`docs/GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md) §3.2; a Unity URP reference shader is still TODO.
+- **`.glb`** — glTF 2.0 binary export (greedy + MC light/heavy): `POSITION / NORMAL / COLOR_0` (per-vertex AO baked into RGB) `/ _TINTZONE` + `TEXCOORD_0.x` (per-vertex faction tint zone — the custom attr plus a UV mirror Unity glTFast can read), u32 indices; geometry is split into **per-material-group primitives with glTF `materials[]`** — plain (explicit non-metallic, since the glTF default is metallic), emissive (white `emissiveFactor`), and metallic (`metallicFactor` 1). **Named sockets** export as **empty nodes** (`name` + `translation` + `rotation`, no mesh; `+Y→normal` quaternion) — even for a geometry-free scene. Imports directly into Unity / Unreal / Godot / Blender. The engine-side consumption contract (every attribute / material / node field, color space, per-engine support) is specified in [`docs/GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md) §3.2; the Unity URP reference shader ships at [`docs/reference/VoxelithUberURP.shader`](reference/VoxelithUberURP.shader).
 - Post-export report dialog (format / geometry source / triangle-vertex-chunk counts / file size / lost-color notes).
 - **Headless batch export** — `voxelith bake <spec.json> [--shard i/n]` (`src/bake.rs` + clap in `main.rs`): batch `.vxlt`→`.glb` from a declarative `{ defaults, items[] }` spec with per-asset **pivot / up-axis / unit-scale** (a lossless root-node transform — `io::export_glb_with_transform`), optional **`gltfpack` meshopt compression** (`optimize: "meshopt"`, graceful skip if not installed), `srcDir`/`outDir` bulk expansion, `--shard` for CI fan-out, and a per-item JSON report next to each output. CPU-only (no window/GPU). Identity transform ⇒ byte-identical to the interactive export. See [`GAME_PIPELINE_ROADMAP.md`](GAME_PIPELINE_ROADMAP.md) §3.4–3.5.
 
 ### AI generation
 - `src/ai/` — tokio background runtime, OS-keychain API key (`keyring`), `AiJobState` machine, egui AI panel, plus a `MockProvider` offline stub (defined for test / offline wiring; not currently constructed by any code path).
-- **`FalHunyuanProvider`** (fal.ai `hunyuan3d-v3` text-to-3D): queue API + 2 s polling + 5 min cap + cooperative & remote cancel; key never leaks into errors.
-- **`voxelize_glb`**: scene-graph walk + per-triangle adaptive sampling + 3-axis parity interior fill; lands as undoable `Command::set_voxels`. Prompt MRU + result auto-select/frame done.
+- **`FalHunyuanProvider`** (fal.ai `hunyuan3d-v3` text-to-3D): queue API + 2 s polling + 5 min cap + cooperative & remote cancel; key never leaks into errors. Remote input is bounded — streamed bodies with hard byte ceilings (GLB 256 MiB / JSON 4 MiB), https-only download URL, per-request timeouts, non-transient 4xx fails fast instead of retrying to the cap, and Cancel races the in-flight request rather than waiting it out.
+- **`voxelize_glb`**: scene-graph walk + per-triangle adaptive sampling + 3-axis parity interior fill; lands as undoable `Command::set_voxels`. Prompt MRU + result auto-select/frame done. Parses with `Gltf::from_slice` + `import_buffers` so only the base-color textures a material actually samples are decoded, each under an explicit `image::Limits` (a downloaded GLB can otherwise declare a decompression-bomb texture).
 
 ### Prefs & resilience
-- `prefs.ron` (window / panels / viewport / procgen / graph / brush / recent-files); `#[serde(default)]` forward-compat; scale-factor-aware (logical px).
+- `prefs.ron` (window / panels / viewport / procgen / graph / brush / recent-files / last export + import directory); `#[serde(default)]` forward-compat; scale-factor-aware (logical px). The recent-files MRU holds `.vxlt` projects only — its one consumer is Open Recent, which feeds every entry to the project loader; exports and `.vox` imports seed the corresponding dialog directory instead.
 - Timed **autosave** (60 s, atomic write) + **crash recovery** (delete-on-clean-exit → recover prompt at next launch; corrupt autosave falls back to default, never bricks startup).
+- **Unsaved-changes guard** on every path that discards the scene (New / Open / Open Recent / Import / Generate\* / window close / File ▸ Exit, keyboard shortcuts included): in-app Save / Don't Save / Cancel prompt, where Save only proceeds if the write actually landed. Clear All has its own confirm dialog (it wipes the undo history, so it can't be undone).
 
 ### UI
-- egui: menu / toolbar / status bar + Stats / Tools / Palette / Viewport / Help / About / Procgen / Graph / AI panels; in-app error & recovery dialogs.
+- egui: menu / toolbar / status bar + Stats / Tools / Palette / Viewport / Help / About / Procgen / Graph / AI panels; in-app dialogs for errors, the export report, crash recovery, destructive-action confirmation, and the unsaved-changes guard. Wireframe toggles gray out on GPUs without `POLYGON_MODE_LINE` instead of silently doing nothing.
 - **Viewport HUD** (bottom-left, click-through: tool / gesture+numbers / locked plane / symmetry / selection size) + **Perf HUD** (bottom-right, default off: FPS+ms / tris / chunks / last rebuild).
 
 ---
@@ -105,6 +106,10 @@ Load-bearing gotchas for anyone touching the code:
 - **AI patch coupling is one-directional**: `ai → procgen` (`JobEvent::Done` carries `Option<VoxelPatch>`); never the inverse.
 - **API key lives in the OS keychain**, never `prefs.ron`.
 - **Errors / recovery use in-app egui dialogs, never `rfd::MessageDialog`** — the native dialog exits the process on the dev's winit+wgpu+Windows setup (`rfd::FileDialog` is unaffected).
+- **File pickers go through `App::file_dialog`**, which attaches the main window as parent — an ownerless picker on Windows can open behind the app, and because it runs a modal loop the app stops rendering, which reads as a hang.
+- **`unsaved_changes` vs `autosave_pending` are deliberately separate** — autosave must not clear the former, or "edit → autosave → close" would skip the guard and then delete the autosave that held the only copy.
+- **Every voxel in the world is opaque (α = 255)** — the greedy mesher's zero-key "no visible face" sentinel and the flood fill's region test both depend on it; ingest paths (`.vox`, AI voxelize) normalize alpha.
+- **A voxel is a cell `[p, p+1)`, not a point** — mirroring an axis maps `p ↦ size-1-p`; the point formula (`-p`) shifts even-sized models one cell (`io::vox::rotate_cell`).
 
 ---
 
@@ -118,5 +123,5 @@ Load-bearing gotchas for anyone touching the code:
 ## Onboarding
 
 1. `cargo run --release` — verify it launches and the cube + ground show.
-2. `cargo test` — should be 326 passing.
+2. `cargo test` — should be 363 passing.
 3. `git log --oneline` — see the recent direction and last-committed work.

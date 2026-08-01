@@ -215,14 +215,19 @@ impl CameraController {
     /// actual position as the source of truth; the controller's
     /// stored angles are just a cache used to apply orbit deltas.
     ///
-    /// Call sites (anywhere `camera.target` or `camera.position` is
-    /// written without going through `update_camera_position`):
+    /// Call sites — anywhere `camera.target` or `camera.position` is
+    /// written without going through `update_camera_position`. Adding
+    /// such a write means adding a sync right after it:
     /// - `Renderer::new` — match controller defaults to the initial pose.
     /// - `process_mouse_button` middle-press — middle-orbit drag below
     ///   reads the controller; sync once at press time so the user's
     ///   non-orbit navigation since the last sync is reflected.
-    /// - `App::recenter_camera_on_scene` (F key + Generate*) and
-    ///   `App::do_open_project` — both write `camera.target` directly.
+    /// - `App::frame_camera_on_aabb` (F key, Frame All / Selected /
+    ///   Generated) — writes both target and position.
+    /// - `App::recenter_camera_on_scene` (Reset Camera, Generate*,
+    ///   initial scene, `.vox` import) — writes target.
+    /// - `App::do_open_project` and `App::recover_from_autosave` —
+    ///   restore a saved camera pose verbatim.
     ///
     /// `process_scroll` (zoom-to-cursor), pan, and WASD don't need a
     /// sync: they translate / scale `position` and `target` uniformly,
@@ -277,7 +282,17 @@ impl CameraController {
                 // continues to rotate around the new (panned-to) target
                 // without any discontinuity.
                 let right = camera.right();
-                let up = camera.up;
+                // Screen-space up, not world up. Panning is a
+                // drag-the-scene gesture, so the drag must move the
+                // view by what the user sees, in every pose. Against
+                // world `up` the visible vertical motion scales with
+                // cos(pitch): at the pitch clamp (±1.5 rad ≈ 86°, the
+                // ordinary top-down voxel-editing pose) that's ≈0.07,
+                // so ~93% of a vertical drag became a dolly along the
+                // view axis and the picture barely moved. `right` and
+                // `forward` are orthonormal, so their cross is already
+                // unit length.
+                let up = right.cross(camera.forward());
                 let pan_speed = self.distance * 0.002;
 
                 let offset = right * (-dx * pan_speed) + up * (dy * pan_speed);
@@ -316,7 +331,13 @@ impl CameraController {
         };
 
         // Intended scale factor: scroll>0 (wheel up) → f<1 (zoom in).
-        let f = 1.0 - scroll * 0.1;
+        // Clamped so one huge event can't swallow the whole zoom range:
+        // a precision touchpad reports `PixelDelta`, and a fast flick
+        // arrives as a single ≥100 px event, which unclamped drives f to
+        // zero or below and snaps the camera straight to the minimum
+        // distance. Ordinary wheel notches (`LineDelta` ±1..3) give
+        // f ∈ [0.7, 1.3] and are unaffected.
+        let f = (1.0 - scroll * 0.1).clamp(0.2, 5.0);
         let new_distance = (self.distance * f).clamp(1.0, 500.0);
         // After clamp the actual factor may differ from `f`; use the
         // ratio so position / target scale by exactly the amount the
@@ -807,5 +828,82 @@ mod tests {
         let portrait = Camera::new(Vec3::ZERO, Vec3::ZERO, 0.56);
         let e = Vec3::splat(10.0);
         assert!(portrait.fit_distance(e, 1.0) > landscape.fit_distance(e, 1.0));
+    }
+
+    // -------- right-drag pan --------
+
+    /// Drive one right-drag from `from` to `to` and return how far the
+    /// camera moved.
+    fn pan_offset(camera: &mut Camera, from: (f32, f32), to: (f32, f32)) -> Vec3 {
+        let mut controller = CameraController::new_synced_for_test(camera);
+        controller.right_mouse_pressed = true;
+        controller.last_mouse_pos = Some(from);
+        let before = camera.position;
+        controller.process_mouse_motion(to.0, to.1, camera);
+        camera.position - before
+    }
+
+    #[test]
+    fn vertical_pan_stays_effective_at_the_pitch_clamp() {
+        // The reason pan uses screen-space up: near-top-down is the
+        // ordinary voxel-editing pose, and against world up the visible
+        // part of a vertical drag scales with cos(pitch) — ~0.07 at the
+        // ±1.5 rad clamp, i.e. the picture barely moves. Screen-space up
+        // is perpendicular to the view axis by construction, so the
+        // whole drag stays visible however steep the camera is.
+        let mut camera = Camera::new(Vec3::new(0.0, 40.0, 3.0), Vec3::ZERO, 1.0);
+        let forward = camera.forward();
+        let offset = pan_offset(&mut camera, (100.0, 100.0), (100.0, 140.0));
+
+        assert!(offset.length() > 1e-3, "drag produced no motion");
+        assert!(
+            offset.dot(forward).abs() / offset.length() < 1e-3,
+            "pan must not dolly along the view axis; offset={:?}",
+            offset
+        );
+    }
+
+    #[test]
+    fn pan_moves_position_and_target_together() {
+        // Pan translates the whole rig, which is what keeps the cached
+        // yaw / pitch valid without a re-sync.
+        let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
+        let before = camera.position - camera.target;
+        pan_offset(&mut camera, (0.0, 0.0), (25.0, -10.0));
+        let after = camera.position - camera.target;
+        assert!(
+            (after - before).length() < 1e-4,
+            "camera-to-target vector changed: {:?} -> {:?}",
+            before,
+            after
+        );
+    }
+
+    #[test]
+    fn huge_pixel_scroll_stays_a_forward_zoom() {
+        // A touchpad flick arrives as one big `PixelDelta`. The scale
+        // factor is clamped, so the step stays a sane zoom instead of
+        // collapsing to (or past) zero.
+        let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
+        let mut controller = CameraController::new_synced_for_test(&camera);
+        let before = controller.distance;
+        let anchor = camera.target;
+
+        let delta = winit::event::MouseScrollDelta::PixelDelta(
+            winit::dpi::PhysicalPosition::new(0.0, 400.0),
+        );
+        controller.process_scroll(delta, &mut camera, anchor);
+
+        assert!(
+            controller.distance >= 0.2 * before - 1e-3,
+            "one event zoomed further than the clamp allows: {} -> {}",
+            before,
+            controller.distance
+        );
+        assert!(
+            (camera.position - anchor).dot(Vec3::new(0.0, 20.0, 40.0)) > 0.0,
+            "camera crossed the anchor; position={:?}",
+            camera.position
+        );
     }
 }

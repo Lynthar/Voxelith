@@ -251,6 +251,11 @@ pub enum GraphError {
     MissingInput { node: NodeId },
     #[error("node {0} references nonexistent node")]
     DanglingReference(NodeId),
+    /// The node exists but has no such input slot. Distinct from
+    /// `DanglingReference`, which reported the same thing and read as
+    /// "the node is missing" — the opposite of what happened.
+    #[error("node {node} has no input slot {slot}")]
+    InvalidSlot { node: NodeId, slot: usize },
 }
 
 impl From<GraphError> for GenError {
@@ -377,12 +382,16 @@ impl PipelineGraph {
             NodeKind::Mask { subject, mask, .. } => match slot {
                 0 => *subject,
                 1 => *mask,
-                _ => return Err(GraphError::DanglingReference(target)),
+                _ => {
+                    return Err(GraphError::InvalidSlot { node: target, slot })
+                }
             },
             NodeKind::Combine { a, b, .. } => match slot {
                 0 => *a,
                 1 => *b,
-                _ => return Err(GraphError::DanglingReference(target)),
+                _ => {
+                    return Err(GraphError::InvalidSlot { node: target, slot })
+                }
             },
         })
     }
@@ -695,9 +704,10 @@ fn mask_patch(subject: VoxelPatch, mask: VoxelPatch, mode: MaskMode) -> VoxelPat
             }
         })
         .collect();
-    // Preserve diagnostics from both branches so notes don't get lost.
+    // Preserve diagnostics from both branches so notes don't get lost
+    // — deduped, since a diamond topology delivers the same note twice.
     result.notes = subject.notes;
-    result.notes.extend(mask.notes);
+    extend_notes_deduped(&mut result.notes, mask.notes);
     result
 }
 
@@ -723,15 +733,111 @@ fn combine_patches(a: VoxelPatch, b: VoxelPatch, op: CombineOp) -> VoxelPatch {
 
     let mut result = VoxelPatch::new();
     result.voxels = combined.into_iter().collect();
-    // Preserve diagnostics from both branches so the user sees them.
+    // Restore a deterministic order. `HashMap` iteration is randomized
+    // per instance, so without this the same graph evaluated twice
+    // produced the same voxels in a different order — quietly breaking
+    // the "same seed → byte-identical patch" property every source
+    // generator has a test for.
+    //
+    // Only safe here because the map guarantees unique positions.
+    // Source patches may legitimately hold the same position twice
+    // (`VoxelPatch::dedup_last_write` relies on the later write
+    // winning, e.g. leaves over trunk), so don't "unify" this by
+    // sorting those.
+    result.voxels.sort_unstable_by_key(|&(pos, _)| pos);
+    // Preserve diagnostics from both branches so the user sees them,
+    // but only once each: in a diamond (one source feeding two paths
+    // that meet again) both sides carry the same note, and the status
+    // bar showed it twice.
     result.notes = a.notes;
-    result.notes.extend(b.notes);
+    extend_notes_deduped(&mut result.notes, b.notes);
     result
+}
+
+/// Append `extra` to `notes`, skipping ones already present. Order is
+/// preserved (first occurrence wins) so the message stays stable.
+fn extend_notes_deduped(notes: &mut Vec<String>, extra: Vec<String>) {
+    for note in extra {
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a two-source Combine graph and evaluate it.
+    fn combine_graph() -> PipelineGraph {
+        let mut g = PipelineGraph::default();
+        let a = g.add(NodeKind::Terrain(PerlinTerrain {
+            width: 8,
+            depth: 8,
+            ..Default::default()
+        }));
+        let b = g.add(NodeKind::Terrain(PerlinTerrain {
+            width: 6,
+            depth: 6,
+            seed: 99,
+            ..Default::default()
+        }));
+        let c = g.add(NodeKind::Combine {
+            a: Some(a),
+            b: Some(b),
+            op: CombineOp::Union,
+        });
+        let out = g.add(NodeKind::Output { input: Some(c) });
+        let _ = out;
+        g
+    }
+
+    #[test]
+    fn combine_output_order_is_deterministic() {
+        // Combine routes both inputs through a HashMap, whose iteration
+        // order is randomized per instance — so the same graph
+        // evaluated twice used to emit the same voxels in a different
+        // order, quietly breaking the "same seed, same bytes" property
+        // every source generator tests for.
+        let g = combine_graph();
+        let first = g.evaluate().expect("evaluates");
+        let second = g.evaluate().expect("evaluates");
+        assert_eq!(first.voxels, second.voxels);
+        assert!(
+            first.voxels.windows(2).all(|w| w[0].0 < w[1].0),
+            "combine output must be sorted by position"
+        );
+    }
+
+    #[test]
+    fn notes_are_not_duplicated_when_paths_rejoin() {
+        let mut notes = vec!["over-constrained".to_string()];
+        extend_notes_deduped(
+            &mut notes,
+            vec!["over-constrained".to_string(), "other".to_string()],
+        );
+        assert_eq!(notes, vec!["over-constrained", "other"]);
+    }
+
+    #[test]
+    fn out_of_range_slot_reports_invalid_slot_not_a_missing_node() {
+        let mut g = PipelineGraph::default();
+        let a = g.add(NodeKind::Terrain(PerlinTerrain::default()));
+        let c = g.add(NodeKind::Combine {
+            a: Some(a),
+            b: None,
+            op: CombineOp::Union,
+        });
+        assert!(matches!(
+            g.get_input(c, 2),
+            Err(GraphError::InvalidSlot { .. })
+        ));
+        // A genuinely missing node still reports the dangling case.
+        assert!(matches!(
+            g.get_input(9999, 0),
+            Err(GraphError::DanglingReference(_))
+        ));
+    }
 
     fn solid(r: u8) -> Voxel {
         Voxel::from_rgb(r, 0, 0)

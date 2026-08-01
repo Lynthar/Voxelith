@@ -45,7 +45,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::core::World;
-use crate::mesh::{mesh_chunk_by_material, mesh_world_smoothed, Vertex};
+use crate::mesh::{mesh_chunk_by_material, mesh_world_smoothed, SmoothMeshError, Vertex};
 
 #[derive(Debug, Error)]
 pub enum GlbError {
@@ -53,6 +53,13 @@ pub enum GlbError {
     Io(#[from] std::io::Error),
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Smoothing(#[from] SmoothMeshError),
+    /// GLB stores every length as a `uint32`, so 4 GiB is a hard
+    /// format ceiling. Writing a truncated header instead would produce
+    /// a file that claims to be valid and isn't.
+    #[error("mesh is too large for GLB: {0} bytes exceeds the format's 4 GiB limit")]
+    TooLarge(usize),
 }
 
 /// Stats reported back to the UI after a successful export.
@@ -279,7 +286,7 @@ pub fn export_glb_smoothed_with_transform(
     blur: bool,
     transform: ExportTransform,
 ) -> Result<GlbStats, GlbError> {
-    let mesh = mesh_world_smoothed(world, blur);
+    let mesh = mesh_world_smoothed(world, blur)?;
     let chunk_count = if mesh.is_empty() { 0 } else { 1 };
     // MC output carries no material flags — a single plain group.
     let groups = if mesh.is_empty() {
@@ -555,10 +562,13 @@ fn write_glb_groups(
 
     // Total file length: header (12) + JSON chunk (8 + json_bytes) +
     // optional BIN chunk (8 + bin).
-    let total_len: u32 = (12
-        + 8
-        + json_bytes.len()
-        + if has_bin { 8 + bin.len() } else { 0 }) as u32;
+    // Every length in a GLB is a `uint32`, so 4 GiB is the format's
+    // hard ceiling. Casting past it used to wrap silently and write a
+    // header claiming a length the file doesn't have — a corrupt asset
+    // reported as a successful export. Checked before `File::create` so
+    // a refused export leaves nothing behind. Once the total fits, both
+    // chunk lengths (which are smaller) convert losslessly.
+    let total = glb_total_len(json_bytes.len(), bin.len(), has_bin)?;
 
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
@@ -566,7 +576,7 @@ fn write_glb_groups(
     // ===== Header (12 bytes) =====
     writer.write_all(b"glTF")?;
     writer.write_all(&2u32.to_le_bytes())?;
-    writer.write_all(&total_len.to_le_bytes())?;
+    writer.write_all(&total.to_le_bytes())?;
 
     // ===== JSON chunk =====
     writer.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
@@ -586,8 +596,23 @@ fn write_glb_groups(
         vertex_count: total_vertices,
         triangle_count: total_indices / 3,
         chunk_count,
-        byte_size: total_len as usize,
+        byte_size: total as usize,
     })
+}
+
+/// Total GLB length: 12-byte header + JSON chunk (8-byte header +
+/// payload) + optional BIN chunk (same shape).
+///
+/// Separated out so the 4 GiB boundary is testable — a mesh that large
+/// can't be built in a unit test, and the failure mode it guards
+/// against (a silently wrapped `as u32`) is invisible in the output.
+fn glb_total_len(
+    json_len: usize,
+    bin_len: usize,
+    has_bin: bool,
+) -> Result<u32, GlbError> {
+    let total = 12 + 8 + json_len + if has_bin { 8 + bin_len } else { 0 };
+    u32::try_from(total).map_err(|_| GlbError::TooLarge(total))
 }
 
 /// Build the parent node that applies an [`ExportTransform`] to all
@@ -1110,6 +1135,22 @@ mod tests {
         assert_eq!(json["scenes"][0]["nodes"].as_array().unwrap().len(), 1);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn glb_total_len_refuses_past_the_uint32_ceiling() {
+        // 12-byte header + 8-byte JSON chunk header + payloads.
+        assert_eq!(glb_total_len(4, 0, false).unwrap(), 24);
+        assert_eq!(glb_total_len(4, 16, true).unwrap(), 48);
+        // Exactly at the ceiling still fits.
+        let json = u32::MAX as usize - 20;
+        assert_eq!(glb_total_len(json, 0, false).unwrap(), u32::MAX);
+        // One byte past it must be an error, not a wrapped length in
+        // the header of an otherwise plausible-looking file.
+        assert!(matches!(
+            glb_total_len(json + 1, 0, false),
+            Err(GlbError::TooLarge(_))
+        ));
     }
 
     #[test]

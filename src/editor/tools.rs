@@ -374,7 +374,13 @@ pub fn compute_flood_fill_changes(
         }
 
         let current = world.get_voxel(pos.0, pos.1, pos.2);
-        if current.color() != target_rgba {
+        // Air is never part of a fillable region, whatever its color.
+        // `Voxel::AIR.color()` is `[0, 0, 0, 0]` — and so is a *solid*
+        // voxel built from a fully-transparent palette entry, which
+        // `.vox` import can produce. Without this guard, filling such a
+        // voxel matched every neighboring air cell and flooded the
+        // empty space around it with solid geometry.
+        if current.is_air() || current.color() != target_rgba {
             continue;
         }
 
@@ -498,6 +504,40 @@ mod tests {
 
         assert_eq!(count, 9);
         assert_eq!(world.get_voxel(0, 0, 0).r, 255);
+    }
+
+    #[test]
+    fn test_flood_fill_never_spreads_into_air() {
+        // A `.vox` palette entry with alpha 0 imports as a *solid*
+        // voxel whose `color()` is [0,0,0,0] — the same bytes
+        // `Voxel::AIR` reports. Region membership is decided on color,
+        // so without an explicit air check every empty cell around such
+        // a voxel matched the seed and the fill flooded open space with
+        // geometry.
+        let mut world = World::new();
+        let mut history = CommandHistory::new(100);
+
+        let transparent = Voxel::from_rgba(0, 0, 0, 0);
+        assert!(transparent.is_solid(), "precondition: solid, not air");
+        assert_eq!(transparent.color(), Voxel::AIR.color());
+        world.set_voxel(0, 0, 0, transparent);
+        world.clear_dirty_flags();
+
+        let count = flood_fill(
+            &mut world,
+            &mut history,
+            (0, 0, 0),
+            Voxel::from_rgb(255, 0, 0),
+            10_000,
+        );
+
+        assert_eq!(count, 1, "only the seed voxel itself is filled");
+        for neighbor in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)] {
+            assert!(
+                world.get_voxel(neighbor.0, neighbor.1, neighbor.2).is_air(),
+                "air at {neighbor:?} must stay air"
+            );
+        }
     }
 
     #[test]

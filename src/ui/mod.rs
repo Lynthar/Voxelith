@@ -4,7 +4,7 @@ pub mod hud;
 mod panels;
 
 pub use hud::HudState;
-pub use panels::{ExportReport, UiAction, UiState};
+pub use panels::{ConfirmPrompt, ExportReport, UiAction, UiState};
 
 use crate::ai::AiJobState;
 use crate::editor::{Axis, Editor, Quarter, Tool};
@@ -13,6 +13,15 @@ use crate::procgen::{
     PerlinTerrain, PipelineGraph, WfcGenerator, WfcTileset,
 };
 use egui::Context;
+
+/// Hover text on every disabled wireframe control. The GPU feature is
+/// `POLYGON_MODE_LINE`; GL backends and some integrated GPUs lack it.
+const WIREFRAME_UNSUPPORTED: &str =
+    "This GPU doesn't support line polygon mode, so wireframe is unavailable";
+
+/// Cap on user-added palette entries. Keeps the palette grid a fixed,
+/// scannable size (and `EditorPrefs::palette` small).
+const MAX_PALETTE_COLORS: usize = 32;
 
 /// Viewport display settings
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -122,6 +131,14 @@ pub struct Ui {
     /// gray out the Paste button without `App::clipboard` leaking
     /// across the UI layer boundary. App syncs it before each frame.
     pub has_clipboard: bool,
+    /// Mirror of `Renderer::wireframe_supported` (the GPU exposes
+    /// `POLYGON_MODE_LINE`). Every wireframe control must gate on this:
+    /// the render path already falls back to solid when the pipeline is
+    /// missing, so without the gate the checkboxes stay tickable, the
+    /// status bar announces `[Wireframe]`, and nothing whatsoever
+    /// changes on screen — the UI lying about what the app is doing.
+    /// App syncs it before each frame.
+    pub wireframe_supported: bool,
 
     /// User-edited prompt for the AI panel. Owned by the UI (rather
     /// than App) so the input field's state lives next to its widget;
@@ -161,6 +178,7 @@ impl Ui {
             recent_files: Vec::new(),
             recent_ai_prompts: Vec::new(),
             has_clipboard: false,
+            wireframe_supported: false,
             ai_prompt: String::new(),
             ai_resolution: 64,
             ai_job: AiJobState::Idle,
@@ -265,6 +283,75 @@ impl Ui {
         if self.state.export_report.is_some() {
             self.show_export_report(ctx);
         }
+
+        // Confirmation for a destructive action, and the unsaved-changes
+        // guard. Last, and in this order, so the guard sits on top of
+        // everything else — it's the one blocking the user's request.
+        if self.state.confirm.is_some() {
+            self.show_confirm_dialog(ctx);
+        }
+        if self.state.unsaved_prompt.is_some() {
+            self.show_unsaved_prompt(ctx);
+        }
+    }
+
+    /// Confirmation for an action that can't be undone. Accepting
+    /// dispatches `ConfirmAccepted`; App knows which action that is.
+    fn show_confirm_dialog(&mut self, ctx: &Context) {
+        let Some(prompt) = self.state.confirm.clone() else {
+            return;
+        };
+        egui::Window::new(prompt.title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(prompt.body);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.state.confirm = None;
+                    }
+                    if ui.button("Continue").clicked() {
+                        self.state.request(prompt.action);
+                        self.state.confirm = None;
+                    }
+                });
+            });
+    }
+
+    /// The unsaved-changes guard. Raised by `App::guard_then` before
+    /// anything that would throw the current scene away.
+    fn show_unsaved_prompt(&mut self, ctx: &Context) {
+        let Some(what) = self.state.unsaved_prompt.clone() else {
+            return;
+        };
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "This project has changes that haven't been saved.\n\
+                     Save them before you {}?",
+                    what
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.state.request(UiAction::UnsavedSave);
+                        self.state.unsaved_prompt = None;
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        self.state.request(UiAction::UnsavedDiscard);
+                        self.state.unsaved_prompt = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.state.request(UiAction::UnsavedCancel);
+                        self.state.unsaved_prompt = None;
+                    }
+                });
+            });
     }
 
     /// In-app error dialog for failed file operations: centered window
@@ -578,7 +665,17 @@ impl Ui {
                     }
                     ui.separator();
                     if ui.button("Clear All").clicked() {
-                        self.state.request(UiAction::ClearAll);
+                        // Everything else in this menu is undoable, and
+                        // this sits one row from Deselect — a misclick
+                        // used to silently take the whole scene with no
+                        // way back (it clears the undo history too).
+                        self.state.confirm = Some(ConfirmPrompt {
+                            title: "Clear everything?".into(),
+                            body: "This deletes every voxel and socket, \
+                                   and can't be undone."
+                                .into(),
+                            action: UiAction::ClearAll,
+                        });
                         ui.close_menu();
                     }
                 });
@@ -712,6 +809,7 @@ impl Ui {
                     }
                 });
 
+                let wireframe_supported = self.wireframe_supported;
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.state.show_stats, "Statistics");
                     ui.checkbox(&mut self.state.show_tools, "Tools Panel");
@@ -723,7 +821,14 @@ impl Ui {
                     ui.separator();
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
-                    ui.checkbox(&mut self.viewport.wireframe_mode, "Wireframe Mode");
+                    ui.add_enabled(
+                        wireframe_supported,
+                        egui::Checkbox::new(
+                            &mut self.viewport.wireframe_mode,
+                            "Wireframe Mode",
+                        ),
+                    )
+                    .on_disabled_hover_text(WIREFRAME_UNSUPPORTED);
                     ui.checkbox(&mut self.viewport.show_hud, "Viewport HUD");
                     ui.checkbox(&mut self.viewport.show_perf_hud, "Performance HUD");
                 });
@@ -789,19 +894,19 @@ impl Ui {
                     };
 
                     if tool_button(ui, Tool::Place, editor.current_tool, "+", "Place (1)") {
-                        editor.current_tool = Tool::Place;
+                        editor.select_tool(Tool::Place);
                     }
                     if tool_button(ui, Tool::Remove, editor.current_tool, "-", "Remove (2)") {
-                        editor.current_tool = Tool::Remove;
+                        editor.select_tool(Tool::Remove);
                     }
                     if tool_button(ui, Tool::Paint, editor.current_tool, "P", "Paint (3)") {
-                        editor.current_tool = Tool::Paint;
+                        editor.select_tool(Tool::Paint);
                     }
                     if tool_button(ui, Tool::Eyedropper, editor.current_tool, "E", "Eyedropper (4)") {
-                        editor.current_tool = Tool::Eyedropper;
+                        editor.select_tool(Tool::Eyedropper);
                     }
                     if tool_button(ui, Tool::Fill, editor.current_tool, "F", "Fill (5)") {
-                        editor.current_tool = Tool::Fill;
+                        editor.select_tool(Tool::Fill);
                     }
 
                     ui.add_space(8.0);
@@ -810,16 +915,16 @@ impl Ui {
 
                     // Shape tools — click-anchor / drag / release.
                     if tool_button(ui, Tool::Line, editor.current_tool, "L", "Line (6)") {
-                        editor.current_tool = Tool::Line;
+                        editor.select_tool(Tool::Line);
                     }
                     if tool_button(ui, Tool::Box, editor.current_tool, "▢", "Box (7)") {
-                        editor.current_tool = Tool::Box;
+                        editor.select_tool(Tool::Box);
                     }
                     if tool_button(ui, Tool::Sphere, editor.current_tool, "○", "Sphere (8)") {
-                        editor.current_tool = Tool::Sphere;
+                        editor.select_tool(Tool::Sphere);
                     }
                     if tool_button(ui, Tool::Cylinder, editor.current_tool, "⌭", "Cylinder (9)") {
-                        editor.current_tool = Tool::Cylinder;
+                        editor.select_tool(Tool::Cylinder);
                     }
 
                     ui.add_space(8.0);
@@ -834,7 +939,7 @@ impl Ui {
                         "▭",
                         "Select (0)\nDrag to mark an AABB. Esc or Ctrl+D deselects.",
                     ) {
-                        editor.current_tool = Tool::Select;
+                        editor.select_tool(Tool::Select);
                     }
 
                     ui.add_space(8.0);
@@ -850,7 +955,7 @@ impl Ui {
                         "Socket\nClick a voxel face (or the ground) to drop a named \
                          attachment point. Exports to glTF as an empty node.",
                     ) {
-                        editor.current_tool = Tool::Socket;
+                        editor.select_tool(Tool::Socket);
                     }
 
                     ui.add_space(16.0);
@@ -930,21 +1035,21 @@ impl Ui {
                     .spacing([4.0, 4.0])
                     .show(ui, |ui| {
                         if ui.selectable_label(editor.current_tool == Tool::Place, "Place").clicked() {
-                            editor.current_tool = Tool::Place;
+                            editor.select_tool(Tool::Place);
                         }
                         if ui.selectable_label(editor.current_tool == Tool::Remove, "Remove").clicked() {
-                            editor.current_tool = Tool::Remove;
+                            editor.select_tool(Tool::Remove);
                         }
                         if ui.selectable_label(editor.current_tool == Tool::Paint, "Paint").clicked() {
-                            editor.current_tool = Tool::Paint;
+                            editor.select_tool(Tool::Paint);
                         }
                         ui.end_row();
 
                         if ui.selectable_label(editor.current_tool == Tool::Eyedropper, "Pick").clicked() {
-                            editor.current_tool = Tool::Eyedropper;
+                            editor.select_tool(Tool::Eyedropper);
                         }
                         if ui.selectable_label(editor.current_tool == Tool::Fill, "Fill").clicked() {
-                            editor.current_tool = Tool::Fill;
+                            editor.select_tool(Tool::Fill);
                         }
                         ui.end_row();
                     });
@@ -960,21 +1065,21 @@ impl Ui {
                             .on_hover_text("Drag from anchor to end (3D Bresenham line)")
                             .clicked()
                         {
-                            editor.current_tool = Tool::Line;
+                            editor.select_tool(Tool::Line);
                         }
                         if ui
                             .selectable_label(editor.current_tool == Tool::Box, "Box")
                             .on_hover_text("Drag corner to corner (filled AABB)")
                             .clicked()
                         {
-                            editor.current_tool = Tool::Box;
+                            editor.select_tool(Tool::Box);
                         }
                         if ui
                             .selectable_label(editor.current_tool == Tool::Sphere, "Sphere")
                             .on_hover_text("Drag bbox; ellipsoid fits in it")
                             .clicked()
                         {
-                            editor.current_tool = Tool::Sphere;
+                            editor.select_tool(Tool::Sphere);
                         }
                         ui.end_row();
 
@@ -985,7 +1090,7 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            editor.current_tool = Tool::Cylinder;
+                            editor.select_tool(Tool::Cylinder);
                         }
                         ui.end_row();
                     });
@@ -1000,7 +1105,7 @@ impl Ui {
                     )
                     .clicked()
                 {
-                    editor.current_tool = Tool::Select;
+                    editor.select_tool(Tool::Select);
                 }
                 if let Some(sel) = editor.selection {
                     let (w, h, d) = sel.size();
@@ -1079,7 +1184,7 @@ impl Ui {
                     )
                     .clicked()
                 {
-                    editor.current_tool = Tool::Socket;
+                    editor.select_tool(Tool::Socket);
                 }
                 if editor.sockets.is_empty() {
                     ui.label(egui::RichText::new("No sockets yet.").small().weak());
@@ -1247,6 +1352,9 @@ impl Ui {
     }
 
     fn show_palette_panel(&mut self, ctx: &Context, editor: &mut Editor) {
+        // Collected inside the window closure, applied after it — the
+        // closure holds the borrow that `set_status` needs.
+        let mut palette_feedback: Option<String> = None;
         egui::Window::new("Palette")
             .default_pos([60.0, 450.0])
             .resizable(true)
@@ -1300,15 +1408,40 @@ impl Ui {
                         let exists = editor.palette.iter().any(|v| {
                             v.r == color.r && v.g == color.g && v.b == color.b
                         });
-                        if !exists && editor.palette.len() < 32 {
+                        // Report both refusals. Silently doing nothing
+                        // reads as a broken button — the user has no way
+                        // to tell "already there" from "list is full"
+                        // from "the click missed".
+                        palette_feedback = Some(if exists {
+                            format!(
+                                "Palette already has RGB({}, {}, {})",
+                                color.r, color.g, color.b
+                            )
+                        } else if editor.palette.len() >= MAX_PALETTE_COLORS {
+                            format!(
+                                "Palette is full ({} colors max) — \
+                                 remove one first",
+                                MAX_PALETTE_COLORS
+                            )
+                        } else {
                             editor.palette.push(color);
-                        }
+                            format!(
+                                "Added RGB({}, {}, {}) to palette",
+                                color.r, color.g, color.b
+                            )
+                        });
                     }
                 });
             });
+        // Set outside the window closure: `set_status` needs `&mut
+        // self`, which the closure is already holding.
+        if let Some(msg) = palette_feedback {
+            self.set_status(msg);
+        }
     }
 
     fn show_viewport_panel(&mut self, ctx: &Context) {
+        let wireframe_supported = self.wireframe_supported;
         egui::Window::new("Viewport Settings")
             .default_pos([ctx.screen_rect().width() - 220.0, 40.0])
             .resizable(false)
@@ -1317,7 +1450,14 @@ impl Ui {
                 ui.heading("Display");
                 ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                 ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
-                ui.checkbox(&mut self.viewport.wireframe_mode, "Wireframe Mode");
+                ui.add_enabled(
+                    wireframe_supported,
+                    egui::Checkbox::new(
+                        &mut self.viewport.wireframe_mode,
+                        "Wireframe Mode",
+                    ),
+                )
+                .on_disabled_hover_text(WIREFRAME_UNSUPPORTED);
                 ui.checkbox(&mut self.viewport.show_hud, "Viewport HUD")
                     .on_hover_text(
                         "Tool & gesture readout in the bottom-left corner of the viewport",
@@ -1762,12 +1902,22 @@ impl Ui {
     }
 
     fn show_help_panel(&mut self, ctx: &Context) {
+        // The list runs to roughly 1200 px. On a 1080p screen the
+        // window is taller than the space it has, and with
+        // `resizable(false)` and no scrolling the tail — File and
+        // Actions, i.e. the save/open shortcuts — was simply
+        // unreachable. Cap the height against the actual screen and
+        // scroll the overflow.
+        let max_height = ctx.screen_rect().height() * 0.75;
         egui::Window::new("Keyboard Shortcuts")
             .default_pos([ctx.screen_rect().width() / 2.0 - 150.0, 100.0])
             .resizable(false)
             .collapsible(false)
             .open(&mut self.state.show_help)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(max_height)
+                    .show(ui, |ui| {
                 egui::Grid::new("shortcuts_grid")
                     .num_columns(2)
                     .spacing([40.0, 4.0])
@@ -1813,6 +1963,14 @@ impl Ui {
 
                         ui.label("0");
                         ui.label("Box select tool");
+                        ui.end_row();
+
+                        ui.label("Alt (hold)");
+                        ui.label("Temporary eyedropper — restores on release");
+                        ui.end_row();
+
+                        ui.label("(toolbar only)");
+                        ui.label("Socket tool — drop a named attach point");
                         ui.end_row();
 
                         ui.end_row();
@@ -1983,6 +2141,7 @@ impl Ui {
                         ui.label("Apply tool");
                         ui.end_row();
                     });
+                });
             });
     }
 
@@ -2078,7 +2237,11 @@ impl Ui {
 
                 // Right-aligned viewport / preview info.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.viewport.wireframe_mode {
+                    // Only claim wireframe when it's actually running:
+                    // on a GPU without POLYGON_MODE_LINE the flag can
+                    // still be set (from prefs written on other
+                    // hardware) while the renderer draws solid.
+                    if self.viewport.wireframe_mode && self.wireframe_supported {
                         ui.label("[Wireframe]");
                     }
                     if self.viewport.show_grid {
@@ -2173,12 +2336,24 @@ fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
             ui.add(egui::Slider::new(&mut t.depth, 8..=256));
             ui.end_row();
 
+            // The two heights are independent sliders but not
+            // independent values: the generator rejects min > max, and
+            // with Preview on that rejection only reached a log line —
+            // the overlay just vanished. Let whichever slider the user
+            // is dragging push the other, so the invalid combination is
+            // unreachable from the UI in the first place.
             ui.label("Min Y");
             ui.add(egui::Slider::new(&mut t.min_height, -64..=64));
+            if t.max_height < t.min_height {
+                t.max_height = t.min_height;
+            }
             ui.end_row();
 
             ui.label("Max Y");
             ui.add(egui::Slider::new(&mut t.max_height, -64..=128));
+            if t.min_height > t.max_height {
+                t.min_height = t.max_height;
+            }
             ui.end_row();
 
             ui.label("Frequency");
@@ -2800,9 +2975,16 @@ fn graph_sidebar(
                 input_slot(ui, "Input", *input, id, 0, &candidates, wire_action);
                 ui.horizontal(|ui| {
                     ui.label("Offset");
-                    ui.add(egui::DragValue::new(dx).prefix("x:"));
-                    ui.add(egui::DragValue::new(dy).prefix("y:"));
-                    ui.add(egui::DragValue::new(dz).prefix("z:"));
+                    // Bounded so the panel can't casually scatter
+                    // geometry thousands of cells apart — smoothed
+                    // export builds a dense field over the scene's
+                    // whole bounding box. This is UX guidance, not a
+                    // safety limit (offsets compose across nodes, and
+                    // a saved graph can carry any value); the real
+                    // ceiling lives in `mesh_world_smoothed`.
+                    ui.add(egui::DragValue::new(dx).prefix("x:").range(-1024..=1024));
+                    ui.add(egui::DragValue::new(dy).prefix("y:").range(-1024..=1024));
+                    ui.add(egui::DragValue::new(dz).prefix("z:").range(-1024..=1024));
                 });
             }
             NodeKind::Filter { input, predicate } => {

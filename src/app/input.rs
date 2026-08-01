@@ -12,7 +12,9 @@ use voxelith::editor::{
     VoxelChange, VoxelRaycast,
 };
 
-use super::{build_stroke_plane, App, ShapeDrag, ShapePhase, StrokePlane};
+use super::{
+    build_stroke_plane, App, PendingAction, ShapeDrag, ShapePhase, StrokePlane,
+};
 
 /// Maximum distance (in voxel units) the editor's mouse-hover ray
 /// will travel through the world looking for a hit. Caps DDA work
@@ -285,6 +287,27 @@ impl App {
 
     /// Apply the current tool at the hovered location.
     pub(super) fn apply_tool(&mut self) {
+        // The shape tools' Height-phase commit is the one action here
+        // that doesn't need a hovered voxel: it extrudes by the cursor's
+        // screen-Y against the already-locked plane (`extruded_end`).
+        // Behind the hover guard below it was silently swallowed exactly
+        // when the ray left that plane — building a wall from a low
+        // angle, the moment the cursor crossed the plane's screen
+        // horizon the commit click did nothing, with no message, while
+        // the preview still showed the full extrusion.
+        if self.editor.current_tool.is_shape()
+            && matches!(
+                self.shape_drag,
+                Some(ShapeDrag {
+                    phase: ShapePhase::Height { .. },
+                    ..
+                })
+            )
+        {
+            self.commit_shape();
+            return;
+        }
+
         let Some(hit) = self.editor.hovered_voxel else {
             return;
         };
@@ -472,18 +495,29 @@ impl App {
         if let Some(move_anchor) = self.selection_move_anchor.take() {
             // Cancel any new-selection anchor that snuck in.
             self.selection_drag_anchor = None;
-            if let (Some(_sel), Some(hit)) =
-                (self.editor.selection, self.editor.hovered_voxel)
-            {
-                let cur = Self::select_anchor_pos(&hit);
-                let delta = (
-                    cur.0 - move_anchor.0,
-                    cur.1 - move_anchor.1,
-                    cur.2 - move_anchor.2,
-                );
-                if delta != (0, 0, 0) {
-                    self.move_selection(delta);
+            match (self.editor.selection, self.editor.hovered_voxel) {
+                (Some(_sel), Some(hit)) => {
+                    let cur = Self::select_anchor_pos(&hit);
+                    let delta = (
+                        cur.0 - move_anchor.0,
+                        cur.1 - move_anchor.1,
+                        cur.2 - move_anchor.2,
+                    );
+                    if delta != (0, 0, 0) {
+                        self.move_selection(delta);
+                    }
                 }
+                // Released with the ray off the world entirely (cursor
+                // above the horizon, past the raycast reach, or nearly
+                // parallel to the ground plane). Say so: the ghost
+                // snaps back to the original spot, and silence made
+                // that read as "the move didn't take" with no clue why.
+                // Matches the footprint-off-plane message shape.
+                (Some(_), None) => {
+                    self.ui
+                        .set_status("Move canceled (cursor off-world on release)");
+                }
+                _ => {}
             }
             return;
         }
@@ -492,6 +526,8 @@ impl App {
             return;
         };
         let Some(hit) = self.editor.hovered_voxel else {
+            self.ui
+                .set_status("Selection canceled (cursor off-world on release)");
             return;
         };
         let end = Self::select_anchor_pos(&hit);
@@ -871,8 +907,6 @@ impl App {
         }
     }
 
-    /// Handle keyboard shortcuts (tools, undo/redo, file ops,
-    /// selection).
     /// Clear all box-selection state: the marquee, an in-progress
     /// select-drag or move-drag anchor, and the translucent move ghost.
     /// Shared by the `Deselect` UI action, Esc, and Ctrl+D so the three
@@ -885,18 +919,20 @@ impl App {
         self.editor.selection = None;
     }
 
+    /// Handle keyboard shortcuts (tools, undo/redo, file ops,
+    /// selection).
     pub(super) fn handle_tool_shortcut(&mut self, key: KeyCode) {
         match key {
-            KeyCode::Digit1 => self.editor.current_tool = Tool::Place,
-            KeyCode::Digit2 => self.editor.current_tool = Tool::Remove,
-            KeyCode::Digit3 => self.editor.current_tool = Tool::Paint,
-            KeyCode::Digit4 => self.editor.current_tool = Tool::Eyedropper,
-            KeyCode::Digit5 => self.editor.current_tool = Tool::Fill,
-            KeyCode::Digit6 => self.editor.current_tool = Tool::Line,
-            KeyCode::Digit7 => self.editor.current_tool = Tool::Box,
-            KeyCode::Digit8 => self.editor.current_tool = Tool::Sphere,
-            KeyCode::Digit9 => self.editor.current_tool = Tool::Cylinder,
-            KeyCode::Digit0 => self.editor.current_tool = Tool::Select,
+            KeyCode::Digit1 => self.editor.select_tool(Tool::Place),
+            KeyCode::Digit2 => self.editor.select_tool(Tool::Remove),
+            KeyCode::Digit3 => self.editor.select_tool(Tool::Paint),
+            KeyCode::Digit4 => self.editor.select_tool(Tool::Eyedropper),
+            KeyCode::Digit5 => self.editor.select_tool(Tool::Fill),
+            KeyCode::Digit6 => self.editor.select_tool(Tool::Line),
+            KeyCode::Digit7 => self.editor.select_tool(Tool::Box),
+            KeyCode::Digit8 => self.editor.select_tool(Tool::Sphere),
+            KeyCode::Digit9 => self.editor.select_tool(Tool::Cylinder),
+            KeyCode::Digit0 => self.editor.select_tool(Tool::Select),
             KeyCode::KeyZ if self.modifiers.control_key() => {
                 if self.modifiers.shift_key() {
                     self.editor.redo(&mut self.world);
@@ -914,11 +950,15 @@ impl App {
                     self.save_project();
                 }
             }
+            // Both go through the unsaved-changes guard, same as the
+            // File menu — the guard lives on `App` precisely because
+            // these two reach the file ops without passing the UiAction
+            // queue.
             KeyCode::KeyO if self.modifiers.control_key() => {
-                self.open_project();
+                self.guard_then(PendingAction::OpenPicker);
             }
             KeyCode::KeyN if self.modifiers.control_key() => {
-                self.new_project();
+                self.guard_then(PendingAction::NewProject);
             }
             // Esc deselects (Photoshop / image-editor convention).
             // Ctrl+D matches the same convention for users coming

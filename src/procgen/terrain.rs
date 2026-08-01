@@ -116,8 +116,24 @@ impl VoxelGenerator for PerlinTerrain {
                 let mut amp = 1.0_f64;
                 let mut freq = self.frequency;
 
-                for _ in 0..octaves {
-                    let n = perlin.get([x as f64 * freq, z as f64 * freq]);
+                for octave in 0..octaves {
+                    // Offset each octave so it doesn't sample the same
+                    // lattice as the others. Perlin noise is exactly 0
+                    // at every integer lattice point, and terrain is
+                    // sampled at integer (x, z) — so at frequency 0.5
+                    // (the panel's own maximum) every octave past the
+                    // first landed on whole numbers and contributed
+                    // nothing, while still counting toward `total_amp`.
+                    // The result was a single octave, flattened by the
+                    // normalization. The offsets are irrational-ish
+                    // constants scaled by the octave index, so they can
+                    // never all be integers at once, and are fixed
+                    // rather than seed-derived to keep a given seed's
+                    // output stable.
+                    let ox = octave as f64 * 0.7548776662;
+                    let oz = octave as f64 * 0.5698402909;
+                    let n = perlin
+                        .get([x as f64 * freq + ox, z as f64 * freq + oz]);
                     acc += n * amp;
                     total_amp += amp;
                     amp *= 0.5;
@@ -153,6 +169,39 @@ impl VoxelGenerator for PerlinTerrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_octave_contributes_at_the_slider_maximum() {
+        // Perlin noise is exactly 0 on integer lattice points, and
+        // terrain samples integer (x, z). At frequency 0.5 — the
+        // panel's own maximum — every octave past the first landed on
+        // whole numbers and contributed nothing while still counting
+        // toward the amplitude normalization, collapsing FBM to one
+        // flattened octave. Two terrains that differ only in octave
+        // count must differ in output.
+        let one = PerlinTerrain {
+            width: 16,
+            depth: 16,
+            frequency: 0.5,
+            octaves: 1,
+            ..Default::default()
+        }
+        .generate()
+        .expect("generates");
+        let four = PerlinTerrain {
+            width: 16,
+            depth: 16,
+            frequency: 0.5,
+            octaves: 4,
+            ..Default::default()
+        }
+        .generate()
+        .expect("generates");
+        assert_ne!(
+            one.voxels, four.voxels,
+            "extra octaves at frequency 0.5 changed nothing"
+        );
+    }
 
     #[test]
     fn test_default_generates_nonempty() {

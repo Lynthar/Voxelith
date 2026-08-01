@@ -577,6 +577,22 @@ impl VoxelGenerator for WfcGenerator {
                 "tileset must have 1..=64 tiles".into(),
             ));
         }
+        // Propagation packs the connectors a cell can expose into a
+        // `u32` bitset (`1u32 << connector`), so an id past 31 would
+        // shift out of range — a debug-build panic, or silently wrong
+        // adjacency in release. The built-in tilesets use 0..=3, but
+        // that's a fact about today's data, not something the code
+        // enforced anywhere.
+        if let Some(tile) = tileset
+            .tiles
+            .iter()
+            .find(|t| t.connectors.iter().any(|c| *c >= 32))
+        {
+            return Err(GenError::InvalidParams(format!(
+                "tile '{}' uses a connector id >= 32",
+                tile.name
+            )));
+        }
 
         let w = self.width as usize;
         let d = self.depth as usize;
@@ -708,6 +724,12 @@ impl VoxelGenerator for WfcGenerator {
 
 /// Pick the uncollapsed cell with the smallest non-empty domain. Ties
 /// broken randomly so the output isn't biased toward a corner.
+///
+/// Scans the whole grid on every call, so a full generate is O(cells²).
+/// At the panel's 24×24 ceiling that's ~330k trivial iterations —
+/// under a millisecond, and the collapse itself dominates. Raising the
+/// grid limit means replacing this with a priority queue keyed on
+/// domain size.
 fn lowest_entropy(cells: &[Cell], rng: &mut StdRng) -> Option<usize> {
     let mut best_count = u32::MAX;
     let mut best: Vec<usize> = Vec::new();
@@ -858,6 +880,26 @@ fn propagate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_tilesets_stay_within_the_connector_bitset() {
+        // Propagation packs exposed connectors into a u32, so an id
+        // past 31 would shift out of range. Pinned here so a future
+        // tileset can't quietly break adjacency.
+        for choice in [WfcTileset::Dungeon, WfcTileset::City] {
+            for tile in &choice.build().tiles {
+                for c in tile.connectors {
+                    assert!(
+                        c < 32,
+                        "{} tile '{}' uses connector {}",
+                        choice.label(),
+                        tile.name,
+                        c
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_dungeon_tileset_loads() {
