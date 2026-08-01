@@ -38,7 +38,24 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
-            let (w, h) = self.initial_window_size();
+            let saved = self.initial_window_size();
+            // The prefs entry can outlive the display it was sized on
+            // (docked 4K → laptop panel), so check it against the
+            // monitor before asking for it. `primary_monitor` is the
+            // best guess available: the window doesn't exist yet, so
+            // there's nothing to ask which display it landed on. None
+            // (Wayland, headless) simply skips the check.
+            let (w, h) = match event_loop.primary_monitor() {
+                Some(monitor) => {
+                    let logical: winit::dpi::LogicalSize<u32> =
+                        monitor.size().to_logical(monitor.scale_factor());
+                    super::fit_window_to_monitor(
+                        saved,
+                        (logical.width, logical.height),
+                    )
+                }
+                None => saved,
+            };
             let window_attrs = Window::default_attributes()
                 .with_title("Voxelith")
                 .with_inner_size(winit::dpi::LogicalSize::new(w, h));

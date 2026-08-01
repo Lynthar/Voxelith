@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::editor::{Axis, Quarter};
+use crate::prefs::PanelVisibility;
 
 use super::CameraView;
 
@@ -62,8 +63,11 @@ pub enum UiAction {
     /// the world.
     SelectAllSolid,
     /// Clear the active selection (Esc / Ctrl+D / Edit menu →
-    /// Deselect). Mirror of `editor.selection = None` for menu-
-    /// bar contexts that don't get `&mut Editor`.
+    /// Deselect / Tools panel button). Every entry point must route
+    /// here, including ones holding `&mut Editor`: the selection also
+    /// owns drag/move anchors and the translucent move ghost, which
+    /// live on `App`. Writing `editor.selection = None` directly
+    /// clears the marquee and strands the rest — see `App::deselect`.
     Deselect,
     /// Rotate the selection's voxel contents around `axis` by
     /// `quarter` (90° / -90° / 180°). Anchor is `selection.min`;
@@ -196,23 +200,20 @@ pub struct ConfirmPrompt {
 
 /// UI state.
 ///
-/// The `show_*` toggles start false here; the startup values that
-/// actually reach the user come from `prefs::PanelVisibility`, applied
-/// by `App::new` right after construction. (There used to be a hand-
-/// written `new()` carrying a second, contradicting set of defaults —
-/// it had no callers.)
+/// Workspace panel toggles live in `panels`, the same struct prefs
+/// persists — `App::new` assigns it wholesale from the loaded prefs
+/// and `App::save_prefs` assigns it back, so neither end can drift
+/// out of sync with the other. (There used to be a hand-written
+/// `new()` carrying a second, contradicting set of defaults — it had
+/// no callers.)
 #[derive(Default)]
 pub struct UiState {
-    // Panel visibility (toggles, not one-shot actions)
-    pub show_stats: bool,
-    pub show_tools: bool,
-    pub show_palette: bool,
-    pub show_viewport_settings: bool,
-    pub show_procgen: bool,
-    pub show_graph: bool,
+    /// Open/closed state of the workspace panels. Persisted verbatim.
+    pub panels: PanelVisibility,
+
+    // Transient windows — not part of the saved layout.
     pub show_help: bool,
     pub show_about: bool,
-    pub show_ai: bool,
 
     /// Crash-recovery prompt: an in-app egui dialog (NOT a native rfd
     /// modal — `rfd::MessageDialog` exits the process on this winit+wgpu

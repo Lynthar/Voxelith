@@ -203,37 +203,37 @@ impl Ui {
         self.show_toolbar(ctx, editor);
 
         // Stats panel
-        if self.state.show_stats {
+        if self.state.panels.show_stats {
             self.show_stats_panel(ctx, stats, editor);
         }
 
         // Tools panel
-        if self.state.show_tools {
+        if self.state.panels.show_tools {
             self.show_tools_panel(ctx, editor);
         }
 
         // Color palette panel
-        if self.state.show_palette {
+        if self.state.panels.show_palette {
             self.show_palette_panel(ctx, editor);
         }
 
         // Viewport settings panel
-        if self.state.show_viewport_settings {
+        if self.state.panels.show_viewport_settings {
             self.show_viewport_panel(ctx);
         }
 
         // Procedural generation panel
-        if self.state.show_procgen {
+        if self.state.panels.show_procgen {
             self.show_procgen_panel(ctx);
         }
 
         // Pipeline graph panel
-        if self.state.show_graph {
+        if self.state.panels.show_graph {
             self.show_graph_panel(ctx);
         }
 
         // AI generation panel
-        if self.state.show_ai {
+        if self.state.panels.show_ai {
             self.show_ai_panel(ctx);
         }
 
@@ -811,13 +811,13 @@ impl Ui {
 
                 let wireframe_supported = self.wireframe_supported;
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.state.show_stats, "Statistics");
-                    ui.checkbox(&mut self.state.show_tools, "Tools Panel");
-                    ui.checkbox(&mut self.state.show_palette, "Color Palette");
-                    ui.checkbox(&mut self.state.show_viewport_settings, "Viewport Settings");
-                    ui.checkbox(&mut self.state.show_procgen, "Procedural Generation");
-                    ui.checkbox(&mut self.state.show_graph, "Pipeline Graph");
-                    ui.checkbox(&mut self.state.show_ai, "AI Generation");
+                    ui.checkbox(&mut self.state.panels.show_stats, "Statistics");
+                    ui.checkbox(&mut self.state.panels.show_tools, "Tools Panel");
+                    ui.checkbox(&mut self.state.panels.show_palette, "Color Palette");
+                    ui.checkbox(&mut self.state.panels.show_viewport_settings, "Viewport Settings");
+                    ui.checkbox(&mut self.state.panels.show_procgen, "Procedural Generation");
+                    ui.checkbox(&mut self.state.panels.show_graph, "Pipeline Graph");
+                    ui.checkbox(&mut self.state.panels.show_ai, "AI Generation");
                     ui.separator();
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
@@ -853,7 +853,7 @@ impl Ui {
                     }
                     ui.separator();
                     if ui.button("Procedural Terrain...").clicked() {
-                        self.state.show_procgen = true;
+                        self.state.panels.show_procgen = true;
                         ui.close_menu();
                     }
                 });
@@ -980,11 +980,17 @@ impl Ui {
             });
     }
 
-    fn show_stats_panel(&self, ctx: &Context, stats: &RenderStats, editor: &Editor) {
+    fn show_stats_panel(
+        &mut self,
+        ctx: &Context,
+        stats: &RenderStats,
+        editor: &Editor,
+    ) {
         egui::Window::new("Statistics")
             .default_pos([60.0, 40.0])
             .resizable(false)
             .collapsible(true)
+            .open(&mut self.state.panels.show_stats)
             .show(ctx, |ui| {
                 egui::Grid::new("stats_grid")
                     .num_columns(2)
@@ -1021,10 +1027,21 @@ impl Ui {
     }
 
     fn show_tools_panel(&mut self, ctx: &Context, editor: &mut Editor) {
+        // The close button's flag rides a local: `.open()` would borrow
+        // `self.state.panels` for the whole window, while the closure
+        // needs `self.state` for `request(...)`. Written back once both
+        // borrows are released. Same shape in `show_viewport_panel`.
+        let mut open = self.state.panels.show_tools;
         egui::Window::new("Tools")
             .default_pos([60.0, 200.0])
             .resizable(true)
             .collapsible(true)
+            // This panel's content runs ~750px — taller than the whole
+            // 1280x720 default window. Without its own scrollbar egui
+            // clamps the window to the screen and everything below
+            // Symmetry is simply unreachable.
+            .vscroll(true)
+            .open(&mut open)
             .show(ctx, |ui| {
                 // Tool selection — split into Brush (cell-by-cell) and
                 // Shape (click-anchor / drag / release) groups so the
@@ -1169,7 +1186,12 @@ impl Ui {
                         .on_hover_text("Esc / Ctrl+D — clear the active selection")
                         .clicked()
                     {
-                        editor.selection = None;
+                        // Goes through the action even though this panel
+                        // holds `&mut Editor`: clearing a selection is
+                        // more than `editor.selection = None` (drag/move
+                        // anchors and the move ghost live on App). See
+                        // `App::deselect`.
+                        self.state.request(UiAction::Deselect);
                     }
                 });
 
@@ -1349,6 +1371,7 @@ impl Ui {
                     ui.label(format!("Face: ({}, {}, {})", hit.normal.0, hit.normal.1, hit.normal.2));
                 }
             });
+        self.state.panels.show_tools = open;
     }
 
     fn show_palette_panel(&mut self, ctx: &Context, editor: &mut Editor) {
@@ -1356,12 +1379,22 @@ impl Ui {
         // closure holds the borrow that `set_status` needs.
         let mut palette_feedback: Option<String> = None;
         egui::Window::new("Palette")
-            .default_pos([60.0, 450.0])
+            // Right column: the left one is Statistics + Tools, and
+            // Tools alone is taller than the default window, so a
+            // left-column Palette started life buried under it.
+            // (Float positions aren't persisted, so this constant is
+            // what every session actually gets.)
+            .default_pos([ctx.screen_rect().width() - 240.0, 40.0])
             .resizable(true)
             .collapsible(true)
+            .open(&mut self.state.panels.show_palette)
             .show(ctx, |ui| {
                 let palette = &editor.palette;
                 let cols = 5;
+                // Collected, then applied below: `set_palette_color`
+                // takes `&mut Editor`, which can't coexist with the
+                // `&editor.palette` this loop is iterating.
+                let mut picked: Option<usize> = None;
 
                 egui::Grid::new("palette_grid")
                     .spacing([4.0, 4.0])
@@ -1379,12 +1412,7 @@ impl Ui {
                             );
 
                             if response.clicked() {
-                                // Keep the brush's material flags; only the
-                                // color changes (see `set_palette_color`).
-                                editor.brush_color.r = voxel.r;
-                                editor.brush_color.g = voxel.g;
-                                editor.brush_color.b = voxel.b;
-                                editor.brush_color.a = voxel.a;
+                                picked = Some(i);
                             }
 
                             ui.painter().rect_filled(rect, 2.0, color);
@@ -1397,6 +1425,9 @@ impl Ui {
                             }
                         }
                     });
+                if let Some(i) = picked {
+                    editor.set_palette_color(i);
+                }
 
                 ui.separator();
 
@@ -1442,10 +1473,14 @@ impl Ui {
 
     fn show_viewport_panel(&mut self, ctx: &Context) {
         let wireframe_supported = self.wireframe_supported;
+        // Local close flag — see `show_tools_panel` for why.
+        let mut open = self.state.panels.show_viewport_settings;
         egui::Window::new("Viewport Settings")
-            .default_pos([ctx.screen_rect().width() - 220.0, 40.0])
+            // Below Palette, which now owns the top of the right column.
+            .default_pos([ctx.screen_rect().width() - 240.0, 420.0])
             .resizable(false)
             .collapsible(true)
+            .open(&mut open)
             .show(ctx, |ui| {
                 ui.heading("Display");
                 ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
@@ -1516,10 +1551,11 @@ impl Ui {
                     }
                 });
             });
+        self.state.panels.show_viewport_settings = open;
     }
 
     fn show_procgen_panel(&mut self, ctx: &Context) {
-        // Deferred-action pattern: `.open(...)` borrows self.state.show_procgen
+        // Deferred-action pattern: `.open(...)` borrows self.state.panels.show_procgen
         // and the closure borrows self.procgen, so we can't dispatch a UiAction
         // (which mutates self.state) until both are released.
         let mut generate = false;
@@ -1530,7 +1566,7 @@ impl Ui {
             .default_width(240.0)
             .resizable(true)
             .collapsible(true)
-            .open(&mut self.state.show_procgen)
+            .open(&mut self.state.panels.show_procgen)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Generator");
@@ -1614,7 +1650,7 @@ impl Ui {
             .min_size([520.0, 340.0])
             .resizable(true)
             .collapsible(true)
-            .open(&mut self.state.show_graph)
+            .open(&mut self.state.panels.show_graph)
             .show(ctx, |ui| {
                 // ===== Top toolbar =====
                 ui.horizontal(|ui| {
@@ -1678,7 +1714,6 @@ impl Ui {
                                 drag_wire,
                                 &mut delete_id,
                                 &mut wire_action,
-                                &mut wire_error,
                             );
                         },
                     );
@@ -1724,16 +1759,16 @@ impl Ui {
 
     fn show_ai_panel(&mut self, ctx: &Context) {
         // Deferred-action pattern (same as `show_procgen_panel`):
-        // `.open(...)` borrows `self.state.show_ai` and the closure
+        // `.open(...)` borrows `self.state.panels.show_ai` and the closure
         // borrows several other `self.*` fields, so we can't request
         // a `UiAction` (which mutates `self.state`) inside the closure.
         // Instead, collect intents into local flags and dispatch after
         // the closure releases the borrow.
         //
-        // Phase 1 uses `MockProvider` (3 s fake run); Phase 2 swaps in
-        // the real fal.ai client. Layout stays the same — the panel
-        // only reads `self.ai_*` fields and emits provider-agnostic
-        // `UiAction::Ai*`.
+        // The panel is provider-agnostic by construction: it only
+        // reads the mirrored `self.ai_*` fields and emits
+        // `UiAction::Ai*`, so which provider App holds (today
+        // `FalHunyuanProvider`) never shows up here.
         // Truncate a long prompt for the History menu label; the full
         // text is restored on click and shown on hover.
         fn truncate_prompt(s: &str, max: usize) -> String {
@@ -1762,7 +1797,7 @@ impl Ui {
         egui::Window::new("AI Generation")
             .default_pos([ctx.screen_rect().width() / 2.0 - 200.0, 100.0])
             .default_width(400.0)
-            .open(&mut self.state.show_ai)
+            .open(&mut self.state.panels.show_ai)
             .show(ctx, |ui| {
                 let job_idle = job.is_idle();
                 let job_running = job.is_running();
@@ -2670,7 +2705,6 @@ fn graph_canvas(
     drag_wire: &mut Option<NodeId>,
     delete_id: &mut Option<NodeId>,
     wire_action: &mut Option<(NodeId, usize, Option<NodeId>)>,
-    wire_error: &mut Option<String>,
 ) {
     let avail = ui.available_size();
     let (canvas_rect, _bg) =
@@ -2749,6 +2783,16 @@ fn graph_canvas(
     }
 
     // Apply body drags + clicks (mutates graph.position / selected).
+    // A dragged node is kept inside the canvas: `ui.interact` isn't
+    // clipped, so one dragged past the edge stays clickable but is
+    // never drawn — invisible is lost, as far as the user is concerned.
+    // Only drags clamp; re-flowing already-placed nodes on every resize
+    // would squash a saved layout the moment the panel got narrow, and
+    // widening it back wouldn't restore the positions.
+    let drag_limit = egui::vec2(
+        (canvas_rect.width() - NODE_W).max(0.0),
+        (canvas_rect.height() - NODE_H).max(0.0),
+    );
     for (id, frame) in &frames {
         if frame.body_resp.clicked() {
             *selected = Some(*id);
@@ -2756,17 +2800,19 @@ fn graph_canvas(
         if frame.body_resp.dragged() {
             *selected = Some(*id);
             if let Some(node) = graph.get_mut(*id) {
-                node.position[0] += frame.delta.x;
-                node.position[1] += frame.delta.y;
+                node.position[0] =
+                    (node.position[0] + frame.delta.x).clamp(0.0, drag_limit.x);
+                node.position[1] =
+                    (node.position[1] + frame.delta.y).clamp(0.0, drag_limit.y);
             }
         }
     }
 
-    // Re-borrow `&graph.nodes` for visual + socket drawing. We use
-    // the cached frames for body rects so mid-drag positions update
-    // smoothly.
-    let nodes_snapshot: Vec<crate::procgen::GraphNode> = graph.nodes.clone();
-    for node in &nodes_snapshot {
+    // Visual + socket pass. Reads `&graph.nodes` directly — the drag
+    // loop above is done with its `get_mut`, and the positions it wrote
+    // are already visible here, so mid-drag frames stay smooth without
+    // copying every node's parameters once per frame.
+    for node in &graph.nodes {
         let body = node_screen_rect(canvas_rect.min, node);
         let is_selected = *selected == Some(node.id);
 
@@ -2879,7 +2925,7 @@ fn graph_canvas(
                 let p = ui.ctx().input(|i| i.pointer.interact_pos());
                 let mut hit: Option<(NodeId, usize)> = None;
                 if let Some(p) = p {
-                    'outer: for target in &nodes_snapshot {
+                    'outer: for target in &graph.nodes {
                         if target.id == node.id {
                             continue;
                         }
@@ -2898,10 +2944,8 @@ fn graph_canvas(
                 }
                 if let Some((target_id, slot)) = hit {
                     *wire_action = Some((target_id, slot, Some(node.id)));
-                } else {
-                    // Released into empty space → no-op (intentional cancel).
-                    let _ = wire_error;
                 }
+                // Released into empty space → no-op (intentional cancel).
                 *drag_wire = None;
             }
         }

@@ -40,7 +40,7 @@ use voxelith::{
         EditorTool, RaycastHit, Selection, SymmetryAxes, Tool,
     },
     mesh::{patch_to_mesh, GreedyMesher, Mesher},
-    prefs::{EditorPrefs, PanelVisibility, Prefs, WindowPrefs},
+    prefs::{EditorPrefs, Prefs, WindowPrefs},
     render::Renderer,
     ui::{RenderStats, Ui},
 };
@@ -350,12 +350,7 @@ impl App {
         }
 
         let mut ui = Ui::new();
-        ui.state.show_stats = prefs.panels.show_stats;
-        ui.state.show_tools = prefs.panels.show_tools;
-        ui.state.show_palette = prefs.panels.show_palette;
-        ui.state.show_viewport_settings = prefs.panels.show_viewport_settings;
-        ui.state.show_procgen = prefs.panels.show_procgen;
-        ui.state.show_graph = prefs.panels.show_graph;
+        ui.state.panels = prefs.panels.clone();
         ui.viewport = prefs.viewport.clone();
         ui.procgen = prefs.procgen.clone();
         ui.graph = prefs.graph.clone();
@@ -460,14 +455,7 @@ impl App {
     /// Snapshot live UI/editor/window state into `self.prefs`, then
     /// write the file. Called on app exit.
     pub(super) fn save_prefs(&mut self) {
-        self.prefs.panels = PanelVisibility {
-            show_stats: self.ui.state.show_stats,
-            show_tools: self.ui.state.show_tools,
-            show_palette: self.ui.state.show_palette,
-            show_viewport_settings: self.ui.state.show_viewport_settings,
-            show_procgen: self.ui.state.show_procgen,
-            show_graph: self.ui.state.show_graph,
-        };
+        self.prefs.panels = self.ui.state.panels.clone();
         self.prefs.viewport = self.ui.viewport.clone();
         self.prefs.procgen = self.ui.procgen.clone();
         self.prefs.graph = self.ui.graph.clone();
@@ -1326,5 +1314,72 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Shrink a restored window size that the monitor can't display.
+///
+/// Both sizes are logical pixels. A size saved on a bigger display
+/// restores verbatim on a smaller one — unplug the 4K dock and the
+/// 3840x2160 entry produces a window whose bottom edge, and with it
+/// the status bar, hangs off screen; the title bar is the only part
+/// you can grab, so it can't be dragged back into view either.
+///
+/// Sizes that already fit are returned untouched: the saved value is
+/// the *inner* size, so a window filling its monitor is normal, and
+/// trimming it every launch would shrink it a step at a time. Once
+/// something doesn't fit, both axes get the 10% margin — winit sizes
+/// the inner area only, decorations live outside it, and there's no
+/// cross-platform work-area query to subtract a taskbar with. A
+/// monitor reporting a zero dimension tells us nothing, so in that
+/// case the saved size stands.
+fn fit_window_to_monitor(
+    (w, h): (u32, u32),
+    (mon_w, mon_h): (u32, u32),
+) -> (u32, u32) {
+    if mon_w == 0 || mon_h == 0 || (w <= mon_w && h <= mon_h) {
+        return (w, h);
+    }
+    let fit = |v: u32, max: u32| v.min((max as f64 * 0.9) as u32).max(1);
+    (fit(w, mon_w), fit(h, mon_h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_window_to_monitor;
+
+    #[test]
+    fn a_size_that_fits_is_left_alone() {
+        // Including the exact-fit case: a maximized window saves its
+        // full inner size, and it must survive round-trips unchanged.
+        assert_eq!(fit_window_to_monitor((1280, 720), (1920, 1080)), (1280, 720));
+        assert_eq!(fit_window_to_monitor((1920, 1080), (1920, 1080)), (1920, 1080));
+    }
+
+    #[test]
+    fn a_size_from_a_bigger_display_is_brought_back_on_screen() {
+        let (w, h) = fit_window_to_monitor((3840, 2160), (1920, 1080));
+        assert!(w < 1920 && h < 1080, "got {w}x{h}");
+        assert_eq!((w, h), (1728, 972));
+    }
+
+    #[test]
+    fn overflow_on_one_axis_margins_both() {
+        // The window has to move fully back inside the monitor, not
+        // just clip the offending axis.
+        assert_eq!(fit_window_to_monitor((1920, 2160), (1920, 1080)), (1728, 972));
+    }
+
+    #[test]
+    fn an_unusable_monitor_size_changes_nothing() {
+        assert_eq!(fit_window_to_monitor((1280, 720), (0, 0)), (1280, 720));
+    }
+
+    #[test]
+    fn the_result_is_stable_under_repeated_launches() {
+        // Save → restore → save must converge, or the window shrinks
+        // a little on every start.
+        let once = fit_window_to_monitor((3840, 2160), (1920, 1080));
+        assert_eq!(fit_window_to_monitor(once, (1920, 1080)), once);
     }
 }

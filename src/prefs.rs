@@ -91,9 +91,16 @@ impl Default for WindowPrefs {
     }
 }
 
-/// Mirrors the `show_*` toggles on `ui::UiState`. Lives here so we
-/// don't have to teach the action-queue/status-message bits of
-/// `UiState` to serialize.
+/// Which workspace panels are open. `ui::UiState` holds one of these
+/// directly (rather than its own parallel set of booleans), so loading
+/// and saving are whole-struct assignments and a newly added panel
+/// can't be persisted at one end only — `show_ai` used to be exactly
+/// that: a toggle the save path never saw. Transient windows (help,
+/// about, crash-recovery prompt) deliberately stay off this struct;
+/// they aren't part of a saved layout.
+///
+/// Lives here rather than in `ui` so the action-queue / status-message
+/// parts of `UiState` never have to learn to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PanelVisibility {
@@ -103,6 +110,7 @@ pub struct PanelVisibility {
     pub show_viewport_settings: bool,
     pub show_procgen: bool,
     pub show_graph: bool,
+    pub show_ai: bool,
 }
 
 impl Default for PanelVisibility {
@@ -114,6 +122,7 @@ impl Default for PanelVisibility {
             show_viewport_settings: false,
             show_procgen: false,
             show_graph: false,
+            show_ai: false,
         }
     }
 }
