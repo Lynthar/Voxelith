@@ -296,23 +296,6 @@ impl VoxelRaycast {
         fallback
     }
 
-    /// Check if a voxel position is visible from camera
-    pub fn is_visible(pos: (i32, i32, i32), camera_pos: Vec3, world: &World) -> bool {
-        let voxel_center = Vec3::new(
-            pos.0 as f32 + 0.5,
-            pos.1 as f32 + 0.5,
-            pos.2 as f32 + 0.5,
-        );
-
-        let ray = Ray::new(camera_pos, voxel_center - camera_pos);
-        let distance = (voxel_center - camera_pos).length();
-
-        if let Some(hit) = Self::cast(&ray, world, distance + 1.0) {
-            hit.voxel_pos == pos
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(test)]

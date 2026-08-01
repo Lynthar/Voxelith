@@ -85,24 +85,6 @@ pub struct LocalPos {
 }
 
 impl LocalPos {
-    #[inline]
-    pub fn new(x: u8, y: u8, z: u8) -> Self {
-        debug_assert!((x as usize) < CHUNK_SIZE);
-        debug_assert!((y as usize) < CHUNK_SIZE);
-        debug_assert!((z as usize) < CHUNK_SIZE);
-        Self { x, y, z }
-    }
-
-    /// Convert world position to local position within a chunk
-    #[inline]
-    pub fn from_world_pos(x: i32, y: i32, z: i32) -> Self {
-        Self {
-            x: x.rem_euclid(CHUNK_SIZE_I32) as u8,
-            y: y.rem_euclid(CHUNK_SIZE_I32) as u8,
-            z: z.rem_euclid(CHUNK_SIZE_I32) as u8,
-        }
-    }
-
     /// Convert to linear index for array access
     #[inline]
     pub fn to_index(self) -> usize {
@@ -153,20 +135,6 @@ impl Chunk {
         }
     }
 
-    /// Create a chunk filled with a single voxel type
-    pub fn filled(voxel: Voxel) -> Self {
-        let solid_count = if voxel.is_solid() {
-            CHUNK_VOLUME as u32
-        } else {
-            0
-        };
-        Self {
-            voxels: vec![voxel; CHUNK_VOLUME],
-            solid_count,
-            dirty: true,
-        }
-    }
-
     /// Check if chunk is completely empty (all air)
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -210,22 +178,6 @@ impl Chunk {
         self.voxels[x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE]
     }
 
-    /// Get voxel at local position (safe version with bounds check)
-    #[inline]
-    pub fn get_safe(&self, x: i32, y: i32, z: i32) -> Option<Voxel> {
-        if x >= 0
-            && x < CHUNK_SIZE_I32
-            && y >= 0
-            && y < CHUNK_SIZE_I32
-            && z >= 0
-            && z < CHUNK_SIZE_I32
-        {
-            Some(self.get(x as usize, y as usize, z as usize))
-        } else {
-            None
-        }
-    }
-
     /// Set voxel at local position
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, voxel: Voxel) {
@@ -262,21 +214,6 @@ impl Chunk {
         self.iter_voxels().filter(|(_, v)| v.is_solid())
     }
 
-    /// Fill a region with a voxel
-    pub fn fill_region(
-        &mut self,
-        min: (usize, usize, usize),
-        max: (usize, usize, usize),
-        voxel: Voxel,
-    ) {
-        for z in min.2..=max.2.min(CHUNK_SIZE - 1) {
-            for y in min.1..=max.1.min(CHUNK_SIZE - 1) {
-                for x in min.0..=max.0.min(CHUNK_SIZE - 1) {
-                    self.set(x, y, z, voxel);
-                }
-            }
-        }
-    }
 }
 
 impl Index<LocalPos> for Chunk {

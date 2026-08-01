@@ -250,11 +250,6 @@ impl Renderer {
         self.chunk_meshes.insert(mesh.chunk_pos, gpu_mesh);
     }
 
-    /// Remove a chunk mesh
-    pub fn remove_mesh(&mut self, chunk_pos: ChunkPos) {
-        self.chunk_meshes.remove(&chunk_pos);
-    }
-
     /// Replace the procgen preview overlay. Empty mesh -> clear.
     pub fn set_preview_mesh(&mut self, mesh: &ChunkMesh) {
         if mesh.is_empty() {
@@ -395,64 +390,14 @@ impl Renderer {
         render_pass.draw(0..self.axis_mesh.vertex_count, 0..1);
     }
 
-    /// Render a frame
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Update camera uniform
-        self.pipeline.update_camera(&self.queue, &self.camera);
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Main Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.15,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            render_pass.set_pipeline(&self.pipeline.render_pipeline);
-            render_pass.set_bind_group(0, &self.pipeline.camera_bind_group, &[]);
-
-            // Render all chunk meshes
-            for mesh in self.chunk_meshes.values() {
-                mesh.draw(&mut render_pass);
-            }
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        Ok(())
-    }
+    // NOTE: there is deliberately no `Renderer::render()`. The frame is
+    // assembled by `App::render` (`app/render.rs`), which owns the pass
+    // order the editor actually needs: opaque chunks, then the
+    // translucent generator preview, sockets, selection wireframe, grid
+    // and axes, and finally egui. A convenience method here could only
+    // ever draw the chunk subset — and, presenting the surface itself,
+    // would swap out a half-drawn frame for whoever reached for the
+    // obvious-sounding name.
 
     /// Get total triangle count
     pub fn total_triangles(&self) -> usize {

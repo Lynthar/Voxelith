@@ -868,33 +868,11 @@ impl App {
     }
 
     /// Set the selection to the AABB of every non-air voxel in the
-    /// world. Walks loaded chunks, skipping empty ones via
-    /// `Chunk::is_empty`. Surfaces "world is empty" if there's
-    /// nothing to select.
+    /// world (`World::scene_aabb`, the same bounds Frame All and the
+    /// exporters use). Surfaces "world is empty" if there's nothing
+    /// to select.
     pub(super) fn select_all_solid(&mut self) {
-        let mut bounds: Option<((i32, i32, i32), (i32, i32, i32))> = None;
-        for (chunk_pos, chunk) in self.world.chunks() {
-            let chunk = chunk.read();
-            if chunk.is_empty() {
-                continue;
-            }
-            let (ox, oy, oz) = chunk_pos.world_origin();
-            for (lp, _) in chunk.iter_solid() {
-                let p = (
-                    ox + lp.x as i32,
-                    oy + lp.y as i32,
-                    oz + lp.z as i32,
-                );
-                bounds = Some(match bounds {
-                    Some((mn, mx)) => (
-                        (mn.0.min(p.0), mn.1.min(p.1), mn.2.min(p.2)),
-                        (mx.0.max(p.0), mx.1.max(p.1), mx.2.max(p.2)),
-                    ),
-                    None => (p, p),
-                });
-            }
-        }
-        match bounds {
+        match self.world.scene_aabb() {
             Some((min, max)) => {
                 self.editor.selection = Some(Selection { min, max });
                 let (w, h, d) = (max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1);

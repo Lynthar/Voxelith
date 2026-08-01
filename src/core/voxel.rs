@@ -3,26 +3,6 @@
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
-/// Material identifier for a voxel.
-/// 0 = Air (empty), 1+ = solid materials
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[repr(transparent)]
-pub struct Material(pub u16);
-
-impl Material {
-    pub const AIR: Self = Self(0);
-
-    #[inline]
-    pub fn is_air(self) -> bool {
-        self.0 == 0
-    }
-
-    #[inline]
-    pub fn is_solid(self) -> bool {
-        self.0 != 0
-    }
-}
-
 /// A single voxel with material and color information.
 ///
 /// Memory layout is optimized for cache efficiency (8 bytes total).

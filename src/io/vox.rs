@@ -56,8 +56,6 @@ pub enum VoxError {
     ModelTooLarge,
     #[error("No voxel data found")]
     NoVoxelData,
-    #[error("Invalid palette index: {0}")]
-    InvalidPaletteIndex(u8),
     #[error("Chunk {0:?} declares an out-of-range size")]
     InvalidChunkSize([u8; 4]),
 }

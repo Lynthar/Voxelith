@@ -188,10 +188,7 @@ impl Project {
 
         for chunk_data in &self.chunks {
             if let Some(chunk) = rle_decode_chunk(&chunk_data.rle_data) {
-                // For unbounded worlds, get_or_create_chunk always returns Some
-                if let Some(chunk_lock) = world.get_or_create_chunk(chunk_data.pos) {
-                    *chunk_lock.write() = chunk;
-                }
+                *world.get_or_create_chunk(chunk_data.pos).write() = chunk;
             }
         }
 

@@ -881,8 +881,20 @@ impl Ui {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
 
-                    // Tool buttons
-                    let tool_button = |ui: &mut egui::Ui, tool: Tool, current: Tool, icon: &str, tooltip: &str| -> bool {
+                    // Tool buttons. The tooltip's name and shortcut come
+                    // from `Tool` itself — spelling them out per button
+                    // meant eleven copies of the key map drifting away
+                    // from the one the keyboard handler actually uses.
+                    // `note` adds per-button detail where there is any.
+                    let tool_button = |ui: &mut egui::Ui, tool: Tool, current: Tool, icon: &str, note: &str| -> bool {
+                        let mut tooltip = tool.name().to_string();
+                        if !tool.shortcut().is_empty() {
+                            tooltip.push_str(&format!(" ({})", tool.shortcut()));
+                        }
+                        if !note.is_empty() {
+                            tooltip.push('\n');
+                            tooltip.push_str(note);
+                        }
                         let selected = tool == current;
                         ui.add(
                             egui::Button::new(icon)
@@ -893,19 +905,19 @@ impl Ui {
                         .clicked()
                     };
 
-                    if tool_button(ui, Tool::Place, editor.current_tool, "+", "Place (1)") {
+                    if tool_button(ui, Tool::Place, editor.current_tool, "+", "") {
                         editor.select_tool(Tool::Place);
                     }
-                    if tool_button(ui, Tool::Remove, editor.current_tool, "-", "Remove (2)") {
+                    if tool_button(ui, Tool::Remove, editor.current_tool, "-", "") {
                         editor.select_tool(Tool::Remove);
                     }
-                    if tool_button(ui, Tool::Paint, editor.current_tool, "P", "Paint (3)") {
+                    if tool_button(ui, Tool::Paint, editor.current_tool, "P", "") {
                         editor.select_tool(Tool::Paint);
                     }
-                    if tool_button(ui, Tool::Eyedropper, editor.current_tool, "E", "Eyedropper (4)") {
+                    if tool_button(ui, Tool::Eyedropper, editor.current_tool, "E", "") {
                         editor.select_tool(Tool::Eyedropper);
                     }
-                    if tool_button(ui, Tool::Fill, editor.current_tool, "F", "Fill (5)") {
+                    if tool_button(ui, Tool::Fill, editor.current_tool, "F", "") {
                         editor.select_tool(Tool::Fill);
                     }
 
@@ -914,16 +926,16 @@ impl Ui {
                     ui.add_space(8.0);
 
                     // Shape tools — click-anchor / drag / release.
-                    if tool_button(ui, Tool::Line, editor.current_tool, "L", "Line (6)") {
+                    if tool_button(ui, Tool::Line, editor.current_tool, "L", "") {
                         editor.select_tool(Tool::Line);
                     }
-                    if tool_button(ui, Tool::Box, editor.current_tool, "▢", "Box (7)") {
+                    if tool_button(ui, Tool::Box, editor.current_tool, "▢", "") {
                         editor.select_tool(Tool::Box);
                     }
-                    if tool_button(ui, Tool::Sphere, editor.current_tool, "○", "Sphere (8)") {
+                    if tool_button(ui, Tool::Sphere, editor.current_tool, "○", "") {
                         editor.select_tool(Tool::Sphere);
                     }
-                    if tool_button(ui, Tool::Cylinder, editor.current_tool, "⌭", "Cylinder (9)") {
+                    if tool_button(ui, Tool::Cylinder, editor.current_tool, "⌭", "") {
                         editor.select_tool(Tool::Cylinder);
                     }
 
@@ -937,7 +949,7 @@ impl Ui {
                         Tool::Select,
                         editor.current_tool,
                         "▭",
-                        "Select (0)\nDrag to mark an AABB. Esc or Ctrl+D deselects.",
+                        "Drag to mark an AABB. Esc or Ctrl+D deselects.",
                     ) {
                         editor.select_tool(Tool::Select);
                     }
@@ -952,7 +964,7 @@ impl Ui {
                         Tool::Socket,
                         editor.current_tool,
                         "⚓",
-                        "Socket\nClick a voxel face (or the ground) to drop a named \
+                        "Click a voxel face (or the ground) to drop a named \
                          attachment point. Exports to glTF as an empty node.",
                     ) {
                         editor.select_tool(Tool::Socket);

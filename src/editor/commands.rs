@@ -16,25 +16,22 @@ use crate::core::{Voxel, World};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-/// A reversible edit command
+/// A reversible edit command.
+///
+/// One variant on purpose: every edit in the app — a single brush
+/// click, a drag-painted stroke, a filled region, a generator patch,
+/// a selection rotate — is a batch of per-voxel changes, and routing
+/// all of them through one shape is what lets `try_merge_with`
+/// collapse a stroke into a single undo entry. There used to be
+/// `SetVoxel` and `FillRegion` variants as well; both were unused,
+/// and either one would have quietly opted its caller out of stroke
+/// merging (`FillRegion` also recorded a whole AABB of old voxels
+/// where the changed cells alone would do).
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Set a single voxel
-    SetVoxel {
-        pos: (i32, i32, i32),
-        old_voxel: Voxel,
-        new_voxel: Voxel,
-    },
     /// Set multiple voxels (batch operation)
     SetVoxels {
         changes: Vec<VoxelChange>,
-    },
-    /// Fill a region
-    FillRegion {
-        min: (i32, i32, i32),
-        max: (i32, i32, i32),
-        old_voxels: Vec<((i32, i32, i32), Voxel)>,
-        new_voxel: Voxel,
     },
 }
 
@@ -47,120 +44,53 @@ pub struct VoxelChange {
 }
 
 impl Command {
-    /// Create a set voxel command
-    pub fn set_voxel(world: &World, pos: (i32, i32, i32), new_voxel: Voxel) -> Self {
-        let old_voxel = world.get_voxel(pos.0, pos.1, pos.2);
-        Command::SetVoxel {
-            pos,
-            old_voxel,
-            new_voxel,
-        }
-    }
-
     /// Create a batch voxel command
     pub fn set_voxels(changes: Vec<VoxelChange>) -> Self {
         Command::SetVoxels { changes }
     }
 
-    /// Create a fill region command
-    pub fn fill_region(world: &World, min: (i32, i32, i32), max: (i32, i32, i32), new_voxel: Voxel) -> Self {
-        let mut old_voxels = Vec::new();
-        for z in min.2..=max.2 {
-            for y in min.1..=max.1 {
-                for x in min.0..=max.0 {
-                    let old = world.get_voxel(x, y, z);
-                    old_voxels.push(((x, y, z), old));
-                }
-            }
-        }
-        Command::FillRegion {
-            min,
-            max,
-            old_voxels,
-            new_voxel,
-        }
-    }
-
     /// Execute the command (apply changes)
     pub fn execute(&self, world: &mut World) {
-        match self {
-            Command::SetVoxel { pos, new_voxel, .. } => {
-                world.set_voxel(pos.0, pos.1, pos.2, *new_voxel);
-            }
-            Command::SetVoxels { changes } => {
-                for change in changes {
-                    world.set_voxel(change.pos.0, change.pos.1, change.pos.2, change.new_voxel);
-                }
-            }
-            Command::FillRegion { min, max, new_voxel, .. } => {
-                world.fill_region(*min, *max, *new_voxel);
-            }
+        let Command::SetVoxels { changes } = self;
+        for change in changes {
+            world.set_voxel(change.pos.0, change.pos.1, change.pos.2, change.new_voxel);
         }
     }
 
     /// Reverse the command (undo changes)
     pub fn undo(&self, world: &mut World) {
-        match self {
-            Command::SetVoxel { pos, old_voxel, .. } => {
-                world.set_voxel(pos.0, pos.1, pos.2, *old_voxel);
-            }
-            Command::SetVoxels { changes } => {
-                // Reverse order: if two changes ever share a position (a
-                // generator patch that wrote a cell twice, or a symmetry
-                // brush stroke mirroring a cell onto itself), the EARLIEST
-                // record holds the true pre-command value and must be
-                // restored LAST to win. Forward replay would leave a later
-                // record's old_voxel. (Generator patches are now de-duped
-                // upstream, so same-position olds are equal anyway — this
-                // keeps undo exact for any caller regardless.)
-                for change in changes.iter().rev() {
-                    world.set_voxel(change.pos.0, change.pos.1, change.pos.2, change.old_voxel);
-                }
-            }
-            Command::FillRegion { old_voxels, .. } => {
-                for (pos, old_voxel) in old_voxels {
-                    world.set_voxel(pos.0, pos.1, pos.2, *old_voxel);
-                }
-            }
+        let Command::SetVoxels { changes } = self;
+        // Reverse order: if two changes ever share a position (a
+        // generator patch that wrote a cell twice, or a symmetry
+        // brush stroke mirroring a cell onto itself), the EARLIEST
+        // record holds the true pre-command value and must be
+        // restored LAST to win. Forward replay would leave a later
+        // record's old_voxel. (Generator patches are now de-duped
+        // upstream, so same-position olds are equal anyway — this
+        // keeps undo exact for any caller regardless.)
+        for change in changes.iter().rev() {
+            world.set_voxel(change.pos.0, change.pos.1, change.pos.2, change.old_voxel);
         }
     }
 
     /// Check if command would actually change anything
     pub fn is_noop(&self) -> bool {
-        match self {
-            Command::SetVoxel { old_voxel, new_voxel, .. } => old_voxel == new_voxel,
-            Command::SetVoxels { changes } => {
-                changes.is_empty() || changes.iter().all(|c| c.old_voxel == c.new_voxel)
-            }
-            Command::FillRegion { old_voxels, new_voxel, .. } => {
-                old_voxels.iter().all(|(_, old)| old == new_voxel)
-            }
-        }
+        let Command::SetVoxels { changes } = self;
+        changes.is_empty() || changes.iter().all(|c| c.old_voxel == c.new_voxel)
     }
 
-    /// Try to absorb `other` into `self` in place.
+    /// Absorb `other` into `self` in place.
     ///
-    /// Only `SetVoxels` + `SetVoxels` is mergeable. For each position,
-    /// the earliest `old_voxel` is preserved (so undo restores the
-    /// pre-stroke state) and the latest `new_voxel` is taken (so the
-    /// stroke ends in its final visible state). If the merge isn't
-    /// possible the original `other` is returned unchanged in `Err`.
-    pub fn try_merge_with(&mut self, other: Command) -> Result<(), Command> {
-        if !matches!(
-            (&*self, &other),
-            (Command::SetVoxels { .. }, Command::SetVoxels { .. })
-        ) {
-            return Err(other);
-        }
-
-        let other_changes = match other {
-            Command::SetVoxels { changes } => changes,
-            _ => unreachable!(),
-        };
-        let self_changes = match self {
-            Command::SetVoxels { changes } => changes,
-            _ => unreachable!(),
-        };
+    /// For each position, the earliest `old_voxel` is preserved (so
+    /// undo restores the pre-stroke state) and the latest `new_voxel`
+    /// is taken (so the stroke ends in its final visible state). Any
+    /// two commands merge, `Command` having a single variant; add a
+    /// second one and every destructuring here stops compiling, which
+    /// is the point at which a "these two don't merge" path would have
+    /// to come back.
+    pub fn merge_with(&mut self, other: Command) {
+        let Command::SetVoxels { changes: other_changes } = other;
+        let Command::SetVoxels { changes: self_changes } = self;
 
         // Build pos -> index into self_changes for in-place updates.
         let mut by_pos: HashMap<(i32, i32, i32), usize> =
@@ -177,7 +107,6 @@ impl Command {
                 self_changes.push(change);
             }
         }
-        Ok(())
     }
 }
 
@@ -242,22 +171,12 @@ impl CommandHistory {
 
         if self.stroke_open && in_window {
             if let Some(prev) = self.undo_stack.back_mut() {
-                match prev.try_merge_with(command) {
-                    Ok(()) => {
-                        // Successful merge: still considered new activity
-                        // for redo invalidation and window refresh.
-                        self.redo_stack.clear();
-                        self.last_push_at = Some(Instant::now());
-                        return;
-                    }
-                    Err(returned) => {
-                        // Couldn't merge — push as a fresh entry but
-                        // keep the stroke open (next call may merge).
-                        self.push_new(returned);
-                        self.stroke_open = true;
-                        return;
-                    }
-                }
+                prev.merge_with(command);
+                // A merge still counts as new activity for redo
+                // invalidation and for refreshing the merge window.
+                self.redo_stack.clear();
+                self.last_push_at = Some(Instant::now());
+                return;
             }
         }
 
@@ -341,13 +260,22 @@ impl CommandHistory {
 mod tests {
     use super::*;
 
+    /// One-cell batch — what a single brush click produces.
+    fn set_one(world: &World, pos: (i32, i32, i32), new_voxel: Voxel) -> Command {
+        Command::set_voxels(vec![VoxelChange {
+            pos,
+            old_voxel: world.get_voxel(pos.0, pos.1, pos.2),
+            new_voxel,
+        }])
+    }
+
     #[test]
     fn test_undo_redo() {
         let mut world = World::new();
         let mut history = CommandHistory::new(100);
 
         // Set a voxel
-        let cmd = Command::set_voxel(&world, (0, 0, 0), Voxel::from_rgb(255, 0, 0));
+        let cmd = set_one(&world, (0, 0, 0), Voxel::from_rgb(255, 0, 0));
         history.execute(cmd, &mut world);
 
         assert!(!world.get_voxel(0, 0, 0).is_air());
@@ -364,7 +292,7 @@ mod tests {
     #[test]
     fn test_noop_command() {
         let world = World::new();
-        let cmd = Command::set_voxel(&world, (0, 0, 0), Voxel::AIR);
+        let cmd = set_one(&world, (0, 0, 0), Voxel::AIR);
         assert!(cmd.is_noop());
     }
 
@@ -388,12 +316,9 @@ mod tests {
                 new_voxel: voxel(2),
             }],
         };
-        a.try_merge_with(b).unwrap();
-        if let Command::SetVoxels { changes } = &a {
-            assert_eq!(changes.len(), 2);
-        } else {
-            panic!("a should still be SetVoxels");
-        }
+        a.merge_with(b);
+        let Command::SetVoxels { changes } = &a;
+        assert_eq!(changes.len(), 2);
     }
 
     #[test]
@@ -415,32 +340,11 @@ mod tests {
                 new_voxel: voxel(2),
             }],
         };
-        a.try_merge_with(b).unwrap();
-        if let Command::SetVoxels { changes } = &a {
-            assert_eq!(changes.len(), 1);
-            assert_eq!(changes[0].old_voxel, Voxel::AIR);
-            assert_eq!(changes[0].new_voxel, voxel(2));
-        } else {
-            panic!("a should still be SetVoxels");
-        }
-    }
-
-    #[test]
-    fn test_try_merge_incompatible_kinds() {
-        let world = World::new();
-        let mut a = Command::SetVoxel {
-            pos: (0, 0, 0),
-            old_voxel: Voxel::AIR,
-            new_voxel: voxel(1),
-        };
-        let b = Command::set_voxels(vec![VoxelChange {
-            pos: (1, 0, 0),
-            old_voxel: Voxel::AIR,
-            new_voxel: voxel(2),
-        }]);
-        let _ = world; // keep an unused-binding-free pattern
-        // SetVoxel cannot merge with SetVoxels.
-        assert!(a.try_merge_with(b).is_err());
+        a.merge_with(b);
+        let Command::SetVoxels { changes } = &a;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].old_voxel, Voxel::AIR);
+        assert_eq!(changes[0].new_voxel, voxel(2));
     }
 
     #[test]

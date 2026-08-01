@@ -230,10 +230,7 @@ impl App {
                 self.unsaved_changes = false;
                 self.autosave_pending = false;
                 self.touch_recent(&path);
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("project");
+                let filename = file_label(&path);
                 self.ui.set_status(format!("Saved: {}", filename));
             }
             Err(e) => {
@@ -318,10 +315,7 @@ impl App {
                 self.unsaved_changes = false;
                 self.autosave_pending = false;
                 self.touch_recent(&path);
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("project");
+                let filename = file_label(&path);
                 self.ui.set_status(format!("Opened: {}", filename));
             }
             Err(e) => {
@@ -374,10 +368,7 @@ impl App {
                     // Imports seed the next import dialog rather than
                     // the project MRU — see `Prefs::touch_recent`.
                     self.prefs.remember_import_dir(&path);
-                    let filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("file");
+                    let filename = file_label(&path);
                     self.ui.set_status(format!("Imported: {}", filename));
                 }
                 Err(e) => {
@@ -424,10 +415,7 @@ impl App {
         match io::export_obj_smoothed(&self.world, &path, blur) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file");
+                let filename = file_label(&path);
                 let mode = if blur { "heavy" } else { "light" };
                 let msg = if stats.triangle_count == 0 {
                     format!("Exported: {} (empty — no geometry)", filename)
@@ -484,10 +472,7 @@ impl App {
         match io::export_glb_smoothed(&self.world, &sockets, &path, blur) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file");
+                let filename = file_label(&path);
                 let mode = if blur { "heavy" } else { "light" };
                 let msg = if stats.triangle_count == 0 {
                     format!("Exported: {} (empty — no geometry)", filename)
@@ -544,10 +529,7 @@ impl App {
         match io::export_glb(&self.world, &sockets, &path) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file");
+                let filename = file_label(&path);
                 let msg = if stats.triangle_count == 0 {
                     format!("Exported: {} (empty — no geometry)", filename)
                 } else {
@@ -601,10 +583,7 @@ impl App {
         match io::export_obj(&self.world, &path) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file");
+                let filename = file_label(&path);
                 let msg = if stats.triangle_count == 0 {
                     format!("Exported: {} (empty — no geometry)", filename)
                 } else {
@@ -656,10 +635,7 @@ impl App {
             Ok(mut file) => match io::export_vox(&self.world, &mut file, convert_axes) {
                 Ok(overflow) => {
                     self.prefs.remember_export_dir(&path);
-                    let filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("file");
+                    let filename = file_label(&path);
                     let msg = if overflow > 0 {
                         format!(
                             "Exported: {} ({} colors quantized — VOX is 255-color)",
@@ -820,10 +796,6 @@ fn describe_vox_import_error(e: &io::VoxError, path: &Path) -> (String, String) 
         io::VoxError::InvalidChunkSize(id) => (
             format!("a corrupt {:?} chunk header (bad length)", id),
             "The .vox is damaged — re-download or re-export it.",
-        ),
-        io::VoxError::InvalidPaletteIndex(i) => (
-            format!("an invalid palette index {}", i),
-            "The palette / voxel data is inconsistent — re-export the file.",
         ),
         io::VoxError::Io(inner) if inner.kind() == std::io::ErrorKind::UnexpectedEof => (
             "a truncated or corrupt file (ran out of data)".to_string(),

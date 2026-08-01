@@ -9,6 +9,6 @@ mod voxel;
 mod chunk;
 mod world;
 
-pub use voxel::{Voxel, Material};
+pub use voxel::Voxel;
 pub use chunk::{Chunk, ChunkPos, LocalPos, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_VOLUME};
 pub use world::World;

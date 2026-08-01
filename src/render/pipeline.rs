@@ -23,12 +23,80 @@ pub struct RenderPipeline {
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
 }
 
-impl RenderPipeline {
-    /// Create a new render pipeline
-    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        Self::new_with_features(device, surface_format, wgpu::Features::empty())
-    }
+/// Everything that differs between the three voxel pipelines.
+///
+/// Shader, vertex layout, camera bind group, depth format, stencil and
+/// multisample state are identical across all three; spelling out a
+/// full `RenderPipelineDescriptor` per pipeline meant those shared
+/// parts existed in triplicate, and the fields that genuinely differ
+/// were buried among them. `depth_compare` and `bias` are parameters
+/// rather than constants because the transparent variant needs both to
+/// be different — see its construction below.
+struct PipelineVariant {
+    label: &'static str,
+    blend: wgpu::BlendState,
+    cull_mode: Option<wgpu::Face>,
+    polygon_mode: wgpu::PolygonMode,
+    depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
+    bias: wgpu::DepthBiasState,
+}
 
+impl PipelineVariant {
+    fn build(
+        self,
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        surface_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(self.label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(self.blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: self.cull_mode,
+                polygon_mode: self.polygon_mode,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: self.depth_write_enabled,
+                depth_compare: self.depth_compare,
+                stencil: wgpu::StencilState::default(),
+                bias: self.bias,
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        })
+    }
+}
+
+impl RenderPipeline {
     /// Create a new render pipeline with optional features
     pub fn new_with_features(device: &wgpu::Device, surface_format: wgpu::TextureFormat, features: wgpu::Features) -> Self {
         // Create shader module
@@ -78,167 +146,67 @@ impl RenderPipeline {
             push_constant_ranges: &[],
         });
 
-        // Create render pipeline (fill mode)
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Voxel Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
-
-        // Create wireframe pipeline if the feature is available
-        let wireframe_pipeline = if features.contains(wgpu::Features::POLYGON_MODE_LINE) {
-            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Voxel Wireframe Pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[Vertex::layout()],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None, // No culling in wireframe mode
-                    polygon_mode: wgpu::PolygonMode::Line,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview: None,
-                cache: None,
-            }))
-        } else {
-            None
+        let build = |variant: PipelineVariant| {
+            variant.build(device, &pipeline_layout, &shader, surface_format)
         };
 
-        // Transparent pipeline: same shader/layout, alpha blending,
-        // depth-write disabled so the preview doesn't occlude later
-        // transparent geometry. Drawn after opaque chunks so the
-        // already-written opaque depth still gates it correctly.
-        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Voxel Transparent Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        let render_pipeline = build(PipelineVariant {
+            label: "Voxel Render Pipeline",
+            blend: wgpu::BlendState::REPLACE,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            bias: wgpu::DepthBiasState::default(),
+        });
+
+        // Wireframe only exists where the GPU exposes the feature.
+        let wireframe_pipeline = features
+            .contains(wgpu::Features::POLYGON_MODE_LINE)
+            .then(|| {
+                build(PipelineVariant {
+                    label: "Voxel Wireframe Pipeline",
+                    blend: wgpu::BlendState::REPLACE,
+                    cull_mode: None, // No culling in wireframe mode
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    bias: wgpu::DepthBiasState::default(),
+                })
+            });
+
+        // Transparent: alpha blending, depth-write disabled so the
+        // preview doesn't occlude later transparent geometry. Drawn
+        // after opaque chunks so the already-written opaque depth
+        // still gates it correctly.
+        let transparent_pipeline = build(PipelineVariant {
+            label: "Voxel Transparent Pipeline",
+            blend: wgpu::BlendState::ALPHA_BLENDING,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            depth_write_enabled: false,
+            // `LessEqual`, not `Less`: every overlay drawn through this
+            // pipeline (brush hover, procgen preview, move ghost) is
+            // emitted by the *same* quad helpers as the world mesh,
+            // with no outward offset. On an isolated voxel the
+            // overlay's vertices are bit-identical to the ones already
+            // in the depth buffer, so `Less` rejected it for every
+            // single pixel — Remove / Paint / Fill simply had no
+            // visible hover highlight.
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            // `LessEqual` alone only fixes exact ties. Where greedy
+            // meshing merged a large quad, the world face and the
+            // per-voxel overlay interpolate depth differently and land
+            // a ULP apart, which showed as speckled z-fighting. A small
+            // negative bias pulls the overlay toward the camera by a
+            // couple of depth units — enough to win consistently, far
+            // too little to poke through geometry genuinely in front of
+            // it. Safe because this pipeline never writes depth.
+            bias: wgpu::DepthBiasState {
+                constant: -2,
+                slope_scale: -2.0,
+                clamp: 0.0,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                // `LessEqual`, not `Less`: every overlay drawn through
-                // this pipeline (brush hover, procgen preview, move
-                // ghost) is emitted by the *same* quad helpers as the
-                // world mesh, with no outward offset. On an isolated
-                // voxel the overlay's vertices are bit-identical to the
-                // ones already in the depth buffer, so `Less` rejected
-                // it for every single pixel — Remove / Paint / Fill
-                // simply had no visible hover highlight.
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                // `LessEqual` alone only fixes exact ties. Where greedy
-                // meshing merged a large quad, the world face and the
-                // per-voxel overlay interpolate depth differently and
-                // land a ULP apart, which showed as speckled z-fighting.
-                // A small negative bias pulls the overlay toward the
-                // camera by a couple of depth units — enough to win
-                // consistently, far too little to poke through geometry
-                // genuinely in front of it. Safe because this pipeline
-                // never writes depth.
-                bias: wgpu::DepthBiasState {
-                    constant: -2,
-                    slope_scale: -2.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
         });
 
         Self {

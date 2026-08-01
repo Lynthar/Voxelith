@@ -6,109 +6,29 @@
 use super::{Chunk, ChunkPos, Voxel, CHUNK_SIZE, CHUNK_SIZE_I32};
 use glam::Vec3;
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A world containing multiple chunks.
 ///
-/// Supports both bounded (fixed-size) and unbounded (infinite) modes.
+/// Unbounded: chunks are created on demand wherever a write lands, so
+/// any `i32` voxel coordinate is writable. (There used to be an
+/// optional `WorldBounds` for fixed-size worlds. Nothing ever built
+/// one — no UI, no file format, no importer — and its only lasting
+/// effect was forcing every caller of `get_or_create_chunk` to handle
+/// a `None` that could not happen.)
+///
 /// Thread-safe access is provided through RwLock.
 #[derive(Default)]
 pub struct World {
     /// Chunks indexed by their position
     chunks: HashMap<ChunkPos, Arc<RwLock<Chunk>>>,
-    /// World bounds (None = unbounded/infinite)
-    bounds: Option<WorldBounds>,
-    /// Flag for tracking if any chunk is dirty
-    any_dirty: bool,
-}
-
-/// Bounds for a finite world
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct WorldBounds {
-    pub min: ChunkPos,
-    pub max: ChunkPos,
-}
-
-impl WorldBounds {
-    pub fn new(min: ChunkPos, max: ChunkPos) -> Self {
-        Self { min, max }
-    }
-
-    /// Create bounds for a single-chunk world at origin
-    pub fn single_chunk() -> Self {
-        Self {
-            min: ChunkPos::ZERO,
-            max: ChunkPos::ZERO,
-        }
-    }
-
-    /// Create bounds for a world of given size in chunks, centered at origin
-    pub fn centered(half_size: i32) -> Self {
-        Self {
-            min: ChunkPos::new(-half_size, -half_size, -half_size),
-            max: ChunkPos::new(half_size, half_size, half_size),
-        }
-    }
-
-    /// Check if a chunk position is within bounds
-    pub fn contains(&self, pos: ChunkPos) -> bool {
-        pos.x >= self.min.x
-            && pos.x <= self.max.x
-            && pos.y >= self.min.y
-            && pos.y <= self.max.y
-            && pos.z >= self.min.z
-            && pos.z <= self.max.z
-    }
-
-    /// Get size in chunks for each dimension
-    pub fn size(&self) -> (u32, u32, u32) {
-        (
-            (self.max.x - self.min.x + 1) as u32,
-            (self.max.y - self.min.y + 1) as u32,
-            (self.max.z - self.min.z + 1) as u32,
-        )
-    }
-
-    /// Get size in voxels for each dimension
-    pub fn size_voxels(&self) -> (u32, u32, u32) {
-        let (cx, cy, cz) = self.size();
-        (
-            cx * CHUNK_SIZE as u32,
-            cy * CHUNK_SIZE as u32,
-            cz * CHUNK_SIZE as u32,
-        )
-    }
 }
 
 impl World {
-    /// Create a new empty unbounded world
+    /// Create a new empty world
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Create a bounded world with the given bounds
-    pub fn bounded(bounds: WorldBounds) -> Self {
-        Self {
-            chunks: HashMap::new(),
-            bounds: Some(bounds),
-            any_dirty: false,
-        }
-    }
-
-    /// Create a world with a single chunk at origin
-    pub fn single_chunk() -> Self {
-        let mut world = Self::bounded(WorldBounds::single_chunk());
-        // ZERO is always within single_chunk bounds, so this should never fail
-        world.get_or_create_chunk(ChunkPos::ZERO)
-            .expect("ChunkPos::ZERO should be within single_chunk bounds");
-        world
-    }
-
-    /// Get world bounds (None if unbounded)
-    pub fn bounds(&self) -> Option<&WorldBounds> {
-        self.bounds.as_ref()
     }
 
     /// Check if a chunk exists at the given position
@@ -122,19 +42,11 @@ impl World {
     }
 
     /// Get or create chunk at position.
-    /// Returns None if the world is bounded and the position is outside the bounds.
-    pub fn get_or_create_chunk(&mut self, pos: ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
-        // Check bounds if set
-        if let Some(bounds) = &self.bounds {
-            if !bounds.contains(pos) {
-                return None;
-            }
-        }
-
-        Some(self.chunks
+    pub fn get_or_create_chunk(&mut self, pos: ChunkPos) -> Arc<RwLock<Chunk>> {
+        self.chunks
             .entry(pos)
             .or_insert_with(|| Arc::new(RwLock::new(Chunk::new())))
-            .clone())
+            .clone()
     }
 
     /// Get voxel at world position
@@ -150,20 +62,17 @@ impl World {
         }
     }
 
-    /// Set voxel at world position.
-    /// Silently ignores if the position is outside a bounded world.
+    /// Set voxel at world position. Any coordinate is in range; the
+    /// chunk holding it is created if it doesn't exist yet.
     pub fn set_voxel(&mut self, x: i32, y: i32, z: i32, voxel: Voxel) {
         let chunk_pos = ChunkPos::from_world_pos(x, y, z);
-        let Some(chunk) = self.get_or_create_chunk(chunk_pos) else {
-            return; // Out of bounds for bounded world
-        };
+        let chunk = self.get_or_create_chunk(chunk_pos);
 
         let lx = x.rem_euclid(CHUNK_SIZE_I32) as usize;
         let ly = y.rem_euclid(CHUNK_SIZE_I32) as usize;
         let lz = z.rem_euclid(CHUNK_SIZE_I32) as usize;
 
         chunk.write().set(lx, ly, lz, voxel);
-        self.any_dirty = true;
 
         // If the write touched a chunk-boundary cell, the neighbors'
         // meshes may be stale: their boundary faces can flip visibility,
@@ -214,17 +123,6 @@ impl World {
                     if let Some(neighbor) = self.chunks.get(&neighbor_pos) {
                         neighbor.write().mark_dirty();
                     }
-                }
-            }
-        }
-    }
-
-    /// Fill a region with a voxel
-    pub fn fill_region(&mut self, min: (i32, i32, i32), max: (i32, i32, i32), voxel: Voxel) {
-        for z in min.2..=max.2 {
-            for y in min.1..=max.1 {
-                for x in min.0..=max.0 {
-                    self.set_voxel(x, y, z, voxel);
                 }
             }
         }
@@ -314,15 +212,6 @@ impl World {
         })
     }
 
-    /// Check if any chunk needs mesh rebuild
-    pub fn has_dirty_chunks(&self) -> bool {
-        self.any_dirty
-            || self
-                .chunks
-                .values()
-                .any(|c| c.read().is_dirty())
-    }
-
     /// Get all dirty chunks
     pub fn dirty_chunks(&self) -> Vec<ChunkPos> {
         self.chunks
@@ -337,18 +226,11 @@ impl World {
         for chunk in self.chunks.values() {
             chunk.write().clear_dirty();
         }
-        self.any_dirty = false;
-    }
-
-    /// Remove empty chunks to free memory
-    pub fn prune_empty_chunks(&mut self) {
-        self.chunks.retain(|_, chunk| !chunk.read().is_empty());
     }
 
     /// Clear all chunks
     pub fn clear(&mut self) {
         self.chunks.clear();
-        self.any_dirty = true;
     }
 
     /// Create a simple test world with a ground plane
@@ -532,16 +414,19 @@ mod tests {
     }
 
     #[test]
-    fn test_bounded_world() {
-        let bounds = WorldBounds::centered(1);
-        let mut world = World::bounded(bounds);
+    fn writes_land_anywhere_and_unwritten_space_reads_as_air() {
+        let mut world = World::new();
 
-        // Inside bounds - should work
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         assert!(!world.get_voxel(0, 0, 0).is_air());
 
-        // Way outside bounds - should return air (not crash)
-        assert!(world.get_voxel(1000, 1000, 1000).is_air());
+        // Far from the origin: the chunk is created on demand, so this
+        // is a real write, not a silently dropped one.
+        world.set_voxel(1000, 1000, 1000, Voxel::from_rgb(0, 255, 0));
+        assert!(!world.get_voxel(1000, 1000, 1000).is_air());
+
+        // Never-written space still reads as air rather than panicking.
+        assert!(world.get_voxel(-5000, 900, 12345).is_air());
     }
 
     #[test]
