@@ -66,6 +66,7 @@ pub struct SocketInfo {
 /// Which plane to render, and how.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SliceRequest {
     /// Axis the plane is perpendicular to. `y` (the default) is the
     /// top-down view.
@@ -82,6 +83,7 @@ pub struct SliceRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum SliceMode {
     /// `#` solid, `.` empty.
     #[default]

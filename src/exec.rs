@@ -102,7 +102,7 @@ pub struct ExecError {
 }
 
 impl ExecError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             op_index: None,
@@ -269,7 +269,9 @@ pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
 /// The loaded [`EditorState`] rides along untouched so a later save
 /// preserves the artist's camera, palette and brush — an agent editing
 /// someone's project has no business resetting their workspace.
-fn open_session(input: Option<&Path>) -> Result<(AgentSession, EditorState), ExecError> {
+pub(crate) fn open_session(
+    input: Option<&Path>,
+) -> Result<(AgentSession, EditorState), ExecError> {
     let Some(path) = input else {
         return Ok((AgentSession::new(), EditorState::default()));
     };
@@ -308,7 +310,7 @@ fn read_batch(path: &Path, force_dry_run: bool) -> Result<OpsBatch, ExecError> {
     Ok(batch)
 }
 
-fn save_project(
+pub(crate) fn save_project(
     session: &AgentSession,
     mut state: EditorState,
     path: &Path,
@@ -334,7 +336,7 @@ fn save_project(
     Ok(path.display().to_string())
 }
 
-fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportInfo, ExecError> {
+pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportInfo, ExecError> {
     let format = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())

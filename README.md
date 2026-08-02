@@ -57,6 +57,10 @@ cargo run --release -- bake assets/spec.json
 cargo run --release -- exec ops.json --out hut.vxlt --describe
 cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
 cargo run --release -- generators        # what `generate` can call
+
+# Or serve the same primitives over the Model Context Protocol, holding
+# one document open across calls (stdio; --http needs `mcp-http`).
+cargo run --release -- mcp --root ./models
 ```
 
 Every subcommand above is headless. `cargo build --no-default-features`

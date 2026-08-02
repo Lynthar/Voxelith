@@ -65,6 +65,20 @@ enum Commands {
     /// parameters at their default values (the template to copy).
     Generators,
 
+    /// Serve the editing tools over the Model Context Protocol, holding
+    /// one document open across calls.
+    #[cfg(feature = "mcp")]
+    Mcp {
+        /// Directory every project path must resolve inside. Defaults to
+        /// the current directory.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Serve Streamable HTTP on this address (e.g. `127.0.0.1:8080`)
+        /// instead of stdio. Needs the `mcp-http` feature.
+        #[arg(long)]
+        http: Option<String>,
+    },
+
     /// Describe a project without changing it (headless, JSON on stdout).
     Inspect {
         /// Project to read (`.vxlt`).
@@ -97,6 +111,8 @@ fn main() {
             force_dry_run: dry_run,
         }),
         Some(Commands::Generators) => println!("{}", voxelith::exec::generators_json()),
+        #[cfg(feature = "mcp")]
+        Some(Commands::Mcp { root, http }) => run_mcp(root, http),
         Some(Commands::Inspect { project, slice }) => run_exec(voxelith::exec::ExecRequest {
             input: Some(project),
             describe: true,
@@ -123,6 +139,60 @@ fn run_exec(request: voxelith::exec::ExecRequest) {
             std::process::exit(1);
         }
     }
+}
+
+/// Serve the MCP tool set until the client goes away.
+///
+/// Logs go to stderr and nothing here prints to stdout: on the stdio
+/// transport stdout *is* the protocol stream.
+#[cfg(feature = "mcp")]
+fn run_mcp(root: Option<PathBuf>, http: Option<String>) {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .init();
+
+    let requested = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = match voxelith::mcp::Root::new(&requested) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("can't serve from {}: {e}", requested.display());
+            std::process::exit(2);
+        }
+    };
+    log::info!("serving projects under {}", voxelith::mcp::display(root.dir()));
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("could not start the async runtime: {e}");
+            std::process::exit(2);
+        }
+    };
+    let served = runtime.block_on(async move {
+        match http {
+            Some(address) => serve_http(root, &address).await,
+            None => voxelith::mcp::serve_stdio(root).await,
+        }
+    });
+    if let Err(e) = served {
+        eprintln!("mcp server stopped: {e}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+async fn serve_http(root: voxelith::mcp::Root, address: &str) -> anyhow::Result<()> {
+    voxelith::mcp::serve_http(root, address.parse()?).await
+}
+
+/// The HTTP transport is a separate feature because it drags axum in.
+/// Say which build this is rather than failing on a parse of the address.
+#[cfg(all(feature = "mcp", not(feature = "mcp-http")))]
+async fn serve_http(_root: voxelith::mcp::Root, _address: &str) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "this build has no HTTP transport (compiled without the `mcp-http` feature); \
+         drop --http to serve on stdio, or rebuild with --features mcp-http"
+    )
 }
 
 /// Headless batch export. Prints a summary and exits with a non-zero code

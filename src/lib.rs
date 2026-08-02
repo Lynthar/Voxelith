@@ -31,6 +31,11 @@ pub mod editor;
 pub mod io;
 pub mod procgen;
 
+// The MCP server. Gated because it carries rmcp + schemars, which a
+// build that only ever runs `bake` or `exec` has no use for.
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 // The editor half. Gated on `gui` so `--no-default-features` builds the
 // library and the headless subcommands without winit / wgpu / egui in
 // the tree at all. `prefs` sits here rather than below because it is

@@ -10,10 +10,10 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 448 (`cargo test`) · 397 headless (`cargo test --no-default-features`) |
-| **Build** | `cargo build --release` clean on Windows + Vulkan; `--no-default-features` builds the headless half with no winit / wgpu / egui / rfd in the tree |
-| **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) / `exec` / `inspect` / `generators` (`src/exec.rs`) |
-| **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI). Full list in `Cargo.toml` |
+| **Tests** | 462 (`cargo test`) · 397 headless (`cargo test --no-default-features`) |
+| **Build** | `cargo build --release` clean on Windows + Vulkan. Features: `default = ["gui", "mcp"]`; `--no-default-features` builds the headless half with no winit / wgpu / egui / rfd in the tree; `mcp-http` adds the Streamable HTTP transport (and axum). CI builds all three. |
+| **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) / `exec` / `inspect` / `generators` (`src/exec.rs`) / `mcp` (`src/mcp/`) |
+| **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI) · rmcp 3.1 + schemars (MCP). Full list in `Cargo.toml` |
 | **Storage** | flat-array 32³ chunk store (no octree yet) |
 
 ---
@@ -70,7 +70,10 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - **Limits are explicit errors, never silent no-ops**: ops/batch, `set_voxels` entries, per-op region cells, per-batch cells, coordinate range, new chunks per batch. Every failure carries `op_index` + a stable `code` + a message that says what to do instead.
 - **CLI** (`src/exec.rs`) — `voxelith exec <ops.json> [--in p.vxlt] [--out p.vxlt] [--export f.glb|f.obj|f.vox] [--describe] [--slice <json>] [--dry-run]`, plus read-only `inspect <p.vxlt>` and `generators` (the catalog, each entry carrying its parameters at their default values — that listing *is* the params template). stdout is JSON and nothing else (logs go to stderr): `{"ok":true,…}` / exit 0, or `{"ok":false,"error":{code,op_index?,message}}` / exit 1. A loaded project's camera / palette / brush / sockets ride through a headless edit untouched. The ops schema is documented on the types in `src/agent_ops/schema.rs`; `voxelith generators` prints the generator catalog with its parameter templates.
 - **Headless feature split** — the `gui` feature (default on) gates winit / wgpu / egui / egui-wgpu / egui-winit / rfd / pollster, plus the `render`, `ui` and `prefs` modules (`prefs` is entirely editor workspace state) and `Vertex::layout` (the mesh layer's one GPU-typed function). `--no-default-features` leaves the library + `bake` / `exec` / `inspect` / `generators` with **zero** GUI crates in the dependency tree; without the feature the no-subcommand launch says so and exits 2 instead of pretending the command was malformed. CI builds and tests both configurations.
-- **Not reachable over a protocol yet** — an agent drives this through the CLI, one process per step. An MCP server (stdio + Streamable HTTP) over a resident `AgentSession` is the next stage.
+- **MCP server** (`src/mcp/`, `voxelith mcp`) — the same primitives as a resident tool set, for agents that speak the protocol rather than running commands. **10 tools**: `new_project` / `open_project` / `save_project`, `apply_ops`, `list_generators`, `describe`, `slice`, `undo` / `redo`, `export`. The difference from the CLI is the session, not the verbs: one document stays open across calls, so undo history, the selection and unsaved edits survive from one tool call to the next. `apply_ops` answers with the report *and* a description of the same world — under `dry_run` both come from the preview, since over a protocol there is no other way to ask for one. Tool argument schemas are generated from the `agent_ops` types (`schemars`), because over MCP the schema is the only place an agent can learn the ops format.
+- **Two transports, one handler** — stdio (the `mcp` feature, default on) for a client that launches the server as a child process; Streamable HTTP at `/mcp` (the `mcp-http` feature, off by default because it drags axum in) for one that wants a URL. Streamable HTTP is stateless at the protocol layer under the 2026-07-28 spec — a fresh MCP session per request — so the handlers it builds per request are clones sharing one `Arc<Mutex<Document>>`. That sharing is what makes a conversation over HTTP possible at all; a fresh document per request would silently drop every edit.
+- **Every path resolves inside one root** (`--root`, default the working directory), canonicalized first so `..` and symlinks are resolved before the containment test rather than pattern-matched away. Over stdio this buys little — the client launched the process — but the same tool bodies serve HTTP, and a rule that changes with the transport is one an agent's working recipe trips over.
+- **Not in the editor yet** — a human watching the GUI doesn't see an agent's steps. Checkpoint-save plus file-watch auto-reload is the next stage, an in-editor bridge sharing one undo history after that.
 
 ### Prefs & resilience
 - `prefs.ron` (window / panels / viewport / procgen / graph / brush / recent-files / last export + import directory); `#[serde(default)]` forward-compat; scale-factor-aware (logical px). The recent-files MRU holds `.vxlt` projects only — its one consumer is Open Recent, which feeds every entry to the project loader; exports and `.vox` imports seed the corresponding dialog directory instead.
@@ -100,7 +103,7 @@ Concise forward map (the unbuilt parts of the former roadmap + vision), grouped 
 
 **AI** — staging area (preview/move/accept before commit) + GLB cache (free re-voxelize) + cost/ETA before submit + provider dropdown + image-to-3D UI. **Local inference** (Candle/ONNX) deferred — no viable Rust path for TRELLIS / Hunyuan3D as of 2026-05 (mesh→voxel through a remote API remains the route).
 
-**Agent integration** — the ops layer and the headless CLI that fronts it are done. **Remaining:** an MCP server (stdio + Streamable HTTP) over a resident session, plus checkpoint-save and editor auto-reload so a human watching can follow each agent step; CPU raycast renders as the agent's eyes; then an in-editor bridge sharing one undo history with hand editing. Deferred inside the protocol itself: socket ops, clipboard ops, node-graph composition, a symmetry modifier on draw ops, per-op undo, multi-document sessions.
+**Agent integration** — the ops layer, the headless CLI, and the MCP server over both transports are done. **Remaining:** checkpoint-save and editor auto-reload so a human watching the GUI can follow each agent step (single-writer while it lasts: agent or human, whoever saves last wins); CPU raycast renders as the agent's eyes; then an in-editor bridge sharing one undo history with hand editing. Deferred inside the protocol itself: socket ops, clipboard ops, node-graph composition, a symmetry modifier on draw ops, per-op undo, multi-document sessions.
 
 **Platform & ecosystem** — WASM/WebGPU build; scripting (Lua/Rhai) — largely subsumed by the agent ops layer above, which is the programmable surface; plugin API; tileset/material externalization to `.ron`; asset library.
 
@@ -137,5 +140,5 @@ Load-bearing gotchas for anyone touching the code:
 ## Onboarding
 
 1. `cargo run --release` — verify it launches and the cube + ground show.
-2. `cargo test` — should be 448 passing.
+2. `cargo test` — should be 462 passing.
 3. `git log --oneline` — see the recent direction and last-committed work.

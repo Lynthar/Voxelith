@@ -57,6 +57,10 @@ cargo run --release -- bake assets/spec.json
 cargo run --release -- exec ops.json --out hut.vxlt --describe
 cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
 cargo run --release -- generators        # generate op 能调用哪些生成器
+
+# 或者把同一套原语挂到 Model Context Protocol 上,一份文档跨调用常驻
+# (默认 stdio;--http 需要 mcp-http feature)
+cargo run --release -- mcp --root ./models
 ```
 
 以上子命令全部无头。`cargo build --no-default-features` 构建的正是这

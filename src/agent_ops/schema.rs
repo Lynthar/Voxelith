@@ -12,6 +12,14 @@
 //! Coordinates are world cell coordinates, Y up. Regions are inclusive
 //! on both ends (`min` and `max` are cells *in* the region), matching
 //! [`Selection`] and the drag-shape tools.
+//!
+//! With the `mcp` feature these types also derive `JsonSchema`, because
+//! an MCP client learns this format from the tool schema and nowhere
+//! else. Generating it from the types is the same discipline the
+//! generator registry follows — a hand-written copy is a second source
+//! of truth that starts drifting the day after it's written. Only
+//! [`VoxelSpec`] needs a hand-written schema, since it also needs a
+//! hand-written `Deserialize`; a test pins the two together.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -24,6 +32,7 @@ use super::{ErrorCode, OpsError};
 /// A batch of ops plus its envelope.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct OpsBatch {
     /// Must equal [`SCHEMA_VERSION`](super::SCHEMA_VERSION).
     pub version: u32,
@@ -34,6 +43,7 @@ pub struct OpsBatch {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct BatchOptions {
     /// Run everything, report what would happen, commit nothing.
     #[serde(default)]
@@ -44,6 +54,7 @@ pub struct BatchOptions {
 /// are normalized to opposite corners on the way in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Aabb {
     pub min: [i32; 3],
     pub max: [i32; 3],
@@ -80,6 +91,7 @@ impl From<Selection> for Aabb {
 /// of an axis inherit this format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum AxisSpec {
     X,
     #[default]
@@ -113,6 +125,7 @@ impl AxisSpec {
 /// is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum WriteMode {
     /// Write unconditionally.
     #[default]
@@ -134,6 +147,7 @@ pub enum VoxelSpec {
 /// The object form of [`VoxelSpec`].
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SolidVoxel {
     pub rgb: [u8; 3],
     /// Accepted only as `255`. Every voxel in the world is opaque — the
@@ -174,6 +188,35 @@ impl<'de> Deserialize<'de> for VoxelSpec {
                 "voxel must be \"air\" or an object like {\"rgb\": [200, 100, 50]}",
             )),
         }
+    }
+}
+
+/// Hand-written for the same reason [`Deserialize`] is: this type is
+/// two shapes, and no derive infers a schema for a custom deserializer.
+///
+/// It is the only written-by-hand schema in the protocol, so it's the
+/// only one that can drift from what the code accepts — hence the test
+/// below, and hence the object half being `SolidVoxel`'s own generated
+/// schema by reference rather than a transcription of it.
+#[cfg(feature = "mcp")]
+impl schemars::JsonSchema for VoxelSpec {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "VoxelSpec".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::VoxelSpec").into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let solid = generator.subschema_for::<SolidVoxel>();
+        schemars::json_schema!({
+            "description": "A voxel value: the string \"air\" to clear a cell, or an object describing a solid one.",
+            "anyOf": [
+                { "type": "string", "const": "air" },
+                solid
+            ]
+        })
     }
 }
 
@@ -221,6 +264,7 @@ impl VoxelSpec {
 /// exists to carry thousands of them and every repeated key is tokens
 /// the agent pays for twice (writing them, then re-reading them).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct VoxelEntry(pub i32, pub i32, pub i32, pub VoxelSpec);
 
 /// One operation. Tagged by `"op"`.
@@ -230,6 +274,7 @@ pub struct VoxelEntry(pub i32, pub i32, pub i32, pub VoxelSpec);
 /// erase op.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum Op {
     /// Axis-aligned box. `filled: false` leaves a 1-cell shell.
     Box {

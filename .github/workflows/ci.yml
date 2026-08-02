@@ -49,6 +49,14 @@ jobs:
       - name: Test (headless)
         run: cargo test --no-default-features --verbose
 
+      # `mcp-http` is the only configuration that compiles the HTTP
+      # transport, and `--no-default-features` above is the only one that
+      # compiles `agent_ops` *without* the schemars derives — so both
+      # need a build of their own or one of them rots unnoticed. Build
+      # only: serving over HTTP needs a socket, not a compiler.
+      - name: Build (MCP over HTTP)
+        run: cargo build --no-default-features --features mcp-http --all-targets --verbose
+
       # Informational for now. The codebase carries a handful of
       # pre-existing clippy lints and uses a deliberate narrow manual
       # format that differs from rustfmt's defaults, so neither is a

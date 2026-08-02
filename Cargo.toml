@@ -8,13 +8,14 @@ license = "MIT"
 repository = "https://github.com/Lynthar/Voxelith"
 
 [features]
-default = ["gui"]
+default = ["gui", "mcp"]
 # The interactive editor: window, GPU, egui panels, native file pickers.
 # Turning it off (`--no-default-features`) drops winit / wgpu / egui / rfd
 # out of the dependency tree entirely and leaves the library plus the
-# headless subcommands (`bake`, `exec`, `inspect`) — which is what an
-# agent, a CI runner, or a container actually needs. `prefs` goes with
-# the GUI: every field in it is editor workspace state.
+# headless subcommands (`bake`, `exec`, `inspect`, and `mcp` when that
+# feature is on) — which is what an agent, a CI runner, or a container
+# actually needs. `prefs` goes with the GUI: every field in it is editor
+# workspace state.
 gui = [
     "dep:wgpu",
     "dep:winit",
@@ -24,6 +25,19 @@ gui = [
     "dep:egui-winit",
     "dep:rfd",
 ]
+
+# `voxelith mcp`: the same editing primitives as a resident MCP tool set,
+# for agents that speak the protocol rather than shell commands. Carries
+# `schemars` because the tool schemas are *generated from the ops types* —
+# over MCP the schema is the only place an agent can learn the ops format,
+# so a hand-written one would be exactly the drift the generator registry
+# exists to avoid. Off, the derives vanish and `agent_ops` is untouched.
+mcp = ["dep:rmcp", "dep:schemars"]
+
+# Streamable HTTP for the same server (ChatGPT connectors and anything
+# else that wants a URL instead of a child process). Separate because it
+# drags axum + tower in, and a local agent over stdio needs none of it.
+mcp-http = ["mcp", "rmcp/transport-streamable-http-server", "dep:axum"]
 
 [dependencies]
 # Graphics & Windowing (GUI only — see the `gui` feature)
@@ -58,6 +72,14 @@ parking_lot = "0.12"  # Better mutexes
 flate2 = "1.0"  # Compression for project files
 rfd = { version = "0.15", optional = true }  # Native file dialogs (GUI only)
 dirs = "5.0"  # Cross-platform user config / cache / data directories
+
+# MCP server (`mcp` / `mcp-http` features). `transport-io` is the stdio
+# transport; `server` + `macros` come in by default. `schemars` generates
+# the tool argument schemas straight from the `agent_ops` types — the
+# version tracks the one rmcp itself pins so both see the same trait.
+rmcp = { version = "3.1", optional = true, features = ["transport-io"] }
+schemars = { version = "1.0", optional = true }
+axum = { version = "0.8", optional = true }
 
 # Parallelism
 rayon = "1.10"
