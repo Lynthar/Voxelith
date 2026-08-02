@@ -10,7 +10,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 462 (`cargo test`) · 397 headless (`cargo test --no-default-features`) |
+| **Tests** | 471 (`cargo test`) · 397 headless (`cargo test --no-default-features`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan. Features: `default = ["gui", "mcp"]`; `--no-default-features` builds the headless half with no winit / wgpu / egui / rfd in the tree; `mcp-http` adds the Streamable HTTP transport (and axum). CI builds all three. |
 | **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`) or headless `voxelith bake <spec.json>` (`src/bake.rs`) / `exec` / `inspect` / `generators` (`src/exec.rs`) / `mcp` (`src/mcp/`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · reqwest/tokio (AI) · rmcp 3.1 + schemars (MCP). Full list in `Cargo.toml` |
@@ -73,11 +73,13 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 - **MCP server** (`src/mcp/`, `voxelith mcp`) — the same primitives as a resident tool set, for agents that speak the protocol rather than running commands. **10 tools**: `new_project` / `open_project` / `save_project`, `apply_ops`, `list_generators`, `describe`, `slice`, `undo` / `redo`, `export`. The difference from the CLI is the session, not the verbs: one document stays open across calls, so undo history, the selection and unsaved edits survive from one tool call to the next. `apply_ops` answers with the report *and* a description of the same world — under `dry_run` both come from the preview, since over a protocol there is no other way to ask for one. Tool argument schemas are generated from the `agent_ops` types (`schemars`), because over MCP the schema is the only place an agent can learn the ops format.
 - **Two transports, one handler** — stdio (the `mcp` feature, default on) for a client that launches the server as a child process; Streamable HTTP at `/mcp` (the `mcp-http` feature, off by default because it drags axum in) for one that wants a URL. Streamable HTTP is stateless at the protocol layer under the 2026-07-28 spec — a fresh MCP session per request — so the handlers it builds per request are clones sharing one `Arc<Mutex<Document>>`. That sharing is what makes a conversation over HTTP possible at all; a fresh document per request would silently drop every edit.
 - **Every path resolves inside one root** (`--root`, default the working directory), canonicalized first so `..` and symlinks are resolved before the containment test rather than pattern-matched away. Over stdio this buys little — the client launched the process — but the same tool bodies serve HTTP, and a rule that changes with the transport is one an agent's working recipe trips over.
-- **Not in the editor yet** — a human watching the GUI doesn't see an agent's steps. Checkpoint-save plus file-watch auto-reload is the next stage, an in-editor bridge sharing one undo history after that.
+- **A human can watch it work** — `voxelith mcp --checkpoint` writes the document back to its own file after every edit (undo included; a dry run changes nothing, so it writes nothing), and the editor polls the project it has open and reloads a version it didn't write. Keep the same `.vxlt` open in the GUI and the agent's steps appear as they land. The answer says what the write did — `saved: false` with a reason, never silence — because a checkpoint that quietly stopped landing looks exactly like an agent that stopped working. A reload restores only the world and its sockets: camera, brush, palette and tool stay where the user left them, or every batch would yank the view back to wherever it pointed at the last save.
+- **Single writer while that lasts** — the editor refuses to reload over unsaved local edits and says so in the status bar; the user's copy wins, and Save (overwrite) or reopen (take theirs) is the choice. Two people editing one file is not merged, just detected. The in-editor bridge that shares one undo history with hand editing is what removes the limit.
 
 ### Prefs & resilience
 - `prefs.ron` (window / panels / viewport / procgen / graph / brush / recent-files / last export + import directory); `#[serde(default)]` forward-compat; scale-factor-aware (logical px). The recent-files MRU holds `.vxlt` projects only — its one consumer is Open Recent, which feeds every entry to the project loader; exports and `.vox` imports seed the corresponding dialog directory instead.
 - Timed **autosave** (60 s, atomic write) + **crash recovery** (delete-on-clean-exit → recover prompt at next launch; corrupt autosave falls back to default, never bricks startup).
+- **Auto-reload** — the open project's modification time is polled every 500 ms, and a version the editor didn't write is loaded in place (world + sockets only; the camera and workspace stay put). Unsaved local edits veto it, with a status-bar line instead. Built for watching an agent work (see Agent ops above), but it fires for any writer — a `voxelith exec --out` run, a `git checkout`.
 - **Unsaved-changes guard** on every path that discards the scene (New / Open / Open Recent / Import / Generate\* / window close / File ▸ Exit, keyboard shortcuts included): in-app Save / Don't Save / Cancel prompt, where Save only proceeds if the write actually landed. Clear All has its own confirm dialog (it wipes the undo history, so it can't be undone).
 
 ### UI
@@ -103,7 +105,7 @@ Concise forward map (the unbuilt parts of the former roadmap + vision), grouped 
 
 **AI** — staging area (preview/move/accept before commit) + GLB cache (free re-voxelize) + cost/ETA before submit + provider dropdown + image-to-3D UI. **Local inference** (Candle/ONNX) deferred — no viable Rust path for TRELLIS / Hunyuan3D as of 2026-05 (mesh→voxel through a remote API remains the route).
 
-**Agent integration** — the ops layer, the headless CLI, and the MCP server over both transports are done. **Remaining:** checkpoint-save and editor auto-reload so a human watching the GUI can follow each agent step (single-writer while it lasts: agent or human, whoever saves last wins); CPU raycast renders as the agent's eyes; then an in-editor bridge sharing one undo history with hand editing. Deferred inside the protocol itself: socket ops, clipboard ops, node-graph composition, a symmetry modifier on draw ops, per-op undo, multi-document sessions.
+**Agent integration** — the ops layer, the headless CLI, the MCP server over both transports, and checkpoint-save + editor auto-reload are done. **Remaining:** CPU raycast renders as the agent's eyes (it currently reads the world through `describe` and ASCII slices); then an in-editor bridge that puts an agent's patch on screen as a translucent preview to accept or reject, sharing one undo history with hand editing — which is also what retires the single-writer limit. Deferred inside the protocol itself: socket ops, clipboard ops, node-graph composition, a symmetry modifier on draw ops, per-op undo, multi-document sessions.
 
 **Platform & ecosystem** — WASM/WebGPU build; scripting (Lua/Rhai) — largely subsumed by the agent ops layer above, which is the programmable surface; plugin API; tileset/material externalization to `.ron`; asset library.
 
@@ -140,5 +142,5 @@ Load-bearing gotchas for anyone touching the code:
 ## Onboarding
 
 1. `cargo run --release` — verify it launches and the cube + ground show.
-2. `cargo test` — should be 462 passing.
+2. `cargo test` — should be 471 passing.
 3. `git log --oneline` — see the recent direction and last-committed work.

@@ -84,6 +84,22 @@ struct Status {
     redo_depth: usize,
 }
 
+/// Whether a successful edit is written straight back to the document's
+/// file.
+///
+/// Off is the default because writing someone's project on every batch
+/// is a side effect worth asking for. On, the file tracks the session
+/// step by step — which is what lets a human keep the same project open
+/// in the editor and watch the agent work (the editor reloads a project
+/// that changed underneath it). One writer at a time, though: while an
+/// agent is running with checkpoints on, hand edits to the same file are
+/// a race, and whoever saves last wins.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Checkpoint {
+    Off,
+    AfterEveryEdit,
+}
+
 /// The server. Cloning shares the document — which the HTTP transport
 /// depends on, since it builds a handler per request and they all have
 /// to be looking at the same model.
@@ -91,6 +107,7 @@ struct Status {
 pub struct VoxelithMcp {
     document: Arc<Mutex<Document>>,
     root: Arc<Root>,
+    checkpoint: Checkpoint,
     /// Built once and pointed at explicitly below. Left to its default,
     /// `#[tool_handler]` calls `Self::tool_router()` on every request,
     /// which regenerates all ten tools' JSON schemas — including the
@@ -134,11 +151,55 @@ fn path_error(error: PathError) -> ExecError {
 
 #[tool_router]
 impl VoxelithMcp {
-    pub fn new(root: Root) -> Self {
+    pub fn new(root: Root, checkpoint: Checkpoint) -> Self {
         Self {
             document: Arc::new(Mutex::new(Document::empty())),
             root: Arc::new(root),
+            checkpoint,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Write the document back to its own file after an edit changed it,
+    /// so whoever has that project open in the editor sees the step.
+    /// `None` — and no field in the answer at all — when the server runs
+    /// without checkpoints.
+    ///
+    /// A failed write does **not** fail the tool call: the edit itself
+    /// succeeded and the session still holds it, so reporting failure
+    /// would tell the agent to redo work that is already done. What it
+    /// must not do is stay quiet — a checkpoint that silently stopped
+    /// landing leaves the human watching a file that no longer follows
+    /// the session, which looks exactly like an agent that stopped
+    /// working.
+    fn checkpoint(&self, document: &Document) -> Option<CheckpointReport> {
+        if self.checkpoint == Checkpoint::Off {
+            return None;
+        }
+        let Some(path) = document.path.clone() else {
+            return Some(CheckpointReport {
+                saved: false,
+                detail: Some(
+                    "this document has no file yet — save_project once and later edits \
+                     check-point themselves"
+                        .to_string(),
+                ),
+            });
+        };
+        match exec::save_project(&document.session, document.state.clone(), &path) {
+            Ok(_) => Some(CheckpointReport {
+                saved: true,
+                detail: None,
+            }),
+            Err(e) => {
+                log::warn!("checkpoint to {} failed: {e}", display(&path));
+                Some(CheckpointReport {
+                    saved: false,
+                    detail: Some(format!(
+                        "the edit stands, but the file is now behind the session: {e}"
+                    )),
+                })
+            }
         }
     }
 
@@ -245,10 +306,18 @@ impl VoxelithMcp {
             Ok(outcome) => outcome,
             Err(e) => return refused(&e.into()),
         };
+        // A dry run changed nothing, so there is nothing to check-point:
+        // writing the unchanged document back would give the human's
+        // editor a reload that shows exactly what it already shows.
+        let checkpoint = match batch.options.dry_run {
+            true => None,
+            false => self.checkpoint(&document),
+        };
         answered(Applied {
             status: document.status(),
             report,
             description,
+            checkpoint,
         })
     }
 
@@ -298,9 +367,15 @@ impl VoxelithMcp {
     fn undo(&self) -> Result<CallToolResult, McpError> {
         let mut document = self.document.lock();
         let moved = document.session.undo();
+        // Stepping the history is an edit like any other as far as the
+        // file is concerned. Leaving undo out would let the checkpoint
+        // drift from the session on the one move an agent makes
+        // precisely because the last one was wrong.
+        let checkpoint = moved.then(|| self.checkpoint(&document)).flatten();
         answered(Stepped {
             stepped: moved,
             status: document.status(),
+            checkpoint,
         })
     }
 
@@ -308,9 +383,11 @@ impl VoxelithMcp {
     fn redo(&self) -> Result<CallToolResult, McpError> {
         let mut document = self.document.lock();
         let moved = document.session.redo();
+        let checkpoint = moved.then(|| self.checkpoint(&document)).flatten();
         answered(Stepped {
             stepped: moved,
             status: document.status(),
+            checkpoint,
         })
     }
 
@@ -403,6 +480,23 @@ struct Applied {
     status: Status,
     report: ApplyReport,
     description: Description,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<CheckpointReport>,
+}
+
+/// What the automatic write-back did. Absent from the answer entirely
+/// unless the server runs with checkpoints on, so an agent driving a
+/// plain server never sees a field it has to reason about.
+///
+/// `saved: false` is not a failed call — the edit is in the session
+/// either way. It says the file on disk is no longer the session, which
+/// matters to the agent only because a human may be reading that file.
+#[derive(Serialize)]
+struct CheckpointReport {
+    saved: bool,
+    /// Why not, when `saved` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -429,6 +523,8 @@ struct Stepped {
     stepped: bool,
     #[serde(flatten)]
     status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<CheckpointReport>,
 }
 
 #[derive(Serialize)]
@@ -440,10 +536,10 @@ struct Exported {
 
 /// Serve on stdin/stdout, the way a local client launches a server as a
 /// child process.
-pub async fn serve_stdio(root: Root) -> anyhow::Result<()> {
+pub async fn serve_stdio(root: Root, checkpoint: Checkpoint) -> anyhow::Result<()> {
     use rmcp::{transport::stdio, ServiceExt};
 
-    let service = VoxelithMcp::new(root).serve(stdio()).await?;
+    let service = VoxelithMcp::new(root, checkpoint).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
@@ -454,12 +550,16 @@ pub async fn serve_stdio(root: Root) -> anyhow::Result<()> {
 /// works on the same document — a fresh one per request would give each
 /// call its own empty world and silently lose every edit.
 #[cfg(feature = "mcp-http")]
-pub async fn serve_http(root: Root, address: std::net::SocketAddr) -> anyhow::Result<()> {
+pub async fn serve_http(
+    root: Root,
+    address: std::net::SocketAddr,
+    checkpoint: Checkpoint,
+) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
     };
 
-    let server = VoxelithMcp::new(root);
+    let server = VoxelithMcp::new(root, checkpoint);
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         LocalSessionManager::default().into(),
@@ -486,7 +586,18 @@ mod tests {
     }
 
     fn server(dir: &std::path::Path) -> VoxelithMcp {
-        VoxelithMcp::new(Root::new(dir).unwrap())
+        VoxelithMcp::new(Root::new(dir).unwrap(), Checkpoint::Off)
+    }
+
+    fn checkpointing_server(dir: &std::path::Path) -> VoxelithMcp {
+        VoxelithMcp::new(Root::new(dir).unwrap(), Checkpoint::AfterEveryEdit)
+    }
+
+    /// How many voxels the `.vxlt` on disk holds — what a human with
+    /// that project open in the editor would be looking at.
+    fn voxels_on_disk(path: &std::path::Path) -> u64 {
+        let (session, _) = exec::open_session(Some(path)).expect("the file should load");
+        session.describe().voxel_count
     }
 
     /// Tool results are JSON text; this is what an agent parses.
@@ -642,6 +753,105 @@ mod tests {
             body(&result)["error"]["code"],
             serde_json::json!("no_project_path")
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_pointing_follows_the_session_edit_by_edit() {
+        // The point of the feature: a human keeps the project open in
+        // the editor and the file keeps up with the agent, without the
+        // agent having to remember to save. Undo counts as an edit —
+        // the file must go back with the session, not stay ahead of it.
+        let dir = scratch("checkpoint");
+        let project = dir.join("scene.vxlt");
+        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+
+        let server = checkpointing_server(&dir);
+        server
+            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
+            .unwrap();
+
+        let applied = body(&server.apply_ops(batch(HUT)).unwrap());
+        assert_eq!(applied["checkpoint"]["saved"], serde_json::json!(true));
+        let after_apply = applied["voxel_count"].as_u64().unwrap();
+        assert!(after_apply > 0);
+        assert_eq!(
+            voxels_on_disk(&project),
+            after_apply,
+            "the file should hold what the session holds, with no save call"
+        );
+
+        let undone = body(&server.undo().unwrap());
+        assert_eq!(undone["checkpoint"]["saved"], serde_json::json!(true));
+        assert_eq!(voxels_on_disk(&project), 0, "undo must reach the file too");
+
+        // Nothing changed, so nothing is written and nothing is claimed.
+        let spent = body(&server.undo().unwrap());
+        assert_eq!(spent["stepped"], serde_json::json!(false));
+        assert!(spent.get("checkpoint").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing_even_with_check_pointing_on() {
+        // The world didn't change, so the file must not be rewritten —
+        // otherwise "preview this" makes the human's editor reload.
+        let dir = scratch("checkpoint_dry");
+        let project = dir.join("scene.vxlt");
+        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+
+        let server = checkpointing_server(&dir);
+        server
+            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
+            .unwrap();
+        let dry = HUT.replace(r#""ops""#, r#""options":{"dry_run":true},"ops""#);
+
+        let result = body(&server.apply_ops(batch(&dry)).unwrap());
+        assert!(result["report"]["voxel_count"].as_u64().unwrap() > 0);
+        assert!(result.get("checkpoint").is_none());
+        assert_eq!(voxels_on_disk(&project), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_document_with_no_file_reports_the_checkpoint_it_could_not_write() {
+        // Silence here would read as "check-pointed" to an agent that
+        // asked for check-pointing, and the human would sit watching a
+        // file nobody is writing.
+        let dir = scratch("checkpoint_no_path");
+        let server = checkpointing_server(&dir);
+
+        let applied = body(&server.apply_ops(batch(HUT)).unwrap());
+        assert_eq!(applied["ok"], serde_json::json!(true), "the edit still stands");
+        assert_eq!(applied["checkpoint"]["saved"], serde_json::json!(false));
+        assert!(applied["checkpoint"]["detail"]
+            .as_str()
+            .expect("a reason the agent can act on")
+            .contains("save_project"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_the_flag_nothing_is_written_and_the_answer_stays_quiet() {
+        let dir = scratch("checkpoint_off");
+        let project = dir.join("scene.vxlt");
+        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+
+        let server = server(&dir);
+        server
+            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
+            .unwrap();
+        let applied = body(&server.apply_ops(batch(HUT)).unwrap());
+
+        assert!(
+            applied.get("checkpoint").is_none(),
+            "a plain server must not add a field an agent has to reason about"
+        );
+        assert_eq!(voxels_on_disk(&project), 0, "the file is the agent's to save");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

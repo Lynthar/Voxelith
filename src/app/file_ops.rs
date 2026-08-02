@@ -1,10 +1,58 @@
-//! File operations: project new/save/open and VOX import/export.
+//! File operations: project new/save/open and VOX import/export, plus
+//! the poll that notices somebody else writing the open project.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use voxelith::{core::Voxel, editor::Socket, io, ui::ExportReport};
 
 use super::App;
+
+/// How often `tick_disk_reload` stats the open project file. One
+/// `metadata` call, so the cost is negligible either way; half a second
+/// is short enough that an agent's step shows up as it happens and long
+/// enough that a burst of them doesn't re-mesh the scene per frame.
+const DISK_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What a poll of the open project file should lead to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiskPoll {
+    /// Nobody else has written it, or we couldn't read it this time.
+    Ignore,
+    /// It changed under us and there is nothing local to lose.
+    Reload,
+    /// It changed under us, but reloading would discard edits the user
+    /// hasn't saved. Their copy wins; say so and leave it alone.
+    WarnStale,
+}
+
+/// Decide what a poll found. Split out from `tick_disk_reload` because
+/// the interesting part is this table, and the rest is a clock and an
+/// `fs::metadata` call.
+///
+/// An unreadable file is deliberately *not* news: a save elsewhere is a
+/// write-temp-then-rename, and a poll landing in that window sees the
+/// target briefly missing. Treating that as a change would reload from
+/// a file that is about to be replaced anyway.
+pub(super) fn classify_disk_poll(
+    watched: Option<SystemTime>,
+    on_disk: Option<SystemTime>,
+    unsaved_changes: bool,
+) -> DiskPoll {
+    match (watched, on_disk) {
+        (Some(watched), Some(on_disk)) if watched != on_disk => match unsaved_changes {
+            true => DiskPoll::WarnStale,
+            false => DiskPoll::Reload,
+        },
+        _ => DiskPoll::Ignore,
+    }
+}
+
+/// Last-modified time of `path`, or `None` if it can't be read right
+/// now — see `classify_disk_poll` for why that isn't an error here.
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
 
 /// Rebuild the live `editor::Socket` list from a loaded `EditorState`.
 /// Inverse of `current_editor_state`'s socket mapping; shared by the
@@ -72,6 +120,7 @@ impl App {
         self.world.clear();
         self.reset_scene_session_state();
         self.project_path = None;
+        self.note_project_mtime();
         self.unsaved_changes = false;
         self.autosave_pending = false;
         self.ui.set_status("New project created");
@@ -159,6 +208,7 @@ impl App {
         self.world = world;
         self.reset_scene_session_state();
         self.project_path = None;
+        self.note_project_mtime();
         self.editor.brush_color = Voxel::from_rgba(
             editor_state.brush_color[0],
             editor_state.brush_color[1],
@@ -227,6 +277,9 @@ impl App {
         match io::save_world_with_state(&self.world, editor_state, &path) {
             Ok(_) => {
                 self.project_path = Some(path.clone());
+                // Our own write — mark it, or the next poll reads it as
+                // somebody else's and reloads what we just saved.
+                self.note_project_mtime();
                 self.unsaved_changes = false;
                 self.autosave_pending = false;
                 self.touch_recent(&path);
@@ -312,6 +365,7 @@ impl App {
                 }
 
                 self.rebuild_all_meshes();
+                self.note_project_mtime();
                 self.unsaved_changes = false;
                 self.autosave_pending = false;
                 self.touch_recent(&path);
@@ -354,6 +408,7 @@ impl App {
                     // `unsaved_changes` is left false; the first edit arms
                     // autosave.
                     self.project_path = None;
+                    self.note_project_mtime();
                     self.rebuild_all_meshes();
                     // Imported world replaces everything; the previous
                     // camera target is now meaningless. Anchor orbit
@@ -390,6 +445,104 @@ impl App {
                 self.ui.set_status(format!("Import failed: {}", e));
             }
         }
+    }
+
+    /// Remember the open project file's modification time, so the disk
+    /// poll can tell somebody else's write from our own. Called wherever
+    /// `project_path` changes or we write that file ourselves; with no
+    /// project open it clears the mark, which is what stops a poll from
+    /// firing against a path we no longer hold.
+    pub(super) fn note_project_mtime(&mut self) {
+        self.watched_mtime = self.project_path.as_deref().and_then(file_mtime);
+    }
+
+    /// Per-frame check for the open project changing underneath us.
+    ///
+    /// This is the human's half of agent editing: an agent working
+    /// through `voxelith mcp --checkpoint` (or a shell loop running
+    /// `voxelith exec --out`) writes the same `.vxlt` the editor has
+    /// open, and the editor follows along step by step instead of
+    /// showing a world that stopped being true several batches ago.
+    ///
+    /// One writer at a time, though. If the user has their own unsaved
+    /// edits, theirs win and the reload is refused — this can tell that
+    /// the file moved, not how to merge two versions of it.
+    pub(super) fn tick_disk_reload(&mut self) {
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        if self.last_disk_poll.elapsed() < DISK_POLL_INTERVAL {
+            return;
+        }
+        self.last_disk_poll = Instant::now();
+
+        let on_disk = file_mtime(&path);
+        let verdict = classify_disk_poll(self.watched_mtime, on_disk, self.unsaved_changes);
+        // Take the new time whatever the verdict, so a refused reload
+        // warns once rather than on every poll from here on.
+        if let Some(seen) = on_disk {
+            self.watched_mtime = Some(seen);
+        }
+
+        match verdict {
+            DiskPoll::Ignore => {}
+            DiskPoll::Reload => self.reload_from_disk(&path),
+            DiskPoll::WarnStale => {
+                log::info!(
+                    "{} changed on disk; not reloading over unsaved changes",
+                    path.display()
+                );
+                self.ui.set_status(format!(
+                    "{} changed on disk — your unsaved edits are kept; save to \
+                     overwrite it, or reopen it to take theirs",
+                    file_label(&path)
+                ));
+            }
+        }
+    }
+
+    /// Re-read the open project from disk, keeping the user where they
+    /// were.
+    ///
+    /// Unlike `do_open_project` this restores **only** the world and its
+    /// sockets: camera, brush, palette and tool stay as the user left
+    /// them. The file carries all of those, but applying them here would
+    /// yank the camera back to wherever it was pointing when the project
+    /// was last saved — every time an agent finished a batch, which is
+    /// the whole reason this path exists.
+    ///
+    /// The scene *is* replaced, so this goes through
+    /// `reset_scene_session_state` like every other path that throws one
+    /// away: a selection or an undo entry left over from the old world
+    /// addresses cells that may no longer be there.
+    fn reload_from_disk(&mut self, path: &Path) {
+        let (world, state) = match io::load_world_with_state(path) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                // Saves are write-temp-then-rename, so a torn read
+                // shouldn't be possible — but a project truncated by
+                // something else must not turn the editor's copy into an
+                // empty scene without a word.
+                log::warn!("Reload of {} failed: {}", path.display(), e);
+                self.ui.set_status(format!(
+                    "{} changed on disk but couldn't be read — showing the last \
+                     good version",
+                    file_label(path)
+                ));
+                return;
+            }
+        };
+        self.world = world;
+        self.reset_scene_session_state();
+        self.editor.sockets = sockets_from_state(&state);
+        self.rebuild_all_meshes();
+        // `rebuild_all_meshes` flags the document modified — true of an
+        // edit, wrong here: this world came *out* of the user's file, so
+        // it is exactly what the file holds.
+        self.unsaved_changes = false;
+        self.autosave_pending = false;
+        self.ui
+            .set_status(format!("Reloaded: {} (changed on disk)", file_label(path)));
     }
 
     /// OBJ export with Marching Cubes smoothing. `blur` selects the
@@ -852,4 +1005,48 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
         action
     );
     (short, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(secs: u64) -> Option<SystemTime> {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn an_unchanged_file_is_left_alone() {
+        assert_eq!(classify_disk_poll(at(10), at(10), false), DiskPoll::Ignore);
+        assert_eq!(classify_disk_poll(at(10), at(10), true), DiskPoll::Ignore);
+    }
+
+    #[test]
+    fn somebody_elses_write_reloads_when_there_is_nothing_to_lose() {
+        assert_eq!(classify_disk_poll(at(10), at(11), false), DiskPoll::Reload);
+    }
+
+    #[test]
+    fn unsaved_work_outranks_the_file_on_disk() {
+        // Single-writer: this can see that the file moved, not merge two
+        // versions of it, so the copy the user is still editing wins.
+        assert_eq!(classify_disk_poll(at(10), at(11), true), DiskPoll::WarnStale);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_right_now_is_not_a_change() {
+        // A save elsewhere renames a temp over the target; a poll landing
+        // inside that window sees nothing there. Reloading on that would
+        // read a file that is about to be replaced.
+        assert_eq!(classify_disk_poll(at(10), None, false), DiskPoll::Ignore);
+        assert_eq!(classify_disk_poll(at(10), None, true), DiskPoll::Ignore);
+    }
+
+    #[test]
+    fn nothing_happens_before_the_first_mark() {
+        // No mark means no project file open, or one whose time we never
+        // managed to read — either way there is nothing to compare.
+        assert_eq!(classify_disk_poll(None, at(11), false), DiskPoll::Ignore);
+        assert_eq!(classify_disk_poll(None, None, false), DiskPoll::Ignore);
+    }
 }

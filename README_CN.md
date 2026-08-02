@@ -60,7 +60,9 @@ cargo run --release -- generators        # generate op 能调用哪些生成器
 
 # 或者把同一套原语挂到 Model Context Protocol 上,一份文档跨调用常驻
 # (默认 stdio;--http 需要 mcp-http feature)
-cargo run --release -- mcp --root ./models
+# 加 --checkpoint 后每次编辑都写回工程文件,编辑器会自动重载 ——
+# 开着那个 .vxlt 就能看着 agent 一步步建模
+cargo run --release -- mcp --root ./models --checkpoint
 ```
 
 以上子命令全部无头。`cargo build --no-default-features` 构建的正是这

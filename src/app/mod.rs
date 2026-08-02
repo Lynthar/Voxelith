@@ -265,6 +265,15 @@ pub struct App {
     /// `AUTOSAVE_INTERVAL`.
     pub(super) last_autosave: Instant,
 
+    /// Modification time of `project_path` as of the last time we wrote
+    /// it or read it. `tick_disk_reload` compares the file against this
+    /// to tell somebody else's write from our own — an agent driving the
+    /// MCP server with `--checkpoint`, or a `voxelith exec --out` run.
+    /// `None` whenever no project file is open.
+    pub(super) watched_mtime: Option<std::time::SystemTime>,
+    /// When the project file was last polled. See `DISK_POLL_INTERVAL`.
+    pub(super) last_disk_poll: Instant,
+
     /// Action deferred while the unsaved-changes prompt is up. Answered
     /// by the `UnsavedGuard*` actions; see `App::guard_then`.
     pub(super) pending_guarded: Option<PendingAction>,
@@ -408,6 +417,8 @@ impl App {
             unsaved_changes: false,
             autosave_pending: false,
             last_autosave: Instant::now(),
+            watched_mtime: None,
+            last_disk_poll: Instant::now(),
             pending_guarded: None,
             exit_requested: false,
             last_generated_bounds: None,

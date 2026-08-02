@@ -77,6 +77,12 @@ enum Commands {
         /// instead of stdio. Needs the `mcp-http` feature.
         #[arg(long)]
         http: Option<String>,
+        /// Write the document back to its file after every edit, so the
+        /// editor — which reloads a project that changed on disk — shows
+        /// each step. One writer at a time: don't hand-edit the same
+        /// file while an agent is running.
+        #[arg(long)]
+        checkpoint: bool,
     },
 
     /// Describe a project without changing it (headless, JSON on stdout).
@@ -112,7 +118,11 @@ fn main() {
         }),
         Some(Commands::Generators) => println!("{}", voxelith::exec::generators_json()),
         #[cfg(feature = "mcp")]
-        Some(Commands::Mcp { root, http }) => run_mcp(root, http),
+        Some(Commands::Mcp {
+            root,
+            http,
+            checkpoint,
+        }) => run_mcp(root, http, checkpoint),
         Some(Commands::Inspect { project, slice }) => run_exec(voxelith::exec::ExecRequest {
             input: Some(project),
             describe: true,
@@ -146,11 +156,17 @@ fn run_exec(request: voxelith::exec::ExecRequest) {
 /// Logs go to stderr and nothing here prints to stdout: on the stdio
 /// transport stdout *is* the protocol stream.
 #[cfg(feature = "mcp")]
-fn run_mcp(root: Option<PathBuf>, http: Option<String>) {
+fn run_mcp(root: Option<PathBuf>, http: Option<String>, checkpoint: bool) {
+    use voxelith::mcp::Checkpoint;
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
 
+    let checkpoint = match checkpoint {
+        true => Checkpoint::AfterEveryEdit,
+        false => Checkpoint::Off,
+    };
     let requested = root.unwrap_or_else(|| PathBuf::from("."));
     let root = match voxelith::mcp::Root::new(&requested) {
         Ok(root) => root,
@@ -160,6 +176,9 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>) {
         }
     };
     log::info!("serving projects under {}", voxelith::mcp::display(root.dir()));
+    if checkpoint == Checkpoint::AfterEveryEdit {
+        log::info!("check-pointing the document to its file after every edit");
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
@@ -170,8 +189,8 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>) {
     };
     let served = runtime.block_on(async move {
         match http {
-            Some(address) => serve_http(root, &address).await,
-            None => voxelith::mcp::serve_stdio(root).await,
+            Some(address) => serve_http(root, &address, checkpoint).await,
+            None => voxelith::mcp::serve_stdio(root, checkpoint).await,
         }
     });
     if let Err(e) = served {
@@ -181,14 +200,22 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>) {
 }
 
 #[cfg(feature = "mcp-http")]
-async fn serve_http(root: voxelith::mcp::Root, address: &str) -> anyhow::Result<()> {
-    voxelith::mcp::serve_http(root, address.parse()?).await
+async fn serve_http(
+    root: voxelith::mcp::Root,
+    address: &str,
+    checkpoint: voxelith::mcp::Checkpoint,
+) -> anyhow::Result<()> {
+    voxelith::mcp::serve_http(root, address.parse()?, checkpoint).await
 }
 
 /// The HTTP transport is a separate feature because it drags axum in.
 /// Say which build this is rather than failing on a parse of the address.
 #[cfg(all(feature = "mcp", not(feature = "mcp-http")))]
-async fn serve_http(_root: voxelith::mcp::Root, _address: &str) -> anyhow::Result<()> {
+async fn serve_http(
+    _root: voxelith::mcp::Root,
+    _address: &str,
+    _checkpoint: voxelith::mcp::Checkpoint,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "this build has no HTTP transport (compiled without the `mcp-http` feature); \
          drop --http to serve on stdio, or rebuild with --features mcp-http"

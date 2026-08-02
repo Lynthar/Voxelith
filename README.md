@@ -60,7 +60,9 @@ cargo run --release -- generators        # what `generate` can call
 
 # Or serve the same primitives over the Model Context Protocol, holding
 # one document open across calls (stdio; --http needs `mcp-http`).
-cargo run --release -- mcp --root ./models
+# With --checkpoint every edit is written back to the project file, and
+# the editor reloads it — keep the .vxlt open to watch the agent work.
+cargo run --release -- mcp --root ./models --checkpoint
 ```
 
 Every subcommand above is headless. `cargo build --no-default-features`

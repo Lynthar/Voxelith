@@ -418,6 +418,7 @@ impl ApplicationHandler for App {
                 self.update_socket_visualization();
                 self.rebuild_all_meshes();
                 self.tick_autosave();
+                self.tick_disk_reload();
                 self.render_frame(dt);
 
                 // `render_frame` drains the UI action queue, so an Exit
