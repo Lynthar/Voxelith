@@ -51,7 +51,20 @@ cargo run --release
 # Headless batch export: every .vxlt named in the spec → .glb,
 # with per-asset pivot / up-axis / scale. No window, no GPU.
 cargo run --release -- bake assets/spec.json
+
+# Drive the modeling primitives from a shell (or an AI agent) with a
+# JSON edit protocol: apply a batch, read the report, look at a slice.
+cargo run --release -- exec ops.json --out hut.vxlt --describe
+cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
+cargo run --release -- generators        # what `generate` can call
 ```
+
+Every subcommand above is headless. `cargo build --no-default-features`
+builds exactly that half — library plus CLI, with no winit / wgpu / egui
+in the dependency tree — for a container or CI runner that has no GPU.
+Run `voxelith exec --help` for the flags and `voxelith generators` for
+the generator catalog; the ops schema itself is documented on the types
+in `src/agent_ops/schema.rs`.
 
 ## Keyboard Shortcuts
 

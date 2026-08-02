@@ -154,6 +154,28 @@ impl World {
         self.chunks.len()
     }
 
+    /// Copy the world, chunk contents and all.
+    ///
+    /// Deliberately *not* `impl Clone`: chunks live behind
+    /// `Arc<RwLock<…>>`, so a derived clone would hand back a second
+    /// `World` that writes through to the first one's voxels — a
+    /// shallow copy wearing a deep copy's name. The explicit method
+    /// name also keeps the cost visible at the call site (a full copy
+    /// of every loaded chunk, 256 KB each).
+    ///
+    /// Used by `agent_ops` to run a batch of operations on a scratch
+    /// copy: later ops read the results of earlier ones, and a failure
+    /// anywhere throws the copy away with the real world untouched.
+    pub fn deep_clone(&self) -> World {
+        World {
+            chunks: self
+                .chunks
+                .iter()
+                .map(|(pos, chunk)| (*pos, Arc::new(RwLock::new(chunk.read().clone()))))
+                .collect(),
+        }
+    }
+
     /// Inclusive world-space AABB `(min, max)` cell coordinates of every
     /// solid (non-air) voxel. `None` when the world has no non-air
     /// voxels. The box spans `[min, max + 1)` in continuous space (each
@@ -324,6 +346,28 @@ mod tests {
             );
         }
         assert_eq!(sorted.len(), world.chunk_count());
+    }
+
+    #[test]
+    fn deep_clone_copies_voxels_and_shares_nothing() {
+        // The whole point of the method: writing to the copy must not
+        // reach the original through the shared `Arc<RwLock<Chunk>>`.
+        let mut world = World::new();
+        let red = Voxel::from_rgb(255, 0, 0);
+        let blue = Voxel::from_rgb(0, 0, 255);
+        world.set_voxel(1, 2, 3, red);
+        world.set_voxel(-40, 0, 0, red); // a second chunk
+
+        let mut copy = world.deep_clone();
+        assert_eq!(copy.chunk_count(), world.chunk_count());
+        assert_eq!(copy.get_voxel(1, 2, 3), red);
+        assert_eq!(copy.get_voxel(-40, 0, 0), red);
+
+        copy.set_voxel(1, 2, 3, blue);
+        copy.set_voxel(100, 0, 0, blue); // a chunk the original doesn't have
+        assert_eq!(world.get_voxel(1, 2, 3), red, "copy wrote through to the original");
+        assert!(world.get_voxel(100, 0, 0).is_air());
+        assert_eq!(copy.get_voxel(1, 2, 3), blue);
     }
 
     #[test]

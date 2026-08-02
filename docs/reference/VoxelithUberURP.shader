@@ -1,8 +1,9 @@
 // VoxelithUberURP.shader — reference Universal Render Pipeline (URP) shader
-// for consuming a Voxelith-exported .glb. Reference implementation for
-// docs/GAME_PIPELINE_ROADMAP.md §3.2 (the engine consumption contract).
+// for consuming a Voxelith-exported .glb. This file *is* the engine
+// consumption contract: what a stock URP project has to do to read
+// everything src/io/gltf.rs writes.
 //
-// What it reads (the §3.2 attribute contract):
+// What it reads:
 //   COLOR_0    (vec4) — voxel RGBA with per-vertex AO pre-multiplied into
 //                       RGB (linear). Used directly as albedo.
 //   TEXCOORD_0 (vec2) — .x carries the faction tint zone (0..3); the

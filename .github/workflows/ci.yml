@@ -38,6 +38,17 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+      # The headless half (library + `bake` / `exec` / `inspect`) must
+      # keep building with no winit / wgpu / egui / rfd in the tree —
+      # that's the build an agent, a container or a CI runner uses, and
+      # it's easy to break by reaching for a GUI type from a lower layer
+      # without noticing.
+      - name: Build (headless — no default features)
+        run: cargo build --no-default-features --all-targets --verbose
+
+      - name: Test (headless)
+        run: cargo test --no-default-features --verbose
+
       # Informational for now. The codebase carries a handful of
       # pre-existing clippy lints and uses a deliberate narrow manual
       # format that differs from rustfmt's defaults, so neither is a

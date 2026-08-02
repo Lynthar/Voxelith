@@ -86,7 +86,14 @@ impl Vertex {
         ]
     }
 
-    /// Get the vertex buffer layout for wgpu
+    /// Get the vertex buffer layout for wgpu.
+    ///
+    /// The one place the mesh layer touches a GPU type, and the reason
+    /// it's gated: everything else here is plain data the headless
+    /// exporters (`bake`, `exec`) rely on, so `wgpu` must stay out of a
+    /// `--no-default-features` build. The layout is only ever read by
+    /// `render::pipeline`, which is gated the same way.
+    #[cfg(feature = "gui")]
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,

@@ -13,8 +13,8 @@
 //! zone in `.x`, so Unity glTFast, which drops custom attributes,
 //! can still read it). All deinterleaved so JSON descriptors stay
 //! simple (no `byteStride` annotations needed). Indices are u32 so
-//! large worlds aren't capped at 64k vertices. The full
-//! engine-consumption contract is in `docs/GAME_PIPELINE_ROADMAP.md` §3.2.
+//! large worlds aren't capped at 64k vertices. A worked consumer of
+//! every attribute below ships at `docs/reference/VoxelithUberURP.shader`.
 //!
 //! ### File structure (per glTF 2.0 spec, §3.4 GLB)
 //!
@@ -76,7 +76,7 @@ pub struct GlbStats {
 /// XZ center of the footprint with the bottom (min Y) at the origin —
 /// buildings sit on the ground; `feet` (a spec alias for `BaseCenter`)
 /// is the same point for characters; `Center` centers all axes; `Origin`
-/// leaves model space untouched. See `docs/GAME_PIPELINE_ROADMAP.md` §3.5.
+/// leaves model space untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pivot {
     /// Keep model-space coordinates as-is (identity).
@@ -224,8 +224,7 @@ pub fn export_glb(
 /// root node wrapping the mesh and socket nodes. The default transform
 /// is the identity and yields byte-identical output to [`export_glb`];
 /// the headless bake ([`crate::bake`]) uses this to emit assets with a
-/// consistent pivot + scale for the game engine (see
-/// `docs/GAME_PIPELINE_ROADMAP.md` §3.5).
+/// consistent pivot + scale for the game engine (see [`Pivot`]).
 pub fn export_glb_with_transform(
     world: &World,
     sockets: &[SocketNode],
@@ -360,10 +359,13 @@ fn write_glb_groups(
         }
         let tintzone_len = bin.len() - tintzone_offset;
 
-        // Tint zone ALSO as TEXCOORD_0 = vec2(zone, 0). Unity glTFast drops
-        // custom attributes (so it can't read `_TINTZONE`) but imports UV
-        // sets, so this is the channel a stock-Unity uber-shader reads. See
-        // docs/GAME_PIPELINE_ROADMAP.md §3.2 (incl. the glTFast UV-pruning caveat).
+        // Tint zone ALSO as TEXCOORD_0 = vec2(zone, 0). Unity glTFast has no
+        // support for custom vertex attributes (so it can't read `_TINTZONE`)
+        // but does import UV sets, so this is the channel a stock-Unity
+        // uber-shader reads — `docs/reference/VoxelithUberURP.shader` is one.
+        // Unverified end to end: whether a UV set no material samples survives
+        // a stock glTFast import isn't documented either way, and confirming
+        // it needs a running Unity + glTFast rather than a unit test.
         let texcoord_offset = bin.len();
         for v in &g.vertices {
             bin.extend_from_slice(bytemuck::bytes_of(&[v.tint_zone, 0.0f32]));
@@ -448,7 +450,7 @@ fn write_glb_groups(
             "type": "SCALAR",
         }));
         // TEXCOORD_0: the same zone in .x (VEC2 f32) — the glTFast-readable
-        // mirror of _TINTZONE (see docs/GAME_PIPELINE_ROADMAP.md §3.2).
+        // mirror of _TINTZONE (see where it's written, above).
         accessors.push(json!({
             "bufferView": base + 4,
             "componentType": COMPONENT_TYPE_FLOAT,

@@ -51,7 +51,19 @@ cargo run --release
 # 无头批量导出:spec 里列出的每个 .vxlt → .glb,
 # 逐资产指定 pivot / 上轴 / 缩放。不开窗口、不用 GPU。
 cargo run --release -- bake assets/spec.json
+
+# 用 JSON 编辑协议从命令行(或 AI agent)驱动建模原语:
+# 提交一批操作,读报告,看切片。
+cargo run --release -- exec ops.json --out hut.vxlt --describe
+cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
+cargo run --release -- generators        # generate op 能调用哪些生成器
 ```
+
+以上子命令全部无头。`cargo build --no-default-features` 构建的正是这
+一半——库加 CLI,依赖树里没有 winit / wgpu / egui——供没有 GPU 的容器
+或 CI 使用。参数见 `voxelith exec --help`,生成器目录见
+`voxelith generators`,ops 协议本身的说明写在 `src/agent_ops/schema.rs`
+的类型文档上。
 
 ## 快捷键
 

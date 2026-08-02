@@ -8,18 +8,33 @@ license = "MIT"
 repository = "https://github.com/Lynthar/Voxelith"
 
 [features]
-default = []
+default = ["gui"]
+# The interactive editor: window, GPU, egui panels, native file pickers.
+# Turning it off (`--no-default-features`) drops winit / wgpu / egui / rfd
+# out of the dependency tree entirely and leaves the library plus the
+# headless subcommands (`bake`, `exec`, `inspect`) — which is what an
+# agent, a CI runner, or a container actually needs. `prefs` goes with
+# the GUI: every field in it is editor workspace state.
+gui = [
+    "dep:wgpu",
+    "dep:winit",
+    "dep:pollster",
+    "dep:egui",
+    "dep:egui-wgpu",
+    "dep:egui-winit",
+    "dep:rfd",
+]
 
 [dependencies]
-# Graphics & Windowing
-wgpu = "22"
-winit = "0.30"
-pollster = "0.4"  # Block on async for wgpu initialization
+# Graphics & Windowing (GUI only — see the `gui` feature)
+wgpu = { version = "22", optional = true }
+winit = { version = "0.30", optional = true }
+pollster = { version = "0.4", optional = true }  # Block on async for wgpu initialization
 
-# UI
-egui = "0.29"
-egui-wgpu = "0.29"
-egui-winit = "0.29"
+# UI (GUI only)
+egui = { version = "0.29", optional = true }
+egui-wgpu = { version = "0.29", optional = true }
+egui-winit = { version = "0.29", optional = true }
 
 # Math
 glam = { version = "0.29", features = ["bytemuck"] }
@@ -41,7 +56,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 parking_lot = "0.12"  # Better mutexes
 flate2 = "1.0"  # Compression for project files
-rfd = "0.15"  # Native file dialogs
+rfd = { version = "0.15", optional = true }  # Native file dialogs (GUI only)
 dirs = "5.0"  # Cross-platform user config / cache / data directories
 
 # Parallelism

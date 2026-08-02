@@ -1,7 +1,7 @@
 //! Headless batch export ("bake"): turn many `.vxlt` sources into
 //! optimized, engine-ready `.glb` assets from one declarative spec, so
 //! re-exporting a whole art set after a tweak is a single command instead
-//! of N interactive dialog trips. See `docs/GAME_PIPELINE_ROADMAP.md` §3.5.
+//! of N interactive dialog trips. [`BakeSpec`] is the spec format.
 //!
 //! The bake is CPU-only: it reuses the same mesh + [`crate::io::gltf`]
 //! export path the interactive UI uses (it operates on `World` / mesh
