@@ -9,9 +9,11 @@
 //! - `shapes`   — built-in sphere/pyramid generators
 //! - `input`    — raycast, tool apply, keyboard shortcuts
 //! - `ui_actions` — drains `UiAction`s queued by the egui layer
+//! - `agent_bridge` — serves an MCP client from this world
 //! - `render`   — per-frame wgpu pass
 //! - `handler`  — winit `ApplicationHandler`
 
+mod agent_bridge;
 mod ai_actions;
 mod file_ops;
 mod handler;
@@ -45,6 +47,7 @@ use voxelith::{
     ui::{RenderStats, Ui},
 };
 
+use agent_bridge::AgentBridgeState;
 use preview::PreviewState;
 
 /// Alpha applied to the brush hover overlay. Higher than the procgen
@@ -128,6 +131,10 @@ pub struct App {
 
     /// Procgen preview state machine.
     preview: PreviewState,
+
+    /// The in-editor MCP server and whatever it has parked awaiting
+    /// approval. Off until the Agent panel starts it.
+    agent: AgentBridgeState,
 
     /// Cache key for the brush hover overlay so we don't regenerate
     /// its mesh on every CursorMoved when nothing meaningful changed.
@@ -397,6 +404,7 @@ impl App {
             last_grid_size,
             last_grid_spacing,
             preview: PreviewState::new(),
+            agent: AgentBridgeState::new(),
             last_brush_preview_key: None,
             shape_drag: None,
             selection_drag_anchor: None,
@@ -845,6 +853,14 @@ impl App {
         self.stroke_plane = None;
         self.last_stroke_voxel = None;
         self.last_generated_bounds = None;
+        // A batch parked for approval was built against the world that
+        // is being thrown away: its `old_voxel`s describe cells that no
+        // longer exist, so committing it here would write a change list
+        // whose undo restores a scene nobody was ever looking at. The
+        // history-depth check in `accept_agent_batch` doesn't catch this
+        // one — `history.clear()` above can land on the same (0, 0) the
+        // batch was parked at.
+        self.drop_pending_review_for_new_scene();
         if let Some(renderer) = &mut self.renderer {
             renderer.chunk_meshes.clear();
         }

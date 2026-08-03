@@ -17,6 +17,12 @@ default = ["gui", "mcp"]
 # actually needs. `prefs` goes with the GUI: every field in it is editor
 # workspace state.
 gui = [
+    # The editor hosts an MCP server of its own, so an agent can edit the
+    # project someone has open rather than a file on disk. Its transport
+    # has to be one an agent can dial into, which rules out stdio — the
+    # editor doesn't have one to offer. Hence: an editor build is an
+    # `mcp-http` build.
+    "mcp-http",
     "dep:wgpu",
     "dep:winit",
     "dep:pollster",
@@ -34,9 +40,12 @@ gui = [
 # exists to avoid. Off, the derives vanish and `agent_ops` is untouched.
 mcp = ["dep:rmcp", "dep:schemars", "dep:base64"]
 
-# Streamable HTTP for the same server (ChatGPT connectors and anything
-# else that wants a URL instead of a child process). Separate because it
-# drags axum + tower in, and a local agent over stdio needs none of it.
+# Streamable HTTP: for agents that want a URL instead of a child
+# process, and — since an editor can't hand an agent its stdio — the only
+# transport the in-editor bridge can offer. Still its own feature so a
+# headless stdio-only build doesn't drag axum + tower in, but no longer
+# an optional extra: `gui` turns it on, because that bridge is part of
+# what the editor is.
 mcp-http = ["mcp", "rmcp/transport-streamable-http-server", "dep:axum"]
 
 [dependencies]

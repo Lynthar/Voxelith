@@ -38,6 +38,7 @@ use crate::exec::{self, ExecError, ExportInfo};
 use crate::io::EditorState;
 use crate::view;
 
+pub mod bridge;
 mod paths;
 
 pub use paths::{display, PathError, Root};

@@ -77,6 +77,15 @@ impl PreviewState {
 impl App {
     /// Drive both preview state machines once per frame.
     pub(super) fn tick_preview(&mut self) {
+        // A batch waiting for approval owns the overlay slot: the human
+        // is being asked about *that* geometry, and a debounced generator
+        // repaint would quietly replace what they are deciding on with
+        // something else entirely. Answering the batch resets both state
+        // machines (`App::clear_review_preview`), so whichever source is
+        // switched on re-renders into the freed slot on the next tick.
+        if self.agent.pending.is_some() {
+            return;
+        }
         self.tick_single_preview();
         self.tick_graph_preview();
     }

@@ -142,6 +142,12 @@ impl App {
                 UiAction::AiSaveKey(key) => self.save_ai_key(key),
                 UiAction::AiClearKey => self.clear_ai_key(),
 
+                UiAction::AgentStart(port) => self.start_agent_bridge(port),
+                UiAction::AgentStop => self.stop_agent_bridge(),
+                UiAction::AgentApproval(approval) => self.set_agent_approval(approval),
+                UiAction::AgentAccept => self.accept_agent_batch(),
+                UiAction::AgentReject => self.reject_agent_batch(),
+
                 // --- unsaved-changes prompt answers ---
                 UiAction::UnsavedSave => {
                     self.save_project();

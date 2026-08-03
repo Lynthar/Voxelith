@@ -111,6 +111,7 @@ pub struct PanelVisibility {
     pub show_procgen: bool,
     pub show_graph: bool,
     pub show_ai: bool,
+    pub show_agent: bool,
 }
 
 impl Default for PanelVisibility {
@@ -123,6 +124,7 @@ impl Default for PanelVisibility {
             show_procgen: false,
             show_graph: false,
             show_ai: false,
+            show_agent: false,
         }
     }
 }

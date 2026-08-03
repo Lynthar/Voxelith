@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::editor::{Axis, Quarter};
+use crate::mcp::bridge::Approval;
 use crate::prefs::PanelVisibility;
 
 use super::CameraView;
@@ -122,6 +123,20 @@ pub enum UiAction {
     AiSaveKey(String),
     /// Remove the stored API key.
     AiClearKey,
+
+    // --- Agent bridge ---
+    /// Start serving MCP on the given loopback port. `0` asks the OS for
+    /// a free one.
+    AgentStart(u16),
+    /// Stop serving and close the socket.
+    AgentStop,
+    /// Switch between applying an agent's batches directly and being
+    /// asked first.
+    AgentApproval(Approval),
+    /// Commit the batch waiting for approval.
+    AgentAccept,
+    /// Decline it. Nothing is applied and the agent is told why.
+    AgentReject,
 }
 
 /// Display-ready summary of a completed export, shown in an in-app
@@ -269,6 +284,12 @@ pub struct UiState {
     /// moved out into a `UiAction::AiSaveKey(_)` and the buffer is
     /// cleared.
     pub ai_key_input: String,
+
+    /// Port the Agent panel will ask for when the bridge is started.
+    /// A string rather than a `u16` because it is a text field, and an
+    /// unparseable one has to disable the button rather than silently
+    /// stand for some other port.
+    pub agent_port_input: String,
 }
 
 impl UiState {

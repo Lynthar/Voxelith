@@ -20,6 +20,14 @@ use winit::event_loop::{ControlFlow, EventLoop};
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Start the editor with its agent bridge already listening on this
+    /// loopback port, instead of waiting for the Agent panel's Start
+    /// button. `0` asks the OS for a free port. Editor only — it has no
+    /// meaning alongside a subcommand.
+    #[cfg(feature = "gui")]
+    #[arg(long, value_name = "PORT")]
+    agent_port: Option<u16>,
 }
 
 #[derive(Subcommand)]
@@ -152,6 +160,9 @@ fn main() {
             slice,
             ..Default::default()
         }),
+        #[cfg(feature = "gui")]
+        None => run_gui(cli.agent_port),
+        #[cfg(not(feature = "gui"))]
         None => run_gui(),
     }
 }
@@ -305,8 +316,13 @@ fn run_gui() {
 }
 
 /// Launch the interactive winit + egui editor (the default).
+///
+/// `agent_port` starts the in-editor MCP bridge as the window comes up.
+/// The panel can do the same thing with a button, but an agent workflow
+/// starts the editor *in order to* be edited, and having to click first
+/// puts a human step in the middle of something meant to run on its own.
 #[cfg(feature = "gui")]
-fn run_gui() {
+fn run_gui(agent_port: Option<u16>) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
@@ -317,5 +333,6 @@ fn run_gui() {
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = app::App::new();
+    app.start_agent_bridge_at(agent_port);
     event_loop.run_app(&mut app).unwrap();
 }

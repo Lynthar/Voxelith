@@ -8,6 +8,7 @@ pub use panels::{ConfirmPrompt, ExportReport, UiAction, UiState};
 
 use crate::ai::AiJobState;
 use crate::editor::{Axis, Editor, Quarter, Tool};
+use crate::mcp::bridge::{Approval, DEFAULT_PORT};
 use crate::procgen::{
     CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind,
     PerlinTerrain, PipelineGraph, WfcGenerator, WfcTileset,
@@ -164,6 +165,29 @@ pub struct Ui {
     /// MagicaVoxel stands upright when this is on; turn it off for a
     /// `.vox` already authored Y-up.
     pub convert_vox_axes: bool,
+
+    /// Mirror of the in-editor MCP bridge's state, synced each frame the
+    /// same way `ai_job` is.
+    pub agent: AgentView,
+}
+
+/// What the Agent panel and its approval strip draw from.
+///
+/// The bridge itself lives on `App` — a listening socket, a channel and
+/// possibly a batch parked mid-call — and none of that belongs on the UI
+/// side of the line. This is the display-ready summary App mirrors
+/// across each frame, the same shape `ai_job` and `has_clipboard` take.
+#[derive(Debug, Clone, Default)]
+pub struct AgentView {
+    /// The URL to hand a client, while the bridge is listening.
+    pub url: Option<String>,
+    pub approval: Approval,
+    /// Batches committed since it came up — the panel's evidence that
+    /// something is happening on the other end.
+    pub applied: usize,
+    /// What a batch waiting for approval would do, phrased for the
+    /// person deciding ("writes 240 voxels, clears 18").
+    pub pending: Option<String>,
 }
 
 impl Ui {
@@ -184,6 +208,7 @@ impl Ui {
             ai_job: AiJobState::Idle,
             ai_has_key: false,
             convert_vox_axes: true,
+            agent: AgentView::default(),
         }
     }
 
@@ -203,6 +228,14 @@ impl Ui {
         // shown directly under the menu bar until it's resolved.
         if self.state.disk_conflict.is_some() {
             self.show_disk_conflict_bar(ctx);
+        }
+
+        // An agent's batch is waiting to be approved. Same placement and
+        // the same reasoning as the strip above: a state that lasts, and
+        // that the user has to be able to work around rather than be
+        // trapped by.
+        if self.agent.pending.is_some() {
+            self.show_agent_review_bar(ctx);
         }
 
         // Left side panel with tools
@@ -241,6 +274,11 @@ impl Ui {
         // AI generation panel
         if self.state.panels.show_ai {
             self.show_ai_panel(ctx);
+        }
+
+        // Agent bridge panel
+        if self.state.panels.show_agent {
+            self.show_agent_panel(ctx);
         }
 
         // Help panel
@@ -350,6 +388,156 @@ impl Ui {
                 }
             });
         });
+    }
+
+    /// An agent's batch is on screen as translucent geometry, waiting
+    /// for a yes or no.
+    ///
+    /// A strip and not a modal, and here the reason is sharper than it
+    /// was for the disk-conflict one: the question is about geometry the
+    /// user has to be able to orbit around and look at before answering.
+    /// A modal would cover the very thing it is asking about.
+    fn show_agent_review_bar(&mut self, ctx: &Context) {
+        let Some(summary) = self.agent.pending.clone() else {
+            return;
+        };
+        egui::TopBottomPanel::top("agent_review").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("Agent batch: {summary}.")).strong());
+                ui.label("Shown in the viewport, not applied yet.");
+                if ui
+                    .button("Apply")
+                    .on_hover_text("Commit it. One Ctrl+Z takes the whole batch back out")
+                    .clicked()
+                {
+                    self.state.request(UiAction::AgentAccept);
+                }
+                if ui
+                    .button("Discard")
+                    .on_hover_text("Leave the project as it is, and tell the agent why")
+                    .clicked()
+                {
+                    self.state.request(UiAction::AgentReject);
+                }
+            });
+        });
+    }
+
+    /// The in-editor MCP server: switch it on, hand an agent the URL,
+    /// and decide whether its batches land as they arrive or wait for a
+    /// yes.
+    fn show_agent_panel(&mut self, ctx: &Context) {
+        // Deferred-action pattern (same as `show_ai_panel`): `.open(...)`
+        // borrows `self.state.panels.show_agent` and the closure borrows
+        // other `self.*` fields, so intents are collected into a local
+        // and dispatched after the closure releases the borrow.
+        let mut action: Option<UiAction> = None;
+
+        // An empty field would read as "no port" and leave Start dead
+        // with nothing saying why. Filling it here rather than in
+        // `UiState::default` keeps the default in one place — this panel
+        // is the only thing that has an opinion about it.
+        if self.state.agent_port_input.is_empty() {
+            self.state.agent_port_input = DEFAULT_PORT.to_string();
+        }
+        let agent = &self.agent;
+        let port = self.state.agent_port_input.parse::<u16>().ok();
+        let port_input = &mut self.state.agent_port_input;
+
+        egui::Window::new("Agent Bridge")
+            .default_pos([ctx.screen_rect().width() / 2.0 - 180.0, 140.0])
+            .default_width(360.0)
+            .open(&mut self.state.panels.show_agent)
+            .show(ctx, |ui| {
+                match &agent.url {
+                    Some(url) => {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(80, 200, 120),
+                                "listening",
+                            );
+                            if ui
+                                .button("Stop")
+                                .on_hover_text("Close the socket. Anything waiting is told why")
+                                .clicked()
+                            {
+                                action = Some(UiAction::AgentStop);
+                            }
+                        });
+                        ui.label("Point an MCP client at:");
+                        ui.monospace(url);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "claude mcp add --transport http voxelith {url}"
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                        ui.label(format!(
+                            "{} batch{} applied since it started",
+                            agent.applied,
+                            if agent.applied == 1 { "" } else { "es" }
+                        ));
+                    }
+                    None => {
+                        ui.label("Let an agent edit this project directly, instead of \
+                                  passing a file back and forth.");
+                        ui.horizontal(|ui| {
+                            ui.label("Port");
+                            ui.add(
+                                egui::TextEdit::singleline(port_input)
+                                    .desired_width(64.0)
+                                    .hint_text("8737"),
+                            );
+                            if ui
+                                .add_enabled(port.is_some(), egui::Button::new("Start"))
+                                .on_hover_text(
+                                    "Serve MCP on 127.0.0.1 — this machine only, never the \
+                                     network",
+                                )
+                                .clicked()
+                            {
+                                if let Some(port) = port {
+                                    action = Some(UiAction::AgentStart(port));
+                                }
+                            }
+                        });
+                        if port.is_none() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(220, 180, 80),
+                                "Not a port number (0–65535). 0 asks the OS for a free one.",
+                            );
+                        }
+                    }
+                }
+
+                ui.separator();
+                ui.label(egui::RichText::new("When an agent sends a batch").strong());
+                let mut approval = agent.approval;
+                ui.radio_value(&mut approval, Approval::Auto, Approval::Auto.label())
+                    .on_hover_text(
+                        "It lands as it arrives and you watch it happen. Ctrl+Z takes any \
+                         step back out — an agent's edits go on your undo stack, not a \
+                         separate one.",
+                    );
+                ui.radio_value(&mut approval, Approval::Review, Approval::Review.label())
+                    .on_hover_text(
+                        "It goes up as translucent geometry and the agent waits until you \
+                         apply or discard it.",
+                    );
+                if approval != agent.approval {
+                    action = Some(UiAction::AgentApproval(approval));
+                }
+
+                if let Some(pending) = &agent.pending {
+                    ui.separator();
+                    ui.label(format!("Waiting on you: {pending}"));
+                }
+            });
+
+        if let Some(action) = action {
+            self.state.request(action);
+        }
     }
 
     /// Confirmation for an action that can't be undone. Accepting
@@ -875,6 +1063,7 @@ impl Ui {
                     ui.checkbox(&mut self.state.panels.show_procgen, "Procedural Generation");
                     ui.checkbox(&mut self.state.panels.show_graph, "Pipeline Graph");
                     ui.checkbox(&mut self.state.panels.show_ai, "AI Generation");
+                    ui.checkbox(&mut self.state.panels.show_agent, "Agent Bridge");
                     ui.separator();
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");

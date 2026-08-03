@@ -27,6 +27,10 @@ impl App {
         // panel reads them off `Ui` without needing a borrow back.
         self.ui.ai_job = self.ai_job.clone();
         self.ui.ai_has_key = self.ai_has_key;
+        // Ditto for the agent bridge: a listening socket, a channel and
+        // possibly a batch parked mid-call, condensed to what the panel
+        // draws.
+        self.ui.agent = self.agent_view();
         // Ditto for GPU wireframe support, so the wireframe toggles can
         // gray themselves out instead of silently doing nothing.
         self.ui.wireframe_supported = self

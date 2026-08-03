@@ -25,7 +25,9 @@
 //!    inside a batch.
 //! 3. **One undo entry per batch.** The accumulated changes commit as a
 //!    single [`Command::set_voxels`], so a human at the editor undoes an
-//!    agent's whole step with one Ctrl+Z.
+//!    agent's whole step with one Ctrl+Z — and when the editor is the
+//!    one hosting the agent, that is literally the same undo stack their
+//!    own brush strokes push onto (see [`BatchOutcome`]).
 //!
 //! Errors are the product here as much as the edits are: every failure
 //! carries the offending `op_index`, a stable machine-readable
@@ -41,14 +43,16 @@
 use serde::Serialize;
 
 use crate::core::World;
-use crate::editor::{Command, CommandHistory, Selection, Socket};
+use crate::editor::{Command, CommandHistory, Selection, Socket, VoxelChange};
 
 mod compile;
 mod describe;
 mod registry;
 mod schema;
 
-pub use describe::{ColorCount, Description, SliceMode, SliceRequest, SocketInfo};
+pub use describe::{
+    describe, slice, ColorCount, Description, DocumentView, SliceMode, SliceRequest, SocketInfo,
+};
 pub use registry::{generator_infos, GeneratorInfo};
 pub use schema::{
     Aabb, AxisSpec, BatchOptions, Op, OpsBatch, SolidVoxel, VoxelEntry, VoxelSpec, WriteMode,
@@ -231,6 +235,92 @@ pub struct Preview {
     pub session: AgentSession,
 }
 
+/// A batch that has run, handed back for its caller to commit or throw
+/// away.
+///
+/// [`AgentSession`] is one shape of host: it owns its world and commits
+/// into its own history, which is all a headless run needs. The editor
+/// is the other shape, and the difference is whose undo stack it is —
+/// there the world and the history belong to the *user*, so an agent's
+/// batch has to arrive as a change list the editor commits through the
+/// same `CommandHistory` its own brush strokes go through. One stack,
+/// one Ctrl+Z, no reconciliation between an agent's history and a
+/// human's; the alternative is two stacks that undo past each other.
+///
+/// Both hosts get here through [`run_batch`], so neither can drift into
+/// validating differently or reporting differently than the other.
+pub struct BatchOutcome {
+    pub report: ApplyReport,
+    /// Cells whose value actually changed, ready to become one
+    /// [`Command::set_voxels`] — already de-duplicated by position,
+    /// identity writes dropped, and sorted, so a caller can commit it
+    /// as-is.
+    pub changes: Vec<VoxelChange>,
+    /// The selection after the last op, which is *not* undo-stack data
+    /// on either host — a caller that commits `changes` assigns this
+    /// alongside it, and one that discards them leaves its own alone.
+    pub selection: Option<Selection>,
+    /// The world the batch produced. A caller that commits ignores it
+    /// (`changes` is the same edit, without replacing the world the
+    /// renderer already has meshes for); one that only wants a look —
+    /// a dry run, or an edit awaiting a human's approval — describes,
+    /// slices or renders *this* rather than predicting from the report.
+    pub world: World,
+}
+
+/// Validate a batch and run it against a copy of `world`, committing
+/// nothing.
+///
+/// The single execution path. Every entry point above this layer — the
+/// CLI, the MCP server, the editor's own agent bridge — comes through
+/// here, which is what makes a preview and a real run incapable of
+/// disagreeing: they are the same run, and only the caller's decision
+/// afterwards differs.
+pub fn run_batch(
+    world: &World,
+    selection: Option<Selection>,
+    batch: &OpsBatch,
+) -> Result<BatchOutcome, OpsError> {
+    if batch.version != SCHEMA_VERSION {
+        return Err(OpsError::new(
+            ErrorCode::UnsupportedVersion,
+            format!(
+                "ops version {} is not supported; this build speaks version {}",
+                batch.version, SCHEMA_VERSION
+            ),
+        ));
+    }
+    if batch.ops.is_empty() {
+        return Err(OpsError::new(
+            ErrorCode::InvalidArgument,
+            "`ops` is empty; a batch must carry at least one op",
+        ));
+    }
+    if batch.ops.len() > MAX_OPS_PER_BATCH {
+        return Err(OpsError::new(
+            ErrorCode::TooManyOps,
+            format!(
+                "{} ops in one batch; at most {} are allowed — split it",
+                batch.ops.len(),
+                MAX_OPS_PER_BATCH
+            ),
+        ));
+    }
+
+    let mut scratch = compile::Scratch::new(world, selection);
+    for (index, op) in batch.ops.iter().enumerate() {
+        scratch.run_op(index, op).map_err(|e| e.at(index))?;
+    }
+    let mut outcome = scratch.finish();
+    let report = report_of(batch.options.dry_run, batch.ops.len(), &mut outcome);
+    Ok(BatchOutcome {
+        report,
+        changes: outcome.changes,
+        selection: outcome.selection,
+        world: outcome.world,
+    })
+}
+
 /// A headless editing session: the document an agent operates on.
 ///
 /// Fields are public because the consumers above this layer (the CLI in
@@ -268,8 +358,7 @@ impl AgentSession {
     /// applied (or, for a dry run, would have been); on failure nothing
     /// changed.
     pub fn apply_ops(&mut self, batch: &OpsBatch) -> Result<ApplyReport, OpsError> {
-        let mut outcome = self.run(batch)?;
-        let report = report_of(batch.options.dry_run, batch.ops.len(), &mut outcome);
+        let outcome = run_batch(&self.world, self.selection, batch)?;
 
         if !batch.options.dry_run {
             // One command for the whole batch: one undo entry, and a
@@ -279,21 +368,23 @@ impl AgentSession {
                 .execute(Command::set_voxels(outcome.changes), &mut self.world);
             self.selection = outcome.selection;
         }
-        Ok(report)
+        Ok(outcome.report)
     }
 
     /// Run a batch and hand back the result instead of committing it.
     ///
     /// Same validation, same executor, same report as [`apply_ops`] —
-    /// they share [`run`](Self::run) precisely so a preview and the real
+    /// they share [`run_batch`] precisely so a preview and the real
     /// thing can't drift apart — but the session is left untouched and
     /// the resulting world comes back inside a [`Preview`] to be looked
     /// at.
     pub fn preview_ops(&self, batch: &OpsBatch) -> Result<Preview, OpsError> {
-        let mut outcome = self.run(batch)?;
-        let report = report_of(true, batch.ops.len(), &mut outcome);
+        let mut outcome = run_batch(&self.world, self.selection, batch)?;
+        // Nothing was committed, whatever the batch asked for. A batch
+        // sent here without `dry_run` set is still only being looked at.
+        outcome.report.dry_run = true;
         Ok(Preview {
-            report,
+            report: outcome.report,
             session: AgentSession {
                 world: outcome.world,
                 history: CommandHistory::new(HISTORY_DEPTH),
@@ -303,47 +394,22 @@ impl AgentSession {
         })
     }
 
-    /// Envelope checks, then every op against a scratch copy of the
-    /// world. The one execution path, shared by the real run and the
-    /// preview.
-    fn run(&self, batch: &OpsBatch) -> Result<compile::Outcome, OpsError> {
-        if batch.version != SCHEMA_VERSION {
-            return Err(OpsError::new(
-                ErrorCode::UnsupportedVersion,
-                format!(
-                    "ops version {} is not supported; this build speaks version {}",
-                    batch.version, SCHEMA_VERSION
-                ),
-            ));
+    /// This session's four parts, borrowed as the shape the description
+    /// and slice helpers take.
+    pub fn view(&self) -> DocumentView<'_> {
+        DocumentView {
+            world: &self.world,
+            selection: self.selection,
+            sockets: &self.sockets,
+            undo_depth: self.history.undo_count(),
+            redo_depth: self.history.redo_count(),
         }
-        if batch.ops.is_empty() {
-            return Err(OpsError::new(
-                ErrorCode::InvalidArgument,
-                "`ops` is empty; a batch must carry at least one op",
-            ));
-        }
-        if batch.ops.len() > MAX_OPS_PER_BATCH {
-            return Err(OpsError::new(
-                ErrorCode::TooManyOps,
-                format!(
-                    "{} ops in one batch; at most {} are allowed — split it",
-                    batch.ops.len(),
-                    MAX_OPS_PER_BATCH
-                ),
-            ));
-        }
-
-        let mut scratch = compile::Scratch::new(&self.world, self.selection);
-        for (index, op) in batch.ops.iter().enumerate() {
-            scratch.run_op(index, op).map_err(|e| e.at(index))?;
-        }
-        Ok(scratch.finish())
     }
 
     /// Text summary of the document — the agent's cheapest look at what
     /// it just built.
     pub fn describe(&self) -> Description {
-        describe::describe(self)
+        describe::describe(self.view())
     }
 
     /// One axis-aligned plane as ASCII art.
@@ -373,5 +439,91 @@ fn report_of(dry_run: bool, applied_ops: usize, outcome: &mut compile::Outcome) 
         world_aabb: outcome.world_aabb,
         selection: outcome.selection.map(Aabb::from),
         notes: std::mem::take(&mut outcome.notes),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::World;
+
+    fn parse(json: &str) -> OpsBatch {
+        serde_json::from_str(json).expect("test batch should parse")
+    }
+
+    /// Two ops, the second reading the first's output — enough that a
+    /// host which validated or executed differently would show it.
+    const BATCH: &str = r#"{"version":1,"ops":[
+        {"op":"box","min":[0,0,0],"max":[4,4,4],"voxel":{"rgb":[120,90,60]}},
+        {"op":"hollow","min":[0,0,0],"max":[4,4,4]}
+    ]}"#;
+
+    /// The editor's half of the contract: an agent's batch arrives as a
+    /// change list, the *user's* `CommandHistory` commits it, and the
+    /// world that lands is the one the agent's own session would have
+    /// built. This is what "one undo stack" costs — without it the
+    /// editor would need a second history beside the user's, and the two
+    /// would undo past each other.
+    #[test]
+    fn a_foreign_history_commits_the_world_the_session_would_have() {
+        let batch = parse(BATCH);
+
+        // The headless host: the session owns world and history both.
+        let mut session = AgentSession::new();
+        let session_report = session.apply_ops(&batch).expect("batch should apply");
+
+        // The editor host: both belong to the user, and `run_batch` is
+        // all it needs from this layer.
+        let mut world = World::new();
+        let mut history = CommandHistory::new(HISTORY_DEPTH);
+        let outcome = run_batch(&world, None, &batch).expect("batch should run");
+        history.execute(Command::set_voxels(outcome.changes), &mut world);
+
+        assert_eq!(outcome.report.changed_voxels, session_report.changed_voxels);
+        assert_eq!(outcome.report.world_aabb, session_report.world_aabb);
+        assert_eq!(outcome.report.voxel_count, session_report.voxel_count);
+        for (x, y, z) in [(0, 0, 0), (2, 2, 0), (2, 2, 2), (4, 4, 4)] {
+            assert_eq!(
+                world.get_voxel(x, y, z),
+                session.world.get_voxel(x, y, z),
+                "cell ({x},{y},{z}) differs between the two hosts"
+            );
+        }
+
+        // One entry for the batch, so one Ctrl+Z takes all of it back
+        // out — the same guarantee the session gives, on the user's own
+        // stack.
+        assert_eq!(history.undo_count(), 1);
+        assert!(history.undo(&mut world));
+        assert!(
+            world.get_voxel(2, 2, 0).is_air(),
+            "undo must take the whole batch back out"
+        );
+    }
+
+    /// Nothing is committed until the caller says so — the property the
+    /// editor's approval mode rests on, since a batch awaiting a human's
+    /// yes must not already be in their world.
+    #[test]
+    fn run_batch_leaves_its_input_world_alone() {
+        let world = World::new();
+        let outcome = run_batch(&world, None, &parse(BATCH)).expect("batch should run");
+        assert!(outcome.report.voxel_count > 0, "the batch built something");
+        assert_eq!(
+            world.chunk_count(),
+            0,
+            "the caller's world must stay untouched until it commits"
+        );
+    }
+
+    /// A preview commits nothing whatever the batch asked for, so its
+    /// report has to say `dry_run` even when the batch didn't set it —
+    /// otherwise the editor's approval path would hand an agent a report
+    /// claiming an edit landed while it was still waiting for a human.
+    #[test]
+    fn a_preview_reports_a_dry_run_the_batch_never_asked_for() {
+        let session = AgentSession::new();
+        let preview = session.preview_ops(&parse(BATCH)).expect("batch should run");
+        assert!(preview.report.dry_run);
     }
 }

@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::core::World;
-use crate::editor::Selection;
+use crate::editor::{Selection, Socket};
 
 use super::schema::{Aabb, AxisSpec};
-use super::{AgentSession, ErrorCode, OpsError};
+use super::{ErrorCode, OpsError};
 
 /// Distinct colors reported exactly; the rest are summarized. Sixteen
 /// covers a hand-built palette without letting a photo-derived import
@@ -99,8 +99,25 @@ pub(super) fn solid_voxel_count(world: &World) -> u64 {
         .sum()
 }
 
-pub(super) fn describe(session: &AgentSession) -> Description {
-    let world = &session.world;
+/// The parts of a document a description is built from, borrowed from
+/// whoever owns them.
+///
+/// [`AgentSession`](super::AgentSession) keeps all four together; the
+/// editor keeps them on three different structs, because a selection and
+/// an undo stack were its own long before an agent had any use for them.
+/// Describing takes a view rather than a session so neither host has to
+/// pretend to be the other — the same reason
+/// [`run_batch`](super::run_batch) takes a world instead of owning one.
+pub struct DocumentView<'a> {
+    pub world: &'a World,
+    pub selection: Option<Selection>,
+    pub sockets: &'a [Socket],
+    pub undo_depth: usize,
+    pub redo_depth: usize,
+}
+
+pub fn describe(view: DocumentView<'_>) -> Description {
+    let world = view.world;
     let mut histogram: HashMap<[u8; 3], u64> = HashMap::new();
     let mut voxel_count = 0u64;
     let mut emissive = 0u64;
@@ -150,7 +167,7 @@ pub(super) fn describe(session: &AgentSession) -> Description {
         emissive,
         metallic,
         tint_zones,
-        sockets: session
+        sockets: view
             .sockets
             .iter()
             .map(|socket| SocketInfo {
@@ -159,13 +176,13 @@ pub(super) fn describe(session: &AgentSession) -> Description {
                 normal: socket.normal,
             })
             .collect(),
-        selection: session.selection.map(Aabb::from),
-        undo_depth: session.history.undo_count(),
-        redo_depth: session.history.redo_count(),
+        selection: view.selection.map(Aabb::from),
+        undo_depth: view.undo_depth,
+        redo_depth: view.redo_depth,
     }
 }
 
-pub(super) fn slice(world: &World, request: &SliceRequest) -> Result<String, OpsError> {
+pub fn slice(world: &World, request: &SliceRequest) -> Result<String, OpsError> {
     let region = match request.region {
         Some(aabb) => aabb.to_selection(),
         None => match world.scene_aabb() {
