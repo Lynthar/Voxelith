@@ -56,6 +56,7 @@ cargo run --release -- bake assets/spec.json
 # JSON edit protocol: apply a batch, read the report, look at a slice.
 cargo run --release -- exec ops.json --out hut.vxlt --describe
 cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
+cargo run --release -- render hut.vxlt --view all   # see it: CPU raycast PNGs, no GPU
 cargo run --release -- generators        # what `generate` can call
 
 # Or serve the same primitives over the Model Context Protocol, holding

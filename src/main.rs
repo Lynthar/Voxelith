@@ -85,6 +85,23 @@ enum Commands {
         checkpoint: bool,
     },
 
+    /// Draw a project as PNG images — the agent's eye (headless, no GPU).
+    Render {
+        /// Project to draw (`.vxlt`).
+        project: PathBuf,
+        /// Comma-separated viewpoints, or `all` for the full sweep:
+        /// iso, front, back, left, right, top, bottom.
+        #[arg(long, default_value = "iso")]
+        view: String,
+        /// Image edge in pixels (max 1024).
+        #[arg(long, default_value_t = voxelith::view::DEFAULT_SIZE)]
+        size: u32,
+        /// Where to write. With one view this is the file; with several,
+        /// the images land beside it as `<stem>-<view>.png`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+
     /// Describe a project without changing it (headless, JSON on stdout).
     Inspect {
         /// Project to read (`.vxlt`).
@@ -123,6 +140,12 @@ fn main() {
             http,
             checkpoint,
         }) => run_mcp(root, http, checkpoint),
+        Some(Commands::Render {
+            project,
+            view,
+            size,
+            out,
+        }) => run_render(project, &view, size, out),
         Some(Commands::Inspect { project, slice }) => run_exec(voxelith::exec::ExecRequest {
             input: Some(project),
             describe: true,
@@ -145,6 +168,32 @@ fn run_exec(request: voxelith::exec::ExecRequest) {
         Err(error) => {
             // The failure envelope goes to stdout too: one stream to
             // parse, whichever way the run went.
+            println!("{}", error.to_json());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Draw a project. Same stdout contract as `run_exec` — the report is
+/// JSON and the images are files.
+fn run_render(project: PathBuf, views: &str, size: u32, out: Option<PathBuf>) {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp(None)
+        .init();
+
+    // A bad view name and a failed render report through the same
+    // envelope, so the caller parses one shape either way.
+    let rendered = voxelith::exec::parse_views(views).and_then(|views| {
+        voxelith::exec::run_render(&voxelith::exec::RenderRequest {
+            project,
+            views,
+            size,
+            out,
+        })
+    });
+    match rendered {
+        Ok(outcome) => println!("{}", outcome.to_json()),
+        Err(error) => {
             println!("{}", error.to_json());
             std::process::exit(1);
         }

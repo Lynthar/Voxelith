@@ -23,6 +23,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use parking_lot::Mutex;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -35,6 +36,7 @@ use serde::Serialize;
 use crate::agent_ops::{AgentSession, ApplyReport, Description, OpsBatch, SliceRequest};
 use crate::exec::{self, ExecError, ExportInfo};
 use crate::io::EditorState;
+use crate::view;
 
 mod paths;
 
@@ -110,7 +112,7 @@ pub struct VoxelithMcp {
     checkpoint: Checkpoint,
     /// Built once and pointed at explicitly below. Left to its default,
     /// `#[tool_handler]` calls `Self::tool_router()` on every request,
-    /// which regenerates all ten tools' JSON schemas — including the
+    /// which regenerates every tool's JSON schema — including the
     /// whole ops union — to answer a single call.
     tool_router: ToolRouter<VoxelithMcp>,
 }
@@ -392,6 +394,54 @@ impl VoxelithMcp {
     }
 
     #[tool(
+        description = "Look at the current document: renders it as images and returns \
+                       them inline. Defaults to one isometric view, which shows all \
+                       three dimensions at once; ask for axis views (front, back, left, \
+                       right, top, bottom, or all) when you need to check one side \
+                       square-on. 256 pixels reads a silhouette and its colors fine — a \
+                       seven-view sweep at 1024 costs a lot of tokens for detail a voxel \
+                       model rarely has. Each image comes with the cell bounds it covers \
+                       and the cells-per-pixel, so a measurement off the picture converts \
+                       back to coordinates."
+    )]
+    fn render_views(
+        &self,
+        Parameters(args): Parameters<RenderArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let size = args.size.unwrap_or(view::DEFAULT_SIZE);
+        let views = match args.views.is_empty() {
+            true => vec![view::ViewKind::Iso],
+            false => args.views,
+        };
+        let document = self.document.lock();
+
+        // One text block then one image per view, rather than a summary
+        // followed by a pile of pictures: the caption has to sit next to
+        // the image it describes, or six views come back as six images
+        // an agent has to count to identify.
+        let mut blocks = Vec::with_capacity(views.len() * 2);
+        for kind in views {
+            let view = match view::render(&document.session.world, kind, size) {
+                Ok(view) => view,
+                Err(e) => return refused(&ExecError::new("invalid_size", e.to_string())),
+            };
+            let caption = serde_json::to_string_pretty(&Rendered {
+                view: kind.as_str(),
+                size: view.size,
+                framing: &view.framing,
+                empty: view.empty,
+            })
+            .map_err(|e| McpError::internal_error(format!("could not describe the view: {e}"), None))?;
+            blocks.push(ContentBlock::text(caption));
+            blocks.push(ContentBlock::image(
+                base64::engine::general_purpose::STANDARD.encode(&view.png),
+                "image/png",
+            ));
+        }
+        Ok(CallToolResult::success(blocks))
+    }
+
+    #[tool(
         description = "Export the current document as a mesh or voxel file. The format \
                        comes from the extension: .glb, .obj or .vox. This is the \
                        interactive File > Export, headless — for engine-ready placement \
@@ -434,8 +484,9 @@ impl ServerHandler for VoxelithMcp {
             .with_instructions(
                 "Voxelith builds voxel models. One document stays open across calls, so \
                  undo, the selection and unsaved edits persist between tools.\n\n\
-                 The loop is: apply_ops -> read the report -> slice or describe to check \
-                 -> repeat, then save_project and export.\n\n\
+                 The loop is: apply_ops -> render_views to see what you built -> fix it \
+                 -> repeat, then save_project and export. describe and slice answer the \
+                 questions a picture can't: exact counts, exact coordinates.\n\n\
                  Coordinates are integer cells, Y is up, and every region is inclusive on \
                  both ends: min [0,0,0] max [1,1,1] is 8 cells. There is no separate \
                  erase, paint or fill op — \"voxel\": \"air\" erases, write_mode \
@@ -455,6 +506,16 @@ pub struct PathArgs {
     /// Path to the file, relative to the server root or absolute inside
     /// it.
     pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RenderArgs {
+    /// Which viewpoints to draw. Empty means one isometric view.
+    #[serde(default)]
+    pub views: Vec<view::ViewKind>,
+    /// Image edge in pixels, 1..=1024. Omit for 256.
+    #[serde(default)]
+    pub size: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -530,6 +591,18 @@ struct Stepped {
 #[derive(Serialize)]
 struct Exported {
     exported: ExportInfo,
+}
+
+/// The caption printed beside each rendered image: which view it is and
+/// what it covers, so a distance measured in pixels converts back to
+/// cells.
+#[derive(Serialize)]
+struct Rendered<'a> {
+    view: &'static str,
+    size: u32,
+    framing: &'a view::Framing,
+    /// The document held no voxels — the image is all background.
+    empty: bool,
 }
 
 // ---- transports ----
@@ -852,6 +925,111 @@ mod tests {
             "a plain server must not add a field an agent has to reason about"
         );
         assert_eq!(voxels_on_disk(&project), 0, "the file is the agent's to save");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_render_comes_back_as_an_image_beside_the_numbers_to_read_it_with() {
+        // The agent's eye. A picture alone can show that the door is too
+        // high; the framing beside it is what turns that into "by one
+        // cell", so the two travel together.
+        let dir = scratch("render");
+        let server = server(&dir);
+        server.apply_ops(batch(HUT)).unwrap();
+
+        let result = server
+            .render_views(Parameters(RenderArgs {
+                views: vec![view::ViewKind::Front, view::ViewKind::Top],
+                size: Some(64),
+            }))
+            .unwrap();
+
+        // Caption, image, caption, image — in the order asked for.
+        assert_eq!(result.content.len(), 4, "one caption and one image per view");
+        for (at, expected) in [(0, "front"), (2, "top")] {
+            let caption: serde_json::Value = match &result.content[at] {
+                ContentBlock::Text(text) => serde_json::from_str(&text.text).unwrap(),
+                other => panic!("expected a caption, got {other:?}"),
+            };
+            assert_eq!(caption["view"], serde_json::json!(expected));
+            assert_eq!(caption["size"], serde_json::json!(64));
+            assert!(caption["framing"]["cells_per_pixel"].as_f64().unwrap() > 0.0);
+            assert!(caption["framing"]["bounds"].is_array());
+
+            let image = match &result.content[at + 1] {
+                ContentBlock::Image(image) => image,
+                other => panic!("expected an image, got {other:?}"),
+            };
+            assert_eq!(image.mime_type, "image/png");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&image.data)
+                .expect("the payload must be base64");
+            assert_eq!(&bytes[1..4], b"PNG", "and it must actually be a PNG");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rendering_defaults_to_one_isometric_view() {
+        // The default has to be the view that shows all three dimensions
+        // — an agent that just says "show me" should not get a
+        // projection that hides a whole axis.
+        let dir = scratch("render_default");
+        let server = server(&dir);
+        server.apply_ops(batch(HUT)).unwrap();
+
+        let result = server
+            .render_views(Parameters(RenderArgs {
+                views: Vec::new(),
+                size: None,
+            }))
+            .unwrap();
+        assert_eq!(result.content.len(), 2);
+        let caption: serde_json::Value = match &result.content[0] {
+            ContentBlock::Text(text) => serde_json::from_str(&text.text).unwrap(),
+            other => panic!("expected a caption, got {other:?}"),
+        };
+        assert_eq!(caption["view"], serde_json::json!("iso"));
+        assert_eq!(caption["size"], serde_json::json!(view::DEFAULT_SIZE));
+        assert_eq!(caption["empty"], serde_json::json!(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_document_renders_but_says_it_was_empty() {
+        let dir = scratch("render_empty");
+        let server = server(&dir);
+        let result = server
+            .render_views(Parameters(RenderArgs {
+                views: Vec::new(),
+                size: Some(32),
+            }))
+            .unwrap();
+        let caption: serde_json::Value = match &result.content[0] {
+            ContentBlock::Text(text) => serde_json::from_str(&text.text).unwrap(),
+            other => panic!("expected a caption, got {other:?}"),
+        };
+        assert_eq!(caption["empty"], serde_json::json!(true));
+        assert!(caption["framing"]["bounds"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_impossible_size_is_refused_with_a_readable_reason() {
+        let dir = scratch("render_size");
+        let server = server(&dir);
+        let result = server
+            .render_views(Parameters(RenderArgs {
+                views: Vec::new(),
+                size: Some(view::MAX_SIZE + 1),
+            }))
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(body(&result)["error"]["code"], serde_json::json!("invalid_size"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

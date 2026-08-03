@@ -31,6 +31,12 @@ pub mod editor;
 pub mod io;
 pub mod procgen;
 
+// CPU ray-cast views of a world. Sits below the agent front ends and
+// beside `mesh` rather than inside `render`: it needs no GPU and no
+// window, which is the whole point — an agent runs where there is
+// neither.
+pub mod view;
+
 // The MCP server. Gated because it carries rmcp + schemars, which a
 // build that only ever runs `bake` or `exec` has no use for.
 #[cfg(feature = "mcp")]

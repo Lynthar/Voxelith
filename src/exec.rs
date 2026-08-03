@@ -36,6 +36,7 @@ use serde::Serialize;
 use crate::agent_ops::{AgentSession, ApplyReport, Description, OpsBatch, OpsError, SliceRequest};
 use crate::editor::Socket;
 use crate::io::{self, EditorState, SocketData, SocketNode};
+use crate::view::{self, ViewKind};
 
 /// One invocation's inputs. `ops`-less requests are read-only, which is
 /// what `voxelith inspect` is.
@@ -132,12 +133,14 @@ impl std::fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
-/// `{"ok": true, …outcome}` — the success envelope.
+/// `{"ok": true, …outcome}` — the success envelope. Generic so every
+/// subcommand's outcome wears the same one; an agent branches on `ok`
+/// without caring which command it ran.
 #[derive(Serialize)]
-struct OkEnvelope<'a> {
+struct OkEnvelope<'a, T> {
     ok: bool,
     #[serde(flatten)]
-    outcome: &'a ExecOutcome,
+    outcome: &'a T,
 }
 
 /// `{"ok": false, "error": {…}}` — the failure envelope.
@@ -150,6 +153,18 @@ struct ErrEnvelope<'a> {
 impl ExecOutcome {
     /// The exact bytes the binary prints. Lives here so `main.rs` stays
     /// presentation-free, the same split `bake::BakeOutcome` uses.
+    pub fn to_json(&self) -> String {
+        let envelope = OkEnvelope {
+            ok: true,
+            outcome: self,
+        };
+        serde_json::to_string_pretty(&envelope).expect("the outcome must serialize")
+    }
+}
+
+impl RenderOutcome {
+    /// Same envelope and the same stdout contract as `ExecOutcome` — the
+    /// PNGs go to files, the report goes here.
     pub fn to_json(&self) -> String {
         let envelope = OkEnvelope {
             ok: true,
@@ -334,6 +349,105 @@ pub(crate) fn save_project(
         )
     })?;
     Ok(path.display().to_string())
+}
+
+/// One `voxelith render` invocation.
+#[derive(Debug, Clone)]
+pub struct RenderRequest {
+    /// `.vxlt` to draw.
+    pub project: PathBuf,
+    /// Which viewpoints. Empty is rejected rather than defaulted — the
+    /// caller decides, and `main` supplies the default.
+    pub views: Vec<ViewKind>,
+    /// Image edge in pixels; see [`view::MAX_SIZE`].
+    pub size: u32,
+    /// Where to write. With exactly one view this is the file. With
+    /// several — or none given — the images land beside the project as
+    /// `<stem>-<view>.png`, since one path can't name six files.
+    pub out: Option<PathBuf>,
+}
+
+/// What a render run produced, one entry per view.
+#[derive(Debug, Serialize)]
+pub struct RenderOutcome {
+    pub views: Vec<RenderedInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenderedInfo {
+    pub view: &'static str,
+    pub path: String,
+    pub size: u32,
+    pub bytes: u64,
+    /// What the image covers, so a pixel can be turned back into cells.
+    pub framing: view::Framing,
+    /// True when the project held no voxels — the image is all
+    /// background, and saying so beats letting the agent conclude its
+    /// model disappeared.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub empty: bool,
+}
+
+/// Turn a `--view` spec (`"iso"`, `"front,top"`, `"all"`) into
+/// viewpoints.
+///
+/// Here rather than in `main` so the binary never constructs an
+/// `ExecError`: the stable error codes are this layer's vocabulary, and
+/// a second place minting them is how two spellings of the same failure
+/// get shipped.
+pub fn parse_views(spec: &str) -> Result<Vec<ViewKind>, ExecError> {
+    ViewKind::parse_list(spec).map_err(|message| ExecError::new("unknown_view", message))
+}
+
+/// Draw one or more views of a project and write them as PNG files.
+///
+/// The CLI half of [`crate::view`]. Over MCP the same renders come back
+/// inline as image content; here they're files, because a shell agent
+/// reads a picture by opening it.
+pub fn run_render(request: &RenderRequest) -> Result<RenderOutcome, ExecError> {
+    if request.views.is_empty() {
+        return Err(ExecError::new(
+            "no_views",
+            "name at least one view: iso, front, back, left, right, top, bottom — or all",
+        ));
+    }
+    let (session, _) = open_session(Some(&request.project))?;
+
+    let single = request.views.len() == 1;
+    let mut rendered = Vec::with_capacity(request.views.len());
+    for kind in &request.views {
+        let view = view::render(&session.world, *kind, request.size)
+            .map_err(|e| ExecError::new("invalid_size", e.to_string()))?;
+        let path = match (&request.out, single) {
+            (Some(out), true) => out.clone(),
+            _ => image_path(request.out.as_deref().unwrap_or(&request.project), *kind),
+        };
+        std::fs::write(&path, &view.png).map_err(|e| {
+            ExecError::new(
+                "render_failed",
+                format!("could not write {}: {e}", path.display()),
+            )
+        })?;
+        rendered.push(RenderedInfo {
+            view: kind.as_str(),
+            path: path.display().to_string(),
+            size: view.size,
+            bytes: view.png.len() as u64,
+            framing: view.framing,
+            empty: view.empty,
+        });
+    }
+    Ok(RenderOutcome { views: rendered })
+}
+
+/// `<stem>-<view>.png` next to `base` — the naming that lets a sweep of
+/// all seven views land in one directory without colliding.
+fn image_path(base: &Path, kind: ViewKind) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "view".to_string());
+    base.with_file_name(format!("{stem}-{}.png", kind.as_str()))
 }
 
 pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportInfo, ExecError> {

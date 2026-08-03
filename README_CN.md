@@ -56,6 +56,7 @@ cargo run --release -- bake assets/spec.json
 # 提交一批操作,读报告,看切片。
 cargo run --release -- exec ops.json --out hut.vxlt --describe
 cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
+cargo run --release -- render hut.vxlt --view all   # 看一眼:CPU 光线投射出图,不用 GPU
 cargo run --release -- generators        # generate op 能调用哪些生成器
 
 # 或者把同一套原语挂到 Model Context Protocol 上,一份文档跨调用常驻

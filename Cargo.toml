@@ -32,7 +32,7 @@ gui = [
 # over MCP the schema is the only place an agent can learn the ops format,
 # so a hand-written one would be exactly the drift the generator registry
 # exists to avoid. Off, the derives vanish and `agent_ops` is untouched.
-mcp = ["dep:rmcp", "dep:schemars"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:base64"]
 
 # Streamable HTTP for the same server (ChatGPT connectors and anything
 # else that wants a URL instead of a child process). Separate because it
@@ -80,6 +80,9 @@ dirs = "5.0"  # Cross-platform user config / cache / data directories
 rmcp = { version = "3.1", optional = true, features = ["transport-io"] }
 schemars = { version = "1.0", optional = true }
 axum = { version = "0.8", optional = true }
+# Only the MCP server needs this: over the protocol an image is a base64
+# string, while `voxelith render` writes the same PNG bytes to a file.
+base64 = { version = "0.22", optional = true }
 
 # Parallelism
 rayon = "1.10"
