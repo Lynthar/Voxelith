@@ -54,6 +54,25 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// The camera pose a project carries, or `None` if it isn't one the
+/// viewport can be pointed with.
+///
+/// A position equal to its target is a degenerate look-at: the view
+/// matrix collapses and the viewport goes blank — no scene, no grid —
+/// while the orbit controller derives yaw / pitch from a zero vector.
+/// `EditorState::default()` no longer produces that, but projects
+/// written before it stopped are on disk already, and a `.vxlt` is an
+/// external file that can hold anything. Non-finite coordinates are
+/// rejected on the same grounds.
+pub(super) fn camera_from_state(state: &io::EditorState) -> Option<(glam::Vec3, glam::Vec3)> {
+    let position = glam::Vec3::from_array(state.camera_position);
+    let target = glam::Vec3::from_array(state.camera_target);
+    let usable = position.is_finite()
+        && target.is_finite()
+        && position.distance_squared(target) > 1e-6;
+    usable.then_some((position, target))
+}
+
 /// Rebuild the live `editor::Socket` list from a loaded `EditorState`.
 /// Inverse of `current_editor_state`'s socket mapping; shared by the
 /// open-project and crash-recovery restore paths.
@@ -229,22 +248,18 @@ impl App {
             .collect();
         self.editor.current_tool = super::tool_from_index(editor_state.selected_tool as u8);
         self.editor.sockets = sockets_from_state(&editor_state);
-        if let Some(renderer) = &mut self.renderer {
-            renderer.camera.position = glam::Vec3::new(
-                editor_state.camera_position[0],
-                editor_state.camera_position[1],
-                editor_state.camera_position[2],
-            );
-            renderer.camera.target = glam::Vec3::new(
-                editor_state.camera_target[0],
-                editor_state.camera_target[1],
-                editor_state.camera_target[2],
-            );
+        let camera = camera_from_state(&editor_state);
+        if let (Some(renderer), Some((position, target))) = (&mut self.renderer, camera) {
+            renderer.camera.position = position;
+            renderer.camera.target = target;
             renderer
                 .camera_controller
                 .sync_orbit_state_from_camera(&renderer.camera);
         }
         self.rebuild_all_meshes();
+        if camera.is_none() {
+            self.recenter_camera_on_scene();
+        }
         self.ui
             .set_status("Recovered unsaved work — use Save As to keep it");
         true
@@ -343,17 +358,12 @@ impl App {
                     super::tool_from_index(editor_state.selected_tool as u8);
                 self.editor.sockets = sockets_from_state(&editor_state);
 
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.camera.position = glam::Vec3::new(
-                        editor_state.camera_position[0],
-                        editor_state.camera_position[1],
-                        editor_state.camera_position[2],
-                    );
-                    renderer.camera.target = glam::Vec3::new(
-                        editor_state.camera_target[0],
-                        editor_state.camera_target[1],
-                        editor_state.camera_target[2],
-                    );
+                let camera = camera_from_state(&editor_state);
+                if let (Some(renderer), Some((position, target))) =
+                    (&mut self.renderer, camera)
+                {
+                    renderer.camera.position = position;
+                    renderer.camera.target = target;
                     // Full sync (yaw / pitch / distance) — setting only
                     // distance here used to leave yaw/pitch stale, so a
                     // post-load scroll or Reset Camera would teleport
@@ -365,6 +375,13 @@ impl App {
                 }
 
                 self.rebuild_all_meshes();
+                // A project with no usable camera of its own — one an
+                // agent built headless — keeps the viewport where it is
+                // and aims it at what was just loaded, rather than
+                // opening on a blank screen.
+                if camera.is_none() {
+                    self.recenter_camera_on_scene();
+                }
                 self.note_project_mtime();
                 self.unsaved_changes = false;
                 self.autosave_pending = false;
@@ -1040,6 +1057,48 @@ mod tests {
         // read a file that is about to be replaced.
         assert_eq!(classify_disk_poll(at(10), None, false), DiskPoll::Ignore);
         assert_eq!(classify_disk_poll(at(10), None, true), DiskPoll::Ignore);
+    }
+
+    #[test]
+    fn a_project_built_headless_opens_with_a_usable_camera() {
+        // `EditorState::default()` is what `exec` and the MCP server
+        // write when they start from an empty world, so this is the
+        // camera every agent-built project arrives with.
+        let (position, target) =
+            camera_from_state(&io::EditorState::default()).expect("must be usable");
+        assert_ne!(position, target, "position == target is a blank viewport");
+        assert_eq!(position.to_array(), io::DEFAULT_CAMERA_POSITION);
+    }
+
+    #[test]
+    fn a_degenerate_camera_is_refused_rather_than_applied() {
+        // Projects written before the default was fixed are on disk, and
+        // a .vxlt is an external file that can hold anything at all.
+        let zeroed = io::EditorState {
+            camera_position: [0.0; 3],
+            camera_target: [0.0; 3],
+            ..Default::default()
+        };
+        assert!(camera_from_state(&zeroed).is_none());
+
+        let not_a_number = io::EditorState {
+            camera_position: [f32::NAN, 20.0, 40.0],
+            camera_target: [0.0; 3],
+            ..Default::default()
+        };
+        assert!(camera_from_state(&not_a_number).is_none());
+    }
+
+    #[test]
+    fn a_real_saved_camera_is_kept_exactly() {
+        let saved = io::EditorState {
+            camera_position: [1.5, -2.0, 3.25],
+            camera_target: [0.0, 4.0, -1.0],
+            ..Default::default()
+        };
+        let (position, target) = camera_from_state(&saved).expect("must be usable");
+        assert_eq!(position.to_array(), [1.5, -2.0, 3.25]);
+        assert_eq!(target.to_array(), [0.0, 4.0, -1.0]);
     }
 
     #[test]

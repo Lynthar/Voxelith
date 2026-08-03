@@ -154,8 +154,11 @@ impl Renderer {
         let line_pipeline = LinePipeline::new(&device, surface_format, &pipeline.camera_bind_group_layout);
 
         // Create camera
+        // The same constant a headless-built project is saved with, so a
+        // scene an agent made opens on the view a new one starts at
+        // rather than somewhere else.
         let camera = Camera::new(
-            glam::Vec3::new(0.0, 20.0, 40.0),
+            glam::Vec3::from_array(crate::io::DEFAULT_CAMERA_POSITION),
             glam::Vec3::ZERO,
             size.width as f32 / size.height as f32,
         );

@@ -78,7 +78,7 @@ impl Default for ProjectMetadata {
 }
 
 /// Editor state that can be saved with the project
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorState {
     /// Camera position
     pub camera_position: [f32; 3],
@@ -111,6 +111,38 @@ pub struct EditorState {
     /// contract as `brush_flags`.
     #[serde(default)]
     pub brush_tint_zone: u8,
+}
+
+/// Where the editor's camera starts on a new scene, so a project built
+/// without one still opens looking at something.
+///
+/// It lives here, below the `gui` feature, because the headless half is
+/// what writes projects that have no camera to save. `Renderer::new`
+/// starts its own camera from this same constant rather than a second
+/// copy of the numbers — the two can't drift.
+pub const DEFAULT_CAMERA_POSITION: [f32; 3] = [0.0, 20.0, 40.0];
+
+impl Default for EditorState {
+    fn default() -> Self {
+        Self {
+            // Not `[0.0; 3]`. A headless tool — `exec` on an empty world,
+            // the MCP server's `new_project` — has no camera of its own
+            // to save, and all-zeros is not "no camera": position equal
+            // to target is a degenerate look-at, which opens in the
+            // editor as a blank viewport with no scene and no grid, and
+            // leaves the orbit controls deriving yaw / pitch from a zero
+            // vector. A project an agent built has to open like any
+            // other.
+            camera_position: DEFAULT_CAMERA_POSITION,
+            camera_target: [0.0; 3],
+            brush_color: Default::default(),
+            palette: Default::default(),
+            selected_tool: Default::default(),
+            sockets: Default::default(),
+            brush_flags: Default::default(),
+            brush_tint_zone: Default::default(),
+        }
+    }
 }
 
 /// Serializable form of an `editor::Socket` (name + position + outward
