@@ -126,6 +126,7 @@ impl App {
                 }
                 UiAction::SaveProject => self.save_project(),
                 UiAction::SaveAs => self.save_project_as(),
+                UiAction::ReloadFromDisk => self.reload_project_from_disk(),
                 UiAction::ImportVox => self.guard_then(PendingAction::ImportVox),
                 UiAction::ExportVox => self.export_vox(),
                 UiAction::ExportObj => self.export_obj(),

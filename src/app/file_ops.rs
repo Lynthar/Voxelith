@@ -471,6 +471,10 @@ impl App {
     /// firing against a path we no longer hold.
     pub(super) fn note_project_mtime(&mut self) {
         self.watched_mtime = self.project_path.as_deref().and_then(file_mtime);
+        // Saving, opening or starting a new project all settle whatever
+        // disagreement the strip was reporting: from here on this editor
+        // and that file agree, or the file isn't ours any more.
+        self.ui.state.disk_conflict = None;
     }
 
     /// Per-frame check for the open project changing underneath us.
@@ -509,11 +513,10 @@ impl App {
                     "{} changed on disk; not reloading over unsaved changes",
                     path.display()
                 );
-                self.ui.set_status(format!(
-                    "{} changed on disk — your unsaved edits are kept; save to \
-                     overwrite it, or reopen it to take theirs",
-                    file_label(&path)
-                ));
+                // The strip, not just a status line: the refusal holds
+                // for every later write too, so the user needs to be
+                // able to find out *why* long after this frame.
+                self.ui.state.disk_conflict = Some(file_label(&path));
             }
         }
     }
@@ -558,8 +561,21 @@ impl App {
         // it is exactly what the file holds.
         self.unsaved_changes = false;
         self.autosave_pending = false;
+        // Whatever the strip was reporting is settled: this editor now
+        // shows what the file holds.
+        self.ui.state.disk_conflict = None;
         self.ui
             .set_status(format!("Reloaded: {} (changed on disk)", file_label(path)));
+    }
+
+    /// The strip's Reload button — take the file and drop the local
+    /// edits. Confirmed in the UI before it gets here, because that is
+    /// exactly what it discards.
+    pub(super) fn reload_project_from_disk(&mut self) {
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        self.reload_from_disk(&path);
     }
 
     /// OBJ export with Marching Cubes smoothing. `blur` selects the

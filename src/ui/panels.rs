@@ -20,6 +20,9 @@ pub enum UiAction {
     OpenRecent(PathBuf),
     SaveProject,
     SaveAs,
+    /// Re-read the open project from disk, discarding local edits.
+    /// Raised by the disk-conflict strip, behind its confirm dialog.
+    ReloadFromDisk,
     ImportVox,
     ExportVox,
     ExportObj,
@@ -242,6 +245,17 @@ pub struct UiState {
     /// Raised by `App::guard_then`; the Save / Don't Save / Cancel
     /// buttons dispatch the `Unsaved*` actions.
     pub unsaved_prompt: Option<String>,
+
+    /// The open project changed on disk while there were local edits to
+    /// lose, so the auto-reload was refused. `Some(file label)` for as
+    /// long as that stands — written by `App::tick_disk_reload`, cleared
+    /// when the two sides agree again (save / reload / open) or when the
+    /// user dismisses the strip.
+    ///
+    /// A field rather than a status-bar line because the *state* lasts:
+    /// every later write is refused too, and a message that scrolls away
+    /// leaves the refusals looking like a broken feature.
+    pub disk_conflict: Option<String>,
 
     // One-shot action queue
     pending_actions: Vec<UiAction>,

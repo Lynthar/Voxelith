@@ -199,6 +199,12 @@ impl Ui {
         // Top menu bar
         self.show_menu_bar(ctx, editor);
 
+        // The open project changed on disk and the reload was refused —
+        // shown directly under the menu bar until it's resolved.
+        if self.state.disk_conflict.is_some() {
+            self.show_disk_conflict_bar(ctx);
+        }
+
         // Left side panel with tools
         self.show_toolbar(ctx, editor);
 
@@ -293,6 +299,57 @@ impl Ui {
         if self.state.unsaved_prompt.is_some() {
             self.show_unsaved_prompt(ctx);
         }
+    }
+
+    /// Somebody else wrote the open project — an agent running with
+    /// `--checkpoint`, a `voxelith exec --out`, a `git checkout` — while
+    /// there were unsaved edits here. The editor keeps the user's copy
+    /// and says so here until they decide.
+    ///
+    /// A strip rather than a modal on purpose. The writer is typically an
+    /// agent working through a batch at a time, so a dialog would reopen
+    /// on every step and make the editor unusable; a strip states the
+    /// situation, offers both ways out, and lets the user keep working
+    /// in the meantime.
+    fn show_disk_conflict_bar(&mut self, ctx: &Context) {
+        let Some(file) = self.state.disk_conflict.clone() else {
+            return;
+        };
+        egui::TopBottomPanel::top("disk_conflict").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("\u{26A0} {} changed on disk.", file))
+                        .strong()
+                        .color(ui.visuals().warn_fg_color),
+                );
+                ui.label("Your unsaved edits are kept.");
+                if ui
+                    .button("Reload")
+                    .on_hover_text("Take the version on disk and discard the edits here")
+                    .clicked()
+                {
+                    // Confirmed first: this throws away work the user
+                    // hasn't saved, and the strip's whole point is that
+                    // the two versions both exist.
+                    self.state.confirm = Some(ConfirmPrompt {
+                        title: "Reload from disk".to_string(),
+                        body: format!(
+                            "Load \"{}\" as it is on disk?\n\nThe unsaved changes in \
+                             this editor will be lost.",
+                            file
+                        ),
+                        action: UiAction::ReloadFromDisk,
+                    });
+                }
+                if ui
+                    .button("Keep mine")
+                    .on_hover_text("Dismiss this. Save when you're ready to overwrite the file")
+                    .clicked()
+                {
+                    self.state.disk_conflict = None;
+                }
+            });
+        });
     }
 
     /// Confirmation for an action that can't be undone. Accepting
