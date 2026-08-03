@@ -3,8 +3,9 @@
 //! This library provides core functionality for:
 //! - Voxel data storage and manipulation
 //! - Mesh generation from voxel data
-//! - GPU rendering with wgpu
+//! - GPU rendering with wgpu, and CPU ray-cast views without it
 //! - User interface with egui
+//! - Headless entry points an agent drives: ops, CLI, MCP
 //!
 //! # Architecture
 //!
@@ -13,11 +14,14 @@
 //! │              User Interface             │
 //! │              (ui module)                │
 //! ├─────────────────────────────────────────┤
+//! │        Agent front ends (headless)      │
+//! │        (agent_ops, exec, mcp)           │
+//! ├─────────────────────────────────────────┤
 //! │           Application Logic             │
 //! │         (editor, commands)              │
 //! ├─────────────────────────────────────────┤
 //! │             Core Engine                 │
-//! │   (core, mesh, render, procgen)         │
+//! │  (core, mesh, view, render, procgen)    │
 //! └─────────────────────────────────────────┘
 //! ```
 
