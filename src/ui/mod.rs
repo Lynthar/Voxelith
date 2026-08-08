@@ -1956,8 +1956,8 @@ impl Ui {
 
                 // ===== Split: canvas (left) + sidebar (right) =====
                 let avail = ui.available_size();
-                let sidebar_w = 280.0_f32.min(avail.x * 0.4).max(220.0);
-                let canvas_w = (avail.x - sidebar_w - 12.0).max(200.0);
+                let (canvas_w, sidebar_w) =
+                    graph_split_widths(avail.x, ui.spacing().item_spacing.x);
 
                 ui.horizontal_top(|ui| {
                     // ---- Canvas ----
@@ -1975,7 +1975,10 @@ impl Ui {
                             );
                         },
                     );
-                    ui.separator();
+                    // Explicit width, because the split arithmetic has to
+                    // know exactly what this costs — see
+                    // `graph_split_widths`.
+                    ui.add(egui::Separator::default().spacing(GRAPH_DIVIDER_W));
 
                     // ---- Sidebar ----
                     ui.allocate_ui_with_layout(
@@ -2790,6 +2793,77 @@ const NODE_H: f32 = 84.0;
 const NODE_HEADER_H: f32 = 22.0;
 const SOCKET_R: f32 = 6.0;
 const SOCKET_HIT_R: f32 = SOCKET_R + 4.0;
+
+/// Width the divider between the graph canvas and its sidebar occupies.
+/// Set explicitly on the `Separator` rather than left to the default,
+/// so [`graph_split_widths`] can subtract exactly what it costs.
+const GRAPH_DIVIDER_W: f32 = 12.0;
+
+/// Sidebar width, and the floor the canvas may not shrink past.
+const GRAPH_SIDEBAR_W: f32 = 280.0;
+const GRAPH_SIDEBAR_MIN_W: f32 = 220.0;
+const GRAPH_CANVAS_MIN_W: f32 = 200.0;
+
+/// Split the graph window's inner width into canvas and sidebar.
+///
+/// The two sit in one `horizontal_top` row with a separator between
+/// them, so what the row actually consumes is
+/// `canvas + spacing + divider + spacing + sidebar` — and if that comes
+/// out wider than what was available, egui grows the window to fit,
+/// which enlarges the available width, which widens the row again. The
+/// window then creeps outward every frame until it hits the screen.
+/// That is exactly what happened while this reserved a flat 12 px for a
+/// divider that cost 22: ten pixels a frame.
+///
+/// So the arithmetic is stated once, here, and pinned by a test: the
+/// parts must sum to *exactly* the width handed in.
+fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
+    let overhead = GRAPH_DIVIDER_W + item_spacing * 2.0;
+    // Shrink the sidebar before the canvas, and stop both at their
+    // floors — at which point the row is wider than the window and egui
+    // scrolls or clips it, rather than the window growing without end.
+    // `min_size` on the window keeps this out of reach in practice.
+    let sidebar = GRAPH_SIDEBAR_W
+        .min(available * 0.4)
+        .max(GRAPH_SIDEBAR_MIN_W)
+        .min((available - overhead - GRAPH_CANVAS_MIN_W).max(GRAPH_SIDEBAR_MIN_W));
+    let canvas = (available - sidebar - overhead).max(GRAPH_CANVAS_MIN_W);
+    (canvas, sidebar)
+}
+
+#[cfg(test)]
+mod graph_layout_tests {
+    use super::*;
+
+    /// The row must never ask for more width than it was handed.
+    ///
+    /// Any surplus is width egui adds to the window, which comes back
+    /// as more available width on the next frame, which produces more
+    /// surplus — the window creeps outward until it hits the screen
+    /// edge. A shortfall is merely a gap; a surplus is a runaway.
+    #[test]
+    fn the_graph_split_consumes_exactly_the_width_it_is_given() {
+        for available in [520.0, 640.0, 960.0, 1440.0, 2560.0_f32] {
+            for spacing in [0.0, 4.0, 8.0, 16.0_f32] {
+                let (canvas, sidebar) = graph_split_widths(available, spacing);
+                let used = canvas + spacing + GRAPH_DIVIDER_W + spacing + sidebar;
+                assert!(
+                    (used - available).abs() < 0.001,
+                    "{available} wide at {spacing} spacing: canvas {canvas} + \
+                     divider + sidebar {sidebar} = {used}, a surplus of {}",
+                    used - available
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_panes_keep_a_usable_width_when_the_window_is_small() {
+        let (canvas, sidebar) = graph_split_widths(520.0, 8.0);
+        assert!(canvas >= GRAPH_CANVAS_MIN_W, "canvas collapsed to {canvas}");
+        assert!(sidebar >= GRAPH_SIDEBAR_MIN_W, "sidebar collapsed to {sidebar}");
+    }
+}
 
 /// Available node kinds in the "+ Add Node" menu.
 /// Tuple is (label, factory, separator_after).
