@@ -6,6 +6,18 @@
 use crate::core::World;
 use glam::{Mat4, Vec3, Vec4};
 
+/// How far past the camera's current orbit radius a ground-plane orbit
+/// pivot may sit, as a multiple of that radius.
+///
+/// Re-anchoring the pivot never moves the image — the new point is on
+/// the view ray — so the only thing it changes is the orbit radius, and
+/// that is where the damage hides: the press looks like nothing
+/// happened and the *next* drag swings the camera at the new scale. A
+/// crossing twice as far as the camera already orbits is the most that
+/// can still be called "roughly what I'm working on"; beyond that it is
+/// the horizon, and pivoting there turns a small drag into a teleport.
+const GROUND_PIVOT_MAX_GROWTH: f32 = 2.0;
+
 /// A ray in 3D space
 #[derive(Debug, Clone, Copy)]
 pub struct Ray {
@@ -261,12 +273,15 @@ impl VoxelRaycast {
     /// Resolve an orbit pivot from a camera-forward `ray` (origin =
     /// camera position, direction = camera forward), Unity-style:
     ///
-    /// 1. **Voxel surface** — first solid voxel the ray hits.
-    /// 2. **Ground plane** — else the `y = 0` (XZ) intersection, but
-    ///    only when it lies ahead (`t > 0`) and within `max_distance`.
-    ///    A near-horizontal ray crosses `y = 0` only at a huge `t` (or
-    ///    never), which the reach cap rejects so we don't pivot around a
-    ///    point off at the horizon.
+    /// 1. **Voxel surface** — first solid voxel the ray hits. However
+    ///    far away, this is something the user is looking at.
+    /// 2. **Ground plane** — else the `y = 0` (XZ) intersection, when it
+    ///    lies ahead (`t > 0`), within `max_distance`, and **near where
+    ///    the camera is already orbiting** (see
+    ///    [`GROUND_PIVOT_MAX_GROWTH`]). Nothing is being looked at here
+    ///    — the crossing is a geometric coincidence — so it is only
+    ///    worth pivoting around while it stays at the scale the user is
+    ///    working at.
     /// 3. **`fallback`** — else the caller's current camera target. For
     ///    a forward ray the view-depth plane through the target meets
     ///    the ray exactly at the target, so this *is* the "view-depth
@@ -282,14 +297,24 @@ impl VoxelRaycast {
             return ray.at(hit.distance);
         }
         // Ground-plane intersection. `1e-4` rejects rays parallel
-        // enough to y=0 that `t` would explode; the reach cap rejects
-        // distant grazing hits. Both directions (looking down from
-        // above, or up from below) are valid as long as the crossing is
-        // ahead and within reach — unlike `cast_with_ground_plane`,
-        // which is placement-oriented and only fires looking down.
+        // enough to y=0 that `t` would explode. Both directions
+        // (looking down from above, or up from below) are valid as long
+        // as the crossing is ahead and within reach — unlike
+        // `cast_with_ground_plane`, which is placement-oriented and only
+        // fires looking down.
+        //
+        // Reach is the smaller of the caller's cap and a multiple of
+        // the radius the camera is *currently* orbiting at — which is
+        // exactly `origin - fallback`, since `fallback` is the current
+        // target. The absolute cap alone is not enough: at 500 it is a
+        // horizon distance, and a camera orbiting at 40 that tilts a few
+        // degrees below level crosses y=0 around 400 out, which passes
+        // the cap and multiplies the orbit radius by ten.
         if ray.direction.y.abs() > 1e-4 {
             let t = -ray.origin.y / ray.direction.y;
-            if t > 0.0 && t <= max_distance {
+            let orbit_radius = (ray.origin - fallback).length();
+            let reach = max_distance.min(orbit_radius * GROUND_PIVOT_MAX_GROWTH);
+            if t > 0.0 && t <= reach {
                 return ray.at(t);
             }
         }
@@ -418,6 +443,28 @@ mod tests {
         let ray = Ray::new(Vec3::new(0.0, 8.0, 0.0), Vec3::X);
         let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 100.0, fallback);
         assert_eq!(pivot, fallback);
+    }
+
+    #[test]
+    fn orbit_pivot_does_not_re_anchor_onto_the_horizon() {
+        // The reported teleport: camera 20 up, orbiting something 40
+        // away, tilted just 3° below level. The y=0 crossing is ~380
+        // out — an order of magnitude past where the camera is actually
+        // orbiting, and nothing the user is looking at. Re-anchoring
+        // there leaves the image alone (the point is on the view ray)
+        // and then multiplies the orbit radius by ten, so the first
+        // drag throws the camera hundreds of units.
+        let world = World::new();
+        let fallback = Vec3::new(0.0, 20.0, -40.0);
+        let ray = Ray::new(
+            Vec3::new(0.0, 20.0, 0.0),
+            Vec3::new(0.0, -0.05, -1.0).normalize(),
+        );
+        let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 500.0, fallback);
+        assert_eq!(
+            pivot, fallback,
+            "a near-horizontal ray must keep the current pivot, not grab the horizon"
+        );
     }
 
     #[test]
