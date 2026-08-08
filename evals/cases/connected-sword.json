@@ -1,0 +1,36 @@
+{
+  "id": "connected-sword",
+  "task": "Build a sword standing upright along +Y as a single connected piece: blade on top, a crossguard, a grip below. Make it mirror-symmetric across the X axis. Roughly 3 cells wide, 2 deep and 18-24 tall.",
+  "notes": "The one-cell gap. A blade that misses its crossguard by a single cell looks finished from every angle and is two objects to a mesher, an exporter and a physics engine. No render answers this; the component count does.",
+  "expect": {
+    "components": {
+      "max": 1
+    },
+    "floating_components": {
+      "max": 0
+    },
+    "symmetry": [
+      {
+        "axis": "x",
+        "max_ratio": 0.02
+      }
+    ],
+    "size": [
+      {
+        "min": 2,
+        "max": 6
+      },
+      {
+        "min": 16,
+        "max": 26
+      },
+      {
+        "min": 1,
+        "max": 5
+      }
+    ],
+    "voxel_count": {
+      "min": 60
+    }
+  }
+}

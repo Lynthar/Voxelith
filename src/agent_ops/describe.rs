@@ -109,6 +109,13 @@ pub enum SliceMode {
 /// telling an agent anything the count didn't.
 const MAX_LOOSE_PARTS: usize = 8;
 
+/// Bounding-box cells above which the air sweep is skipped.
+///
+/// Unlike the solid passes, this one's cost tracks the *bounding box*,
+/// not the model: two voxels a thousand cells apart are a cheap model
+/// and a billion-cell box. Bounded separately for that reason.
+const MAX_AIR_CELLS: u64 = 8_000_000;
+
 /// Voxels above which the structural pass is skipped.
 ///
 /// It is three linear passes with hash lookups per neighbor, which is
@@ -147,6 +154,31 @@ pub struct Structure {
     /// Mirror mismatch per axis, measured across the scene bounding
     /// box's own midplane.
     pub symmetry: [SymmetryCheck; 3],
+    /// Solid cells resting on the lowest layer of the scene — how much
+    /// of the model actually touches the ground.
+    ///
+    /// What tells an arch from a wall. Both can be one connected piece
+    /// with nothing floating and the same bounding box; the arch stands
+    /// on two piers and the wall stands on everything.
+    pub footprint: u64,
+    /// Air the model completely encloses: sealed rooms, and bubbles
+    /// that would ship inside an exported mesh. `None` when the
+    /// bounding box is too large to sweep.
+    ///
+    /// Distinct from `enclosed`, which counts *solid* cells with no
+    /// exposed face. A hollow crate has no enclosed solids and one
+    /// cavity; a solid crate has enclosed solids and no cavity. And
+    /// distinct again from open space like the gap under an arch, which
+    /// reaches the outside and is therefore not a cavity at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cavities: Option<Cavities>,
+}
+
+/// Enclosed air, as counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct Cavities {
+    pub count: usize,
+    pub voxels: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +271,9 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
         }
     });
 
+    let footprint = solids.iter().filter(|pos| pos.1 == min.1).count() as u64;
+    let cavities = sealed_air(&solids, min, max);
+
     Some(Structure {
         components: component_count,
         largest_component,
@@ -246,7 +281,74 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
         floating_components,
         enclosed,
         symmetry,
+        footprint,
+        cavities,
     })
+}
+
+/// Air inside the bounding box that never reaches its surface.
+///
+/// The sweep runs inside the box only, so "reaches the outside" is
+/// "reaches a face of the box" — the gap under an arch qualifies and is
+/// correctly not a cavity, while a sealed room does not and is.
+///
+/// `None` when the box is too big to walk: the cost here is the box,
+/// not the model, so a sparse scene spanning a thousand cells is
+/// expensive in a way its voxel count never shows.
+fn sealed_air(
+    solids: &HashSet<(i32, i32, i32)>,
+    min: (i32, i32, i32),
+    max: (i32, i32, i32),
+) -> Option<Cavities> {
+    let span = |lo: i32, hi: i32| (hi as i64 - lo as i64 + 1).max(0) as u64;
+    let volume = span(min.0, max.0)
+        .saturating_mul(span(min.1, max.1))
+        .saturating_mul(span(min.2, max.2));
+    if volume > MAX_AIR_CELLS {
+        return None;
+    }
+
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+    let mut count = 0usize;
+    let mut voxels = 0u64;
+
+    for x in min.0..=max.0 {
+        for y in min.1..=max.1 {
+            for z in min.2..=max.2 {
+                let start = (x, y, z);
+                if solids.contains(&start) || !seen.insert(start) {
+                    continue;
+                }
+                let mut size = 0u64;
+                let mut escapes = false;
+                queue.push_back(start);
+                while let Some(pos) = queue.pop_front() {
+                    size += 1;
+                    escapes |= pos.0 == min.0
+                        || pos.0 == max.0
+                        || pos.1 == min.1
+                        || pos.1 == max.1
+                        || pos.2 == min.2
+                        || pos.2 == max.2;
+                    for (dx, dy, dz) in super::compile::FACE_NEIGHBORS {
+                        let next = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                        let inside = (min.0..=max.0).contains(&next.0)
+                            && (min.1..=max.1).contains(&next.1)
+                            && (min.2..=max.2).contains(&next.2);
+                        if inside && !solids.contains(&next) && seen.insert(next) {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+                if !escapes {
+                    count += 1;
+                    voxels += size;
+                }
+            }
+        }
+    }
+    Some(Cavities { count, voxels })
 }
 
 /// Flood fill every solid cell into components, 6-connected.
@@ -573,6 +675,65 @@ mod tests {
         // A 3×3 slab has none — every cell is on a face.
         let slab = filled((0..3).flat_map(|x| (0..3).map(move |z| (x, 0, z))));
         assert_eq!(measure(&slab).enclosed, 0);
+    }
+
+    /// `enclosed`, `cavities` and open space are three different things
+    /// that all get called "hollow", and a case that reaches for the
+    /// wrong one fails correct work. Stated as one test so the contrast
+    /// is in one place.
+    #[test]
+    fn enclosed_solids_sealed_air_and_open_space_are_three_different_readings() {
+        let cube = |n: i32| {
+            (0..n).flat_map(move |x| {
+                (0..n).flat_map(move |y| (0..n).map(move |z| (x, y, z)))
+            })
+        };
+
+        // Solid 3³: one solid cell has no exposed face, and no air is
+        // trapped anywhere.
+        let solid = measure(&filled(cube(3)));
+        assert_eq!(solid.enclosed, 1);
+        assert_eq!(solid.cavities.as_ref().unwrap().count, 0);
+
+        // Hollow it: the interior cell becomes trapped air instead. No
+        // solid is enclosed any more — the readings swap.
+        let mut shell = filled(cube(3));
+        shell.set_voxel(1, 1, 1, Voxel::AIR);
+        let shell = measure(&shell);
+        assert_eq!(shell.enclosed, 0);
+        let sealed = shell.cavities.as_ref().unwrap();
+        assert_eq!(sealed.count, 1);
+        assert_eq!(sealed.voxels, 1);
+
+        // Open the shell to the outside and the cavity stops being one:
+        // the air reaches the bounding box surface, exactly like the gap
+        // under an arch.
+        let mut opened = filled(cube(3));
+        opened.set_voxel(1, 1, 1, Voxel::AIR);
+        opened.set_voxel(1, 1, 0, Voxel::AIR);
+        assert_eq!(measure(&opened).cavities.as_ref().unwrap().count, 0);
+    }
+
+    /// The reading that tells an arch from a wall. Both are one piece,
+    /// nothing floating, same bounding box — only the ground contact
+    /// differs.
+    #[test]
+    fn footprint_separates_a_span_from_a_wall() {
+        // A wall: 6 wide, 4 tall, resting on all six cells.
+        let wall = filled((0..6).flat_map(|x| (0..4).map(move |y| (x, y, 0))));
+        assert_eq!(measure(&wall).footprint, 6);
+
+        // A span with the same box: two legs and a deck. Two cells on
+        // the ground, and the space under it is open, not a cavity.
+        let span = filled(
+            [(0, 0, 0), (0, 1, 0), (0, 2, 0), (5, 0, 0), (5, 1, 0), (5, 2, 0)]
+                .into_iter()
+                .chain((0..6).map(|x| (x, 3, 0))),
+        );
+        let span = measure(&span);
+        assert_eq!(span.footprint, 2);
+        assert_eq!(span.components, 1);
+        assert_eq!(span.cavities.as_ref().unwrap().count, 0);
     }
 
     #[test]

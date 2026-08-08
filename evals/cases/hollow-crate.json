@@ -1,0 +1,31 @@
+{
+  "id": "hollow-crate",
+  "task": "Build a closed cubic crate, 8 cells on a side, with walls one cell thick and nothing inside it. One connected piece.",
+  "notes": "Interior voxels are invisible and cost vertices in every export. `hollow` removes them in one op, so this case is really asking whether the agent thought about the export at all.",
+  "expect": {
+    "components": {
+      "max": 1
+    },
+    "enclosed": {
+      "max": 0
+    },
+    "size": [
+      {
+        "min": 8,
+        "max": 8
+      },
+      {
+        "min": 8,
+        "max": 8
+      },
+      {
+        "min": 8,
+        "max": 8
+      }
+    ],
+    "voxel_count": {
+      "min": 200,
+      "max": 400
+    }
+  }
+}

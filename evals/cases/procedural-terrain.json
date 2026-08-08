@@ -1,0 +1,27 @@
+{
+  "id": "procedural-terrain",
+  "task": "Generate a patch of rolling terrain about 32 by 32 cells and up to 8 tall. Build it with the node graph — generators and transforms — rather than placing voxels yourself, and leave the graph on the project so it can be tuned afterwards.",
+  "notes": "The method is the point, and it is checkable because the graph travels with the project. An agent can pass the size and voxel bars by hand-placing a thousand cells; only the graph shows it produced something a human can still re-roll and adjust.",
+  "expect": {
+    "graph_nodes": {
+      "min": 2
+    },
+    "size": [
+      {
+        "min": 24,
+        "max": 40
+      },
+      {
+        "min": 2,
+        "max": 12
+      },
+      {
+        "min": 24,
+        "max": 40
+      }
+    ],
+    "voxel_count": {
+      "min": 400
+    }
+  }
+}

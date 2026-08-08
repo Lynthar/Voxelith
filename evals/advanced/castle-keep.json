@@ -1,0 +1,44 @@
+{
+  "id": "castle-keep",
+  "task": "Build a castle keep standing on the ground: a square main tower with a hollow interior, a turret at each of its four corners, and battlements along the top. Walls one or two cells thick. Mirror-symmetric across both X and Z. Finish by hollowing it out for export, so that no voxel anywhere in the model is left fully surrounded by solid neighbours.",
+  "notes": "Assembly plus economy. Four turrets and a keep have to end up as one piece, and two symmetry axes at once is the case where 'build a quarter and mirror it twice' pays off.\n\nThe export-readiness half is stated explicitly because a first draft of this case said only 'no solid fill inside' and then failed a keep whose tower interior was genuinely hollow — the leftover voxels were at wall, floor and foundation junctions, which is not what anyone reads 'solid fill inside' to mean. Invisible interior is worth grading, but it has to be asked for in the words the metric actually measures.",
+  "expect": {
+    "components": {
+      "max": 1
+    },
+    "floating_components": {
+      "max": 0
+    },
+    "symmetry": [
+      {
+        "axis": "x",
+        "max_ratio": 0.01
+      },
+      {
+        "axis": "z",
+        "max_ratio": 0.01
+      }
+    ],
+    "enclosed": {
+      "max": 0
+    },
+    "size": [
+      {
+        "min": 16,
+        "max": 34
+      },
+      {
+        "min": 14,
+        "max": 34
+      },
+      {
+        "min": 16,
+        "max": 34
+      }
+    ],
+    "voxel_count": {
+      "min": 1200,
+      "max": 14000
+    }
+  }
+}

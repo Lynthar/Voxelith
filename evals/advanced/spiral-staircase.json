@@ -1,0 +1,31 @@
+{
+  "id": "spiral-staircase",
+  "task": "Build a spiral staircase winding around a central column: at least sixteen steps climbing about 20 cells in total. Every step must touch the column and its neighbouring steps, so the whole thing is one connected piece with nothing floating.",
+  "notes": "Repetition with a rotation between each instance — the shape the ops vocabulary makes you work for, and the one a `repeat` op would make trivial. Watch whether the agent places every step by hand, rotates a selection, or finds something smarter; whichever it does is evidence about what the vocabulary is missing. Deliberately not graded on symmetry: a spiral is chiral.",
+  "expect": {
+    "components": {
+      "max": 1
+    },
+    "floating_components": {
+      "max": 0
+    },
+    "size": [
+      {
+        "min": 6,
+        "max": 18
+      },
+      {
+        "min": 18,
+        "max": 26
+      },
+      {
+        "min": 6,
+        "max": 18
+      }
+    ],
+    "voxel_count": {
+      "min": 200,
+      "max": 4000
+    }
+  }
+}

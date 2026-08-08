@@ -4,3 +4,5 @@
 # ai
 .claude
 CLAUDE.md
+# Eval run artifacts: the cases are the asset, a given run is not.
+/evals/runs

@@ -1,0 +1,40 @@
+{
+  "id": "arched-bridge",
+  "task": "Build a bridge spanning 24 cells along X: a pier at each end reaching down to the ground, and an arched span between them with clear space underneath. One connected piece, nothing left hanging in mid-air, mirror-symmetric across X.",
+  "notes": "Overhangs and curves — the two things a cube grid is worst at, and the two a voxel artist spends the most time on. The span has to hold itself up (floating_components), and the curve has to be sized knowing that a sphere or cylinder includes cells within radius + 0.5; sizing an arch from r-squared makes it about half as tall as intended.\n\nThis case briefly carried an `enclosed` ceiling, meant to stop a solid wall passing as a bridge. That was a mistake and it failed a correct answer: the task never asked for a hollow bridge, and a solid stone arch is a bridge. The rule the case broke is the one in the README — assert only what the task asked for. What actually stops a wall from passing is the task text saying 'arched span with clear space underneath', and the metric that actually catches it is `footprint`, the solid cells touching the lowest layer: an arch stands on two piers, a wall stands on everything. (The first instinct, an air-connectivity check, is the wrong tool — the gap under an arch is open to the outside, so it is not a sealed cavity at all.)",
+  "expect": {
+    "components": {
+      "max": 1
+    },
+    "floating_components": {
+      "max": 0
+    },
+    "symmetry": [
+      {
+        "axis": "x",
+        "max_ratio": 0.02
+      }
+    ],
+    "size": [
+      {
+        "min": 24,
+        "max": 32
+      },
+      {
+        "min": 8,
+        "max": 22
+      },
+      {
+        "min": 2,
+        "max": 10
+      }
+    ],
+    "voxel_count": {
+      "min": 250,
+      "max": 5000
+    },
+    "footprint": {
+      "max": 60
+    }
+  }
+}

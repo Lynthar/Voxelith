@@ -2831,40 +2831,6 @@ fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
     (canvas, sidebar)
 }
 
-#[cfg(test)]
-mod graph_layout_tests {
-    use super::*;
-
-    /// The row must never ask for more width than it was handed.
-    ///
-    /// Any surplus is width egui adds to the window, which comes back
-    /// as more available width on the next frame, which produces more
-    /// surplus — the window creeps outward until it hits the screen
-    /// edge. A shortfall is merely a gap; a surplus is a runaway.
-    #[test]
-    fn the_graph_split_consumes_exactly_the_width_it_is_given() {
-        for available in [520.0, 640.0, 960.0, 1440.0, 2560.0_f32] {
-            for spacing in [0.0, 4.0, 8.0, 16.0_f32] {
-                let (canvas, sidebar) = graph_split_widths(available, spacing);
-                let used = canvas + spacing + GRAPH_DIVIDER_W + spacing + sidebar;
-                assert!(
-                    (used - available).abs() < 0.001,
-                    "{available} wide at {spacing} spacing: canvas {canvas} + \
-                     divider + sidebar {sidebar} = {used}, a surplus of {}",
-                    used - available
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn both_panes_keep_a_usable_width_when_the_window_is_small() {
-        let (canvas, sidebar) = graph_split_widths(520.0, 8.0);
-        assert!(canvas >= GRAPH_CANVAS_MIN_W, "canvas collapsed to {canvas}");
-        assert!(sidebar >= GRAPH_SIDEBAR_MIN_W, "sidebar collapsed to {sidebar}");
-    }
-}
-
 /// Available node kinds in the "+ Add Node" menu.
 /// Tuple is (label, factory, separator_after).
 fn node_menu_options() -> Vec<(&'static str, fn() -> NodeKind, bool)> {
@@ -3598,5 +3564,39 @@ fn color_button_u8(ui: &mut egui::Ui, color: &mut [u8; 3]) {
         color[0] = (f[0] * 255.0).round() as u8;
         color[1] = (f[1] * 255.0).round() as u8;
         color[2] = (f[2] * 255.0).round() as u8;
+    }
+}
+
+#[cfg(test)]
+mod graph_layout_tests {
+    use super::*;
+
+    /// The row must never ask for more width than it was handed.
+    ///
+    /// Any surplus is width egui adds to the window, which comes back
+    /// as more available width on the next frame, which produces more
+    /// surplus — the window creeps outward until it hits the screen
+    /// edge. A shortfall is merely a gap; a surplus is a runaway.
+    #[test]
+    fn the_graph_split_consumes_exactly_the_width_it_is_given() {
+        for available in [520.0, 640.0, 960.0, 1440.0, 2560.0_f32] {
+            for spacing in [0.0, 4.0, 8.0, 16.0_f32] {
+                let (canvas, sidebar) = graph_split_widths(available, spacing);
+                let used = canvas + spacing + GRAPH_DIVIDER_W + spacing + sidebar;
+                assert!(
+                    (used - available).abs() < 0.001,
+                    "{available} wide at {spacing} spacing: canvas {canvas} + \
+                     divider + sidebar {sidebar} = {used}, a surplus of {}",
+                    used - available
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_panes_keep_a_usable_width_when_the_window_is_small() {
+        let (canvas, sidebar) = graph_split_widths(520.0, 8.0);
+        assert!(canvas >= GRAPH_CANVAS_MIN_W, "canvas collapsed to {canvas}");
+        assert!(sidebar >= GRAPH_SIDEBAR_MIN_W, "sidebar collapsed to {sidebar}");
     }
 }

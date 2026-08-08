@@ -1,0 +1,33 @@
+{
+  "id": "layered-terrain",
+  "task": "Generate a landscape 64 by 64 cells with real relief — hills standing well above the low ground, at least 14 cells between the lowest and highest point. Build it with the node graph, and note that a single terrain generator normalises its height field into the middle of its range: you will need to combine more than one source to get that much variation. Leave the graph on the project.",
+  "notes": "Written from a failure the last round produced: an agent discovered by experiment that perlin terrain cannot be pushed to a large height range by parameters alone, and that summing two sources with combine/union is the way out. This case asks for exactly that height range, so parameter-fiddling cannot pass it. It also puts the model at a scale where hand-placement is not an option.",
+  "expect": {
+    "graph_nodes": {
+      "min": 5
+    },
+    "components": {
+      "max": 1
+    },
+    "floating_components": {
+      "max": 0
+    },
+    "size": [
+      {
+        "min": 60,
+        "max": 70
+      },
+      {
+        "min": 14,
+        "max": 34
+      },
+      {
+        "min": 60,
+        "max": 70
+      }
+    ],
+    "voxel_count": {
+      "min": 15000
+    }
+  }
+}

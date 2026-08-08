@@ -110,6 +110,21 @@ enum Commands {
         out: Option<PathBuf>,
     },
 
+    /// Grade finished projects against eval cases (headless, JSON on
+    /// stdout). Exits non-zero when a case fails, so a suite can gate
+    /// a run the way a test command does.
+    Eval {
+        /// An eval case (`.json`), or a directory of them.
+        cases: PathBuf,
+        /// The single result to grade. For checking one piece of work
+        /// whatever its file is called.
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Directory holding one `<case-id>.vxlt` per case.
+        #[arg(long)]
+        results: Option<PathBuf>,
+    },
+
     /// Describe a project without changing it (headless, JSON on stdout).
     Inspect {
         /// Project to read (`.vxlt`).
@@ -154,6 +169,15 @@ fn main() {
             size,
             out,
         }) => run_render(project, &view, size, out),
+        Some(Commands::Eval {
+            cases,
+            project,
+            results,
+        }) => run_eval(voxelith::eval::EvalRequest {
+            cases,
+            project,
+            results,
+        }),
         Some(Commands::Inspect { project, slice }) => run_exec(voxelith::exec::ExecRequest {
             input: Some(project),
             describe: true,
@@ -179,6 +203,28 @@ fn run_exec(request: voxelith::exec::ExecRequest) {
         Err(error) => {
             // The failure envelope goes to stdout too: one stream to
             // parse, whichever way the run went.
+            println!("{}", error.to_json());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Grade results against eval cases. Same stdout contract as
+/// `run_exec`, plus a test-runner exit code: zero only when every case
+/// passed, so a suite can gate a run without anyone parsing the report.
+fn run_eval(request: voxelith::eval::EvalRequest) {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp(None)
+        .init();
+
+    match voxelith::eval::run_eval(&request) {
+        Ok(report) => {
+            println!("{}", report.to_json());
+            if report.passed != report.total {
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
             println!("{}", error.to_json());
             std::process::exit(1);
         }
