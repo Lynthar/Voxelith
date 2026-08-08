@@ -33,8 +33,9 @@
 | ▭ **Box select** | `0` to enter Select. Drag corners to mark an AABB; drag inside to move (single undoable Command, overlap-safe); arrow keys nudge X / Z, `Ctrl+↑↓` Y, `Shift` × 10. Rotate with `R` / `Shift+R`, mirror with `M` — each one undoable step. `Ctrl+C/X/V`, `Ctrl+Shift+V` paste-at-cursor, `Del`, `Ctrl+A` select-all-solid, `Esc` / `Ctrl+D` deselect. Paste auto-selects the destination AABB so Paste→drag→Paste chains |
 | ⚓ **Sockets** | Drop named attachment points on any voxel face (position + outward normal). They persist in the project and export as glTF empty nodes — weapon mounts, FX anchors, banner slots for the engine to hang parts on |
 | 🤖 **AI generation** | Text-to-3D via fal.ai Hunyuan3D: type a prompt, the returned mesh is voxelized into the scene as one undoable edit. Runs on a background runtime (the editor stays interactive) and is cancellable mid-flight; the API key lives in the OS keychain, never in a config file |
+| 🔌 **Agent bridge** | The editor hosts an MCP server, so an agent edits the project you have open — its batches land on *your* undo stack, one Ctrl+Z per batch, and you can take over mid-build. It can hand you a node graph rather than raw voxels, so the result stays parametric. Or have it ask first: the batch appears as translucent geometry to apply or discard. Headless variants (a CLI and a standalone server) for when nobody's watching |
 | 🏷️ **Game-asset materials** | Per-brush emissive / metallic flags plus a 4-slot faction **tint zone**, carried through to GLB as glTF materials and a per-vertex `_TINTZONE` attribute for a recolor shader downstream |
-| 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC tilesets (Dungeon + City) — pick one in the procgen panel or compose with Translate / Filter / Mask / Combine nodes in the visual graph editor |
+| 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC tilesets (Dungeon + City) — pick one in the procgen panel or compose with Translate / Filter / Mask / Combine nodes in the visual graph editor. The graph is saved with the project, and an agent can write one for you to keep tuning |
 | ✨ **Live preview** | Debounced translucent overlay shows generator output before you commit |
 | 📁 **File I/O** | Native `.vxlt` (gzip + state), MagicaVoxel `.vox` import (v150 + v200 multi-model + scene graph) / export (v150), Wavefront `.obj` and glTF Binary `.glb` export. OBJ / GLB also have Marching Cubes "smoothed" variants (light: rounded cubes / heavy: clay-like) for organic exports |
 | 💾 **Persistent state** | Window layout, panel toggles, generator params, recent files all survive restarts |
@@ -64,6 +65,11 @@ cargo run --release -- generators        # what `generate` can call
 # With --checkpoint every edit is written back to the project file, and
 # the editor reloads it — keep the .vxlt open to watch the agent work.
 cargo run --release -- mcp --root ./models --checkpoint
+
+# Or skip the file entirely: the editor hosts a server of its own, so an
+# agent edits the project you have open, on your undo stack. Point a
+# client at the URL it prints (loopback only).
+cargo run --release -- --agent-port 8737
 ```
 
 Every subcommand above is headless. `cargo build --no-default-features`

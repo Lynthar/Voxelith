@@ -15,7 +15,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
+
 use crate::core::{ChunkPos, Voxel, World};
+use crate::procgen::PipelineGraph;
 use crate::editor::{
     box_voxels, cylinder_voxels, line_voxels, mirror_selection_changes, rotate_selection_changes,
     sphere_voxels, Selection, VoxelChange,
@@ -23,14 +26,14 @@ use crate::editor::{
 
 use super::describe::solid_voxel_count;
 use super::registry;
-use super::schema::{quarter_from, Aabb, AxisSpec, Op, VoxelSpec, WriteMode};
+use super::schema::{quarter_from, Aabb, AxisSpec, GraphEdit, Op, VoxelSpec, WriteMode};
 use super::{
-    ErrorCode, OpsError, MAX_BATCH_CELLS, MAX_COORD, MAX_NEW_CHUNKS, MAX_OP_REGION_CELLS,
-    MAX_SET_VOXELS_PER_OP,
+    ErrorCode, OpsError, MAX_BATCH_CELLS, MAX_COORD, MAX_GRAPH_EDITS, MAX_NEW_CHUNKS,
+    MAX_OP_REGION_CELLS, MAX_SET_VOXELS_PER_OP,
 };
 
 /// The six face neighbors, for shell and hollow tests.
-const FACE_NEIGHBORS: [(i32, i32, i32); 6] = [
+pub(super) const FACE_NEIGHBORS: [(i32, i32, i32); 6] = [
     (1, 0, 0),
     (-1, 0, 0),
     (0, 1, 0),
@@ -49,6 +52,13 @@ pub(super) struct Scratch {
     base_chunks: usize,
     cells: u64,
     notes: Vec<String>,
+    /// The document's graph as the batch found it. `graph_edit` starts
+    /// from here when nothing earlier in the batch replaced it.
+    base_graph: PipelineGraph,
+    /// The graph the last `graph` / `graph_edit` op left, if any.
+    /// Document data, not undo data — the caller assigns it alongside
+    /// the changes, the same way it assigns the selection.
+    graph: Option<PipelineGraph>,
 }
 
 pub(super) struct Outcome {
@@ -57,6 +67,9 @@ pub(super) struct Outcome {
     pub notes: Vec<String>,
     pub voxel_count: u64,
     pub world_aabb: Option<Aabb>,
+    /// The pipeline graph the batch left on the document, if it carried
+    /// one.
+    pub graph: Option<PipelineGraph>,
     /// The scratch world with every op applied. A real run drops it and
     /// commits `changes` instead; a preview hands it back as the world
     /// the batch *would* have produced, so the caller can describe or
@@ -65,14 +78,16 @@ pub(super) struct Outcome {
 }
 
 impl Scratch {
-    pub fn new(world: &World, selection: Option<Selection>) -> Self {
+    pub fn new(input: super::BatchInput<'_>) -> Self {
         Self {
-            world: world.deep_clone(),
+            world: input.world.deep_clone(),
             changes: HashMap::new(),
-            selection,
-            base_chunks: world.chunk_count(),
+            selection: input.selection,
+            base_chunks: input.world.chunk_count(),
             cells: 0,
             notes: Vec::new(),
+            base_graph: input.graph.clone(),
+            graph: None,
         }
     }
 
@@ -99,6 +114,7 @@ impl Scratch {
             changes,
             selection: self.selection,
             notes: self.notes,
+            graph: self.graph,
             world: self.world,
         }
     }
@@ -195,6 +211,20 @@ impl Scratch {
                 translate,
                 write_mode,
             } => self.generate(index, generator, params, *translate, *write_mode),
+
+            Op::Graph {
+                graph,
+                apply,
+                translate,
+                write_mode,
+            } => self.run_graph(index, graph, *apply, *translate, *write_mode),
+
+            Op::GraphEdit {
+                edits,
+                apply,
+                translate,
+                write_mode,
+            } => self.edit_graph(index, edits, *apply, *translate, *write_mode),
 
             Op::Select { min, max } => {
                 self.selection = Some(checked_region(*min, *max)?);
@@ -329,12 +359,7 @@ impl Scratch {
         // interior.
         let interior: Vec<(i32, i32, i32)> = region
             .iter_cells()
-            .filter(|&(x, y, z)| {
-                self.world.get_voxel(x, y, z).is_solid()
-                    && FACE_NEIGHBORS.iter().all(|(dx, dy, dz)| {
-                        self.world.get_voxel(x + dx, y + dy, z + dz).is_solid()
-                    })
-            })
+            .filter(|&pos| is_enclosed(&self.world, pos))
             .collect();
         for pos in interior {
             self.write(pos, Voxel::AIR, WriteMode::Replace)?;
@@ -379,6 +404,128 @@ impl Scratch {
             );
             self.write(pos, voxel, mode)?;
         }
+        Ok(())
+    }
+
+    /// Store a pipeline graph on the document, and — unless `apply` is
+    /// off — evaluate it and write what it produces.
+    ///
+    /// The write half is deliberately identical to [`Self::generate`]:
+    /// a graph is a generator with a shape, so its patch goes through
+    /// the same dedup and the same [`Self::write`] door, and inherits
+    /// the same budget, coordinate ceiling and `write_mode`.
+    ///
+    /// Everything before that is the part a graph needs and a single
+    /// generator doesn't. The graph arrives as raw JSON rather than a
+    /// typed field for two reasons that happen to want the same thing:
+    /// the generated tool schema stays a bare object instead of nine
+    /// more definitions an agent carries in context every turn, and the
+    /// unknown-key check below can name the field that was misspelled —
+    /// which `#[serde(deny_unknown_fields)]` cannot do here, because
+    /// these same types have to stay lenient for `.vxlt`.
+    fn run_graph(
+        &mut self,
+        index: usize,
+        sent: &Value,
+        apply: bool,
+        translate: [i32; 3],
+        mode: WriteMode,
+    ) -> Result<(), OpsError> {
+        check_coord(tuple(translate))?;
+        let graph: PipelineGraph = serde_json::from_value(sent.clone())
+            .map_err(|e| OpsError::new(ErrorCode::InvalidGraph, e.to_string()))?;
+        let understood = serde_json::to_value(&graph)
+            .map_err(|e| OpsError::new(ErrorCode::InvalidGraph, e.to_string()))?;
+        reject_unknown_graph_keys(sent, &understood, "graph")?;
+        self.commit_graph(index, graph, apply, translate, mode)
+    }
+
+    /// Change the graph the document already has.
+    ///
+    /// Edits run against a copy and are only kept if every one of them
+    /// lands — the same atomicity the batch itself has, one level down.
+    /// A `connect` that would close a cycle is refused by the graph's
+    /// own check, which is the point of editing through its methods
+    /// rather than reaching into `nodes`.
+    fn edit_graph(
+        &mut self,
+        index: usize,
+        edits: &[GraphEdit],
+        apply: bool,
+        translate: [i32; 3],
+        mode: WriteMode,
+    ) -> Result<(), OpsError> {
+        check_coord(tuple(translate))?;
+        if edits.len() > MAX_GRAPH_EDITS {
+            return Err(OpsError::new(
+                ErrorCode::TooManyOps,
+                format!(
+                    "{} edits in one op; at most {} are allowed — a graph that needs more \
+                     is quicker to send whole",
+                    edits.len(),
+                    MAX_GRAPH_EDITS
+                ),
+            ));
+        }
+        // Start from what an earlier op in this batch left, so
+        // `graph` then `graph_edit` reads the way it looks.
+        let mut graph = self
+            .graph
+            .clone()
+            .unwrap_or_else(|| self.base_graph.clone());
+        for (position, edit) in edits.iter().enumerate() {
+            apply_graph_edit(&mut graph, edit).map_err(|mut e| {
+                e.message = format!("edit[{position}]: {}", e.message);
+                e
+            })?;
+        }
+        self.commit_graph(index, graph, apply, translate, mode)
+    }
+
+    /// Validate a graph, optionally evaluate it into the world, and keep
+    /// it on the document.
+    ///
+    /// Shared by `graph` and `graph_edit` so a graph that arrived whole
+    /// and one that was edited into place are checked and written by the
+    /// same code — the same reason `apply_ops` and `preview_ops` share
+    /// [`run_batch`](super::run_batch).
+    ///
+    /// The write half is deliberately identical to [`Self::generate`]:
+    /// a graph is a generator with a shape, so its patch goes through
+    /// the same dedup and the same [`Self::write`] door, and inherits
+    /// the budget, the coordinate ceiling and `write_mode` from it.
+    fn commit_graph(
+        &mut self,
+        index: usize,
+        mut graph: PipelineGraph,
+        apply: bool,
+        translate: [i32; 3],
+        mode: WriteMode,
+    ) -> Result<(), OpsError> {
+        graph.normalize();
+        graph.validate().map_err(graph_error)?;
+        registry::check_graph_sources(&graph)?;
+
+        if apply {
+            let patch = graph.evaluate().map_err(|e| {
+                OpsError::new(ErrorCode::GeneratorFailed, format!("graph failed: {e}"))
+            })?;
+            for note in &patch.notes {
+                self.notes.push(format!("op[{index}] graph: {note}"));
+            }
+            for (pos, voxel) in patch.dedup_last_write() {
+                let pos = (
+                    pos.0.saturating_add(translate[0]),
+                    pos.1.saturating_add(translate[1]),
+                    pos.2.saturating_add(translate[2]),
+                );
+                self.write(pos, voxel, mode)?;
+            }
+        }
+        // Stored whether or not it ran: `apply: false` is how a graph
+        // gets built up across batches, and a graph nobody kept is a
+        // graph the human can't open.
+        self.graph = Some(graph);
         Ok(())
     }
 
@@ -450,6 +597,195 @@ impl Scratch {
         check_region(region)?;
         Ok((region, from_selection))
     }
+}
+
+/// Apply one edit to a graph, in the graph's own terms.
+///
+/// Every arm goes through a `PipelineGraph` method rather than touching
+/// `nodes` directly, so an agent's `connect` gets the same cycle check
+/// and the same rollback a human dragging a wire in the panel does, and
+/// `remove` clears the wires that pointed at the node for both of them.
+fn apply_graph_edit(graph: &mut PipelineGraph, edit: &GraphEdit) -> Result<(), OpsError> {
+    match edit {
+        GraphEdit::AddNode { node } => {
+            let mut parsed: crate::procgen::GraphNode = serde_json::from_value(node.clone())
+                .map_err(|e| OpsError::new(ErrorCode::InvalidGraph, e.to_string()))?;
+            let understood = serde_json::to_value(&parsed)
+                .map_err(|e| OpsError::new(ErrorCode::InvalidGraph, e.to_string()))?;
+            reject_unknown_graph_keys(node, &understood, "node")?;
+            if graph.get(parsed.id).is_some() {
+                return Err(OpsError::new(
+                    ErrorCode::InvalidGraph,
+                    format!("node {} already exists; pick an unused id", parsed.id),
+                ));
+            }
+            // An agent sends no layout, and every node at [0, 0] is a
+            // pile the human can't read. The whole-graph path re-lays
+            // out on arrival; a single node joining a laid-out graph
+            // takes its own cascade slot instead.
+            if parsed.position == [0.0, 0.0] {
+                parsed.position = PipelineGraph::place(parsed.id);
+            }
+            graph.nodes.push(parsed);
+            Ok(())
+        }
+        GraphEdit::RemoveNode { id } => {
+            require_node(graph, *id)?;
+            graph.remove(*id);
+            Ok(())
+        }
+        GraphEdit::SetParams { id, params } => set_node_params(graph, *id, params),
+        GraphEdit::Connect {
+            target,
+            slot,
+            source,
+        } => {
+            require_node(graph, *source)?;
+            graph
+                .set_input(*target, *slot, Some(*source))
+                .map_err(graph_error)
+        }
+        GraphEdit::Disconnect { target, slot } => {
+            graph.set_input(*target, *slot, None).map_err(graph_error)
+        }
+        GraphEdit::Clear => {
+            *graph = PipelineGraph::default();
+            Ok(())
+        }
+    }
+}
+
+fn require_node(graph: &PipelineGraph, id: crate::procgen::NodeId) -> Result<(), OpsError> {
+    if graph.get(id).is_none() {
+        return Err(OpsError::new(
+            ErrorCode::InvalidGraph,
+            format!("no node with id {id}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Merge `params` into a node's payload, keeping everything it doesn't
+/// name.
+///
+/// Round-tripping the payload through JSON rather than matching on every
+/// `NodeKind` variant: one implementation covers generator parameters
+/// and transform fields alike, and it can't fall behind a variant added
+/// later. Same merge-over-current semantics the registry gives a
+/// `generate` op, and the same refusal of a name nothing reads.
+fn set_node_params(
+    graph: &mut PipelineGraph,
+    id: crate::procgen::NodeId,
+    params: &Value,
+) -> Result<(), OpsError> {
+    let Value::Object(overrides) = params else {
+        return Err(OpsError::new(
+            ErrorCode::InvalidGraph,
+            "params must be a JSON object",
+        ));
+    };
+    let node = graph
+        .get_mut(id)
+        .ok_or_else(|| OpsError::new(ErrorCode::InvalidGraph, format!("no node with id {id}")))?;
+    let mut current = match serde_json::to_value(&node.kind) {
+        Ok(Value::Object(map)) => map,
+        _ => {
+            return Err(OpsError::new(
+                ErrorCode::InvalidGraph,
+                "this node has no parameters to set",
+            ))
+        }
+    };
+    for (key, value) in overrides {
+        if key == "kind" {
+            return Err(OpsError::new(
+                ErrorCode::InvalidGraph,
+                "a node's kind can't be changed in place; remove it and add the one you meant",
+            ));
+        }
+        if !current.contains_key(key) {
+            let valid: Vec<&str> = current.keys().map(String::as_str).collect();
+            return Err(OpsError::new(
+                ErrorCode::InvalidGraph,
+                format!(
+                    "node {id} has no field {key:?}; it accepts {}",
+                    valid.join(", ")
+                ),
+            ));
+        }
+        current.insert(key.clone(), value.clone());
+    }
+    node.kind = serde_json::from_value(Value::Object(current))
+        .map_err(|e| OpsError::new(ErrorCode::InvalidGraph, e.to_string()))?;
+    Ok(())
+}
+
+/// A graph problem in this protocol's terms. The split is the one an
+/// agent acts on: a malformed graph gets edited, an oversized one gets
+/// split.
+fn graph_error(error: crate::procgen::GraphError) -> OpsError {
+    use crate::procgen::GraphError as G;
+    let code = match error {
+        G::TooManyNodes { .. } => ErrorCode::GraphTooLarge,
+        _ => ErrorCode::InvalidGraph,
+    };
+    OpsError::new(code, error.to_string())
+}
+
+/// Refuse keys the graph types didn't understand, by comparing what was
+/// sent against what survived a round trip through them.
+///
+/// The alternative — `#[serde(deny_unknown_fields)]` — isn't available:
+/// the same types are the `.vxlt` storage format, which must ignore
+/// fields a newer build wrote, and a node's payload is flattened, which
+/// serde won't combine with the deny attribute anyway. Round-tripping
+/// gets the strictness without a hand-written key list that would start
+/// drifting from the structs the day it was written.
+///
+/// Serialization emits every field (nothing here is `skip_serializing`),
+/// so a key present in the request and absent from the round trip is a
+/// key nothing read. Arrays line up index for index — `nodes` comes back
+/// in the order it went in.
+fn reject_unknown_graph_keys(
+    sent: &Value,
+    understood: &Value,
+    path: &str,
+) -> Result<(), OpsError> {
+    match (sent, understood) {
+        (Value::Object(sent), Value::Object(understood)) => {
+            for (key, value) in sent {
+                let Some(counterpart) = understood.get(key) else {
+                    let valid: Vec<&str> = understood.keys().map(String::as_str).collect();
+                    return Err(OpsError::new(
+                        ErrorCode::InvalidGraph,
+                        format!(
+                            "{path}: unknown field {key:?}; this node accepts {}",
+                            valid.join(", ")
+                        ),
+                    ));
+                };
+                reject_unknown_graph_keys(value, counterpart, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        (Value::Array(sent), Value::Array(understood)) => {
+            for (i, (sent, understood)) in sent.iter().zip(understood).enumerate() {
+                reject_unknown_graph_keys(sent, understood, &format!("{path}[{i}]"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A solid cell whose six face neighbors are all solid — the interior
+/// `hollow` removes, and the count `describe` reports so an agent can
+/// tell whether hollowing would buy anything before exporting.
+pub(super) fn is_enclosed(world: &World, pos: (i32, i32, i32)) -> bool {
+    world.get_voxel(pos.0, pos.1, pos.2).is_solid()
+        && FACE_NEIGHBORS
+            .iter()
+            .all(|(dx, dy, dz)| world.get_voxel(pos.0 + dx, pos.1 + dy, pos.2 + dz).is_solid())
 }
 
 fn tuple(p: [i32; 3]) -> (i32, i32, i32) {
@@ -591,10 +927,25 @@ fn check_region(region: Selection) -> Result<(), OpsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_ops::{AgentSession, ApplyReport, OpsBatch, MAX_OPS_PER_BATCH};
+    use crate::agent_ops::{
+        AgentSession, ApplyReport, OpsBatch, MAX_GRAPH_SOURCES, MAX_OPS_PER_BATCH,
+    };
 
     fn parse(json: &str) -> OpsBatch {
         serde_json::from_str(json).expect("test batch should parse")
+    }
+
+    /// A document with nothing in it, borrowed for the scratch tests
+    /// that only exercise the budget.
+    fn empty_document<'a>(
+        world: &'a World,
+        graph: &'a PipelineGraph,
+    ) -> crate::agent_ops::BatchInput<'a> {
+        crate::agent_ops::BatchInput {
+            world,
+            selection: None,
+            graph,
+        }
     }
 
     fn apply(session: &mut AgentSession, json: &str) -> ApplyReport {
@@ -1022,6 +1373,314 @@ mod tests {
         assert_eq!(after.min[0], before.min[0], "the original half must not move");
     }
 
+    // -------- graphs --------
+
+    /// A three-node pipeline, as an agent would send it: no `next_id`,
+    /// no positions, each source naming only the parameters it changes.
+    const GRAPH_BATCH: &str = r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+        {"id":0,"kind":"builtin.perlin_terrain","width":8,"depth":8,"max_height":4},
+        {"id":1,"kind":"filter","input":0,"predicate":{"y_above":1}},
+        {"id":2,"kind":"output","input":1}
+    ]}}]}"#;
+
+    #[test]
+    fn a_graph_writes_its_output_and_stays_on_the_document() {
+        // The whole point of sending a graph instead of voxels: the
+        // model lands *and* the recipe is still there to tune.
+        let mut session = AgentSession::new();
+        let report = apply(&mut session, GRAPH_BATCH);
+
+        assert!(report.changed_voxels > 0, "the graph built something");
+        assert!(session.world.scene_aabb().is_some());
+        assert_eq!(session.graph.nodes.len(), 3);
+        assert_eq!(
+            session.graph.next_id, 3,
+            "bookkeeping the agent never sent is derived on the way in"
+        );
+        // Every voxel came through the filter.
+        let (min, _) = session.world.scene_aabb().expect("the graph built something");
+        assert!(min.1 >= 1, "filter leaked y={}", min.1);
+    }
+
+    #[test]
+    fn a_graph_can_be_stored_without_being_run() {
+        // `apply: false` is how a graph gets built up over several
+        // batches — dry_run can't stand in for it, since a dry run
+        // keeps nothing at all.
+        let mut session = AgentSession::new();
+        let report = apply(
+            &mut session,
+            &GRAPH_BATCH.replace(r#""graph":{"#, r#""apply":false,"graph":{"#),
+        );
+        assert_eq!(report.changed_voxels, 0, "nothing was written");
+        assert_eq!(session.world.chunk_count(), 0);
+        assert_eq!(session.graph.nodes.len(), 3, "but the graph was kept");
+    }
+
+    #[test]
+    fn a_graph_op_offsets_its_output_like_generate_does() {
+        let mut session = AgentSession::new();
+        apply(
+            &mut session,
+            &GRAPH_BATCH.replace(
+                r#""op":"graph""#,
+                r#""op":"graph","translate":[100,0,0]"#,
+            ),
+        );
+        let (min, _) = session.world.scene_aabb().expect("the graph built something");
+        assert!(min.0 >= 90, "translated x should be far from the origin: {min:?}");
+    }
+
+    #[test]
+    fn a_misspelled_node_field_is_named_rather_than_ignored() {
+        // The graph types stay lenient — they are also the `.vxlt`
+        // storage format — so this check lives in the protocol, and it
+        // has to say *which* field and *where*.
+        let mut session = AgentSession::new();
+        let error = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+                {"id":0,"kind":"builtin.perlin_terrain","widht":8},
+                {"id":1,"kind":"output","input":0}
+            ]}}]}"#,
+        );
+        assert_eq!(error.code, ErrorCode::InvalidGraph);
+        assert!(
+            error.message.contains("widht") && error.message.contains("width"),
+            "the message should name the bad key and the real ones, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_malformed_graph_is_refused_with_a_code_the_agent_can_branch_on() {
+        let mut session = AgentSession::new();
+        let duplicate = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+                {"id":0,"kind":"builtin.perlin_terrain"},
+                {"id":0,"kind":"output","input":0}
+            ]}}]}"#,
+        );
+        assert_eq!(duplicate.code, ErrorCode::InvalidGraph);
+
+        let no_output = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+                {"id":0,"kind":"builtin.perlin_terrain"}
+            ]}}]}"#,
+        );
+        assert_eq!(no_output.code, ErrorCode::InvalidGraph);
+    }
+
+    #[test]
+    fn a_graph_node_cannot_walk_past_the_generator_size_ceiling() {
+        // The same ceiling `generate` enforces, reached by the other
+        // door: a graph node holds an already-built generator, so
+        // nothing in the registry's build path gets a look at it.
+        let mut session = AgentSession::new();
+        let error = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+                {"id":0,"kind":"builtin.perlin_terrain","width":100000,"depth":100000},
+                {"id":1,"kind":"output","input":0}
+            ]}}]}"#,
+        );
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(
+            error.message.contains("node 0"),
+            "a graph names its nodes by id; the message must too, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn too_many_source_nodes_is_refused_before_evaluation() {
+        // Each source is legal on its own; evaluation holds all of them
+        // at once, and none of it has reached the cell budget yet.
+        let mut nodes: Vec<String> = (0..=MAX_GRAPH_SOURCES)
+            .map(|i| {
+                format!(
+                    r#"{{"id":{i},"kind":"builtin.perlin_terrain","width":8,"depth":8}}"#
+                )
+            })
+            .collect();
+        nodes.push(format!(
+            r#"{{"id":{},"kind":"output","input":0}}"#,
+            MAX_GRAPH_SOURCES + 1
+        ));
+        let batch = format!(
+            r#"{{"version":1,"ops":[{{"op":"graph","graph":{{"nodes":[{}]}}}}]}}"#,
+            nodes.join(",")
+        );
+        let mut session = AgentSession::new();
+        assert_eq!(
+            refuse(&mut session, &batch).code,
+            ErrorCode::GraphTooLarge
+        );
+    }
+
+    #[test]
+    fn a_dry_run_graph_keeps_neither_the_voxels_nor_the_graph() {
+        let mut session = AgentSession::new();
+        let report = apply(
+            &mut session,
+            &GRAPH_BATCH.replace(r#""ops":["#, r#""options":{"dry_run":true},"ops":["#),
+        );
+        assert!(report.dry_run);
+        assert!(report.changed_voxels > 0, "it still reports what would land");
+        assert_eq!(session.world.chunk_count(), 0);
+        assert!(
+            session.graph.nodes.is_empty(),
+            "a dry run commits nothing, the graph included"
+        );
+    }
+
+    // -------- editing a graph in place --------
+
+    /// Build a graph over two batches: nodes first without evaluating,
+    /// then wire it up and run it. This is what `apply: false` is for.
+    #[test]
+    fn a_graph_can_be_built_up_by_edits_across_batches() {
+        let mut session = AgentSession::new();
+        apply(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","apply":false,"edits":[
+                {"edit":"add_node","node":{"id":0,"kind":"builtin.perlin_terrain","width":8,"depth":8}},
+                {"edit":"add_node","node":{"id":1,"kind":"output"}}
+            ]}]}"#,
+        );
+        assert_eq!(session.graph.nodes.len(), 2);
+        assert_eq!(session.world.chunk_count(), 0, "nothing was evaluated yet");
+
+        let report = apply(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","edits":[
+                {"edit":"connect","target":1,"slot":0,"source":0}
+            ]}]}"#,
+        );
+        assert!(report.changed_voxels > 0, "wiring it up ran it");
+        assert_eq!(session.graph.nodes.len(), 2, "the edit kept the graph");
+    }
+
+    #[test]
+    fn set_params_keeps_the_fields_it_does_not_name() {
+        let mut session = AgentSession::new();
+        apply(&mut session, GRAPH_BATCH);
+        apply(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","apply":false,"edits":[
+                {"edit":"set_params","id":0,"params":{"width":16}}
+            ]}]}"#,
+        );
+        match &session.graph.get(0).unwrap().kind {
+            crate::procgen::NodeKind::Terrain(terrain) => {
+                assert_eq!(terrain.width, 16, "the named field changed");
+                assert_eq!(terrain.depth, 8, "the others kept the batch's values");
+            }
+            other => panic!("node 0 is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_edit_that_fails_leaves_the_graph_exactly_as_it_was() {
+        // Atomicity one level down from the batch: the first edit is
+        // fine, the second closes a cycle. Neither may survive.
+        let mut session = AgentSession::new();
+        apply(&mut session, GRAPH_BATCH);
+        let before = session.graph.clone();
+
+        let error = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","edits":[
+                {"edit":"set_params","id":0,"params":{"width":32}},
+                {"edit":"connect","target":0,"slot":0,"source":2}
+            ]}]}"#,
+        );
+        assert_eq!(error.code, ErrorCode::InvalidGraph);
+        assert!(
+            error.message.contains("edit[1]"),
+            "the message should say which edit failed, got: {}",
+            error.message
+        );
+        assert_eq!(session.graph, before, "not even the first edit stuck");
+    }
+
+    #[test]
+    fn edits_name_the_field_or_node_that_was_wrong() {
+        let mut session = AgentSession::new();
+        apply(&mut session, GRAPH_BATCH);
+
+        let bad_field = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","edits":[
+                {"edit":"set_params","id":0,"params":{"widht":16}}
+            ]}]}"#,
+        );
+        assert!(
+            bad_field.message.contains("widht") && bad_field.message.contains("width"),
+            "got: {}",
+            bad_field.message
+        );
+
+        let missing = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","edits":[
+                {"edit":"connect","target":2,"slot":0,"source":9}
+            ]}]}"#,
+        );
+        assert!(missing.message.contains("9"), "got: {}", missing.message);
+
+        let retyped = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","edits":[
+                {"edit":"set_params","id":0,"params":{"kind":"output"}}
+            ]}]}"#,
+        );
+        assert!(
+            retyped.message.contains("kind"),
+            "changing kind in place must be refused by name, got: {}",
+            retyped.message
+        );
+    }
+
+    #[test]
+    fn removing_a_node_clears_the_wires_that_pointed_at_it() {
+        let mut session = AgentSession::new();
+        apply(&mut session, GRAPH_BATCH);
+        apply(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","apply":false,"edits":[
+                {"edit":"remove_node","id":0}
+            ]}]}"#,
+        );
+        assert_eq!(session.graph.nodes.len(), 2);
+        assert_eq!(
+            session.graph.get_input(1, 0).unwrap(),
+            None,
+            "the filter's input must not still name a node that is gone"
+        );
+    }
+
+    #[test]
+    fn a_node_added_by_an_agent_is_laid_out_rather_than_piled_on_the_origin() {
+        let mut session = AgentSession::new();
+        apply(&mut session, GRAPH_BATCH);
+        apply(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph_edit","apply":false,"edits":[
+                {"edit":"add_node","node":{"id":9,"kind":"translate","dy":4}}
+            ]}]}"#,
+        );
+        let added = session.graph.get(9).expect("the node was added");
+        assert_ne!(added.position, [0.0, 0.0]);
+        for node in &session.graph.nodes {
+            if node.id != 9 {
+                assert_ne!(node.position, added.position, "nodes overlap");
+            }
+        }
+    }
+
     // -------- generators --------
 
     #[test]
@@ -1139,7 +1798,7 @@ mod tests {
 
     #[test]
     fn the_cell_budget_stops_a_batch() {
-        let mut scratch = Scratch::new(&World::new(), None);
+        let mut scratch = Scratch::new(empty_document(&World::new(), &PipelineGraph::default()));
         assert!(scratch.charge(MAX_BATCH_CELLS).is_ok());
         assert_eq!(
             scratch.charge(1).unwrap_err().code,
@@ -1149,7 +1808,7 @@ mod tests {
 
     #[test]
     fn every_visited_cell_is_charged_including_masked_ones() {
-        let mut scratch = Scratch::new(&World::new(), None);
+        let mut scratch = Scratch::new(empty_document(&World::new(), &PipelineGraph::default()));
         let voxel = Voxel::from_rgb(1, 2, 3);
         scratch.write((0, 0, 0), voxel, WriteMode::Replace).unwrap();
         // Masked out (the cell is air), but it was still visited.
@@ -1349,9 +2008,9 @@ mod tests {
         let batch = r#"{"version":1,"ops":[
             {"op":"box","min":[0,0,0],"max":[5,5,5],"voxel":{"rgb":[1,2,3]}}
         ]}"#;
-        let mut first = Scratch::new(&World::new(), None);
+        let mut first = Scratch::new(empty_document(&World::new(), &PipelineGraph::default()));
         first.run_op(0, &parse(batch).ops[0]).unwrap();
-        let mut second = Scratch::new(&World::new(), None);
+        let mut second = Scratch::new(empty_document(&World::new(), &PipelineGraph::default()));
         second.run_op(0, &parse(batch).ops[0]).unwrap();
 
         let a: Vec<_> = first.finish().changes.iter().map(|c| c.pos).collect();

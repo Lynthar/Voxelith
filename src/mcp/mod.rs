@@ -327,18 +327,25 @@ impl VoxelithMcp {
     #[tool(
         description = "List the generators an op with \"op\": \"generate\" can call, each \
                        with its parameters at their default values. That listing is the \
-                       parameter template: copy it, change what you want, send it back."
+                       parameter template: copy it, change what you want, send it back. \
+                       Also returns graph_template, a working pipeline graph for the \
+                       \"graph\" op — read it before writing one, it is where the node \
+                       format is defined."
     )]
     fn list_generators(&self) -> Result<CallToolResult, McpError> {
         answered(Generators {
             generators: crate::agent_ops::generator_infos(),
+            graph_template: crate::agent_ops::graph_template(),
         })
     }
 
     #[tool(
         description = "Summarize the current document: voxel and chunk counts, bounding \
                        box, the most common colors, emissive / metallic / tint-zone \
-                       tallies, sockets, selection and undo depth."
+                       tallies, sockets, selection and undo depth. Also measures the \
+                       shape itself — connected components, floating parts, enclosed \
+                       voxels, per-axis symmetry — which a rendered view cannot tell you \
+                       reliably, and returns the document's pipeline graph if it has one."
     )]
     fn describe(&self) -> Result<CallToolResult, McpError> {
         let document = self.document.lock();
@@ -571,6 +578,10 @@ struct Described {
 #[derive(Serialize)]
 struct Generators {
     generators: Vec<crate::agent_ops::GeneratorInfo>,
+    /// A working pipeline graph to copy — the only place the graph
+    /// format is spelled out, since the `graph` op's schema keeps it an
+    /// opaque object rather than costing every turn nine definitions.
+    graph_template: serde_json::Value,
 }
 
 #[derive(Serialize)]

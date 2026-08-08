@@ -17,8 +17,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::procgen::PipelineGraph;
 use crate::ui::{ProcgenSettings, ViewportSettings};
+
+pub use legacy_graph::LegacyGraph;
 
 /// Maximum entries kept in the recent-files MRU.
 pub const MAX_RECENT_FILES: usize = 10;
@@ -42,7 +43,18 @@ pub struct Prefs {
     pub panels: PanelVisibility,
     pub viewport: ViewportSettings,
     pub procgen: ProcgenSettings,
-    pub graph: PipelineGraph,
+    /// The pipeline graph as builds up to 0.1.0 stored it — here only so
+    /// the one a user already has can be carried into their project the
+    /// first time they run a build that keeps graphs with the document.
+    ///
+    /// Nothing writes it any more. It stays on disk (rather than being
+    /// cleared on migration) so the copy survives if the user quits
+    /// without saving a project; the field goes away a version from now.
+    pub graph: LegacyGraph,
+    /// Whether [`Self::graph`] has already been carried across. Without
+    /// it the migration would re-run every launch and drop the old graph
+    /// on top of whatever the user has been editing since.
+    pub graph_migrated: bool,
     pub editor: EditorPrefs,
     pub recent_files: Vec<PathBuf>,
     /// Recent AI-generation prompts, most-recent first. Surfaced as a
@@ -65,7 +77,8 @@ impl Default for Prefs {
             panels: PanelVisibility::default(),
             viewport: ViewportSettings::default(),
             procgen: ProcgenSettings::default(),
-            graph: PipelineGraph::default(),
+            graph: LegacyGraph::default(),
+            graph_migrated: false,
             editor: EditorPrefs::default(),
             recent_files: Vec::new(),
             recent_ai_prompts: Vec::new(),
@@ -271,9 +284,212 @@ impl Prefs {
     }
 }
 
+/// The pipeline graph as it was stored in `prefs.ron` before graphs
+/// moved into the project file.
+///
+/// A frozen copy of the old shape rather than a `serde` attribute on the
+/// live types: the live ones now serialize one flat object per node
+/// tagged by `kind`, and a graph a user already has on disk is spelled
+/// the old way — externally tagged, `Terrain((seed: 42, …))`. Reading it
+/// needs the old spelling, and the old spelling has exactly one job, so
+/// it lives here and dies here.
+///
+/// Only the shapes that actually changed are restated. The generator
+/// parameter structs are unchanged, so this borrows them.
+mod legacy_graph {
+    use serde::{Deserialize, Serialize};
+
+    use crate::procgen::{self, LSystemTree, NodeId, PerlinTerrain, WfcGenerator};
+
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct LegacyGraph {
+        pub nodes: Vec<LegacyNode>,
+        pub next_id: NodeId,
+        pub output_node: Option<NodeId>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct LegacyNode {
+        pub id: NodeId,
+        pub kind: LegacyKind,
+        #[serde(default)]
+        pub position: [f32; 2],
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub enum LegacyKind {
+        Terrain(PerlinTerrain),
+        Tree(LSystemTree),
+        Wfc(WfcGenerator),
+        Translate {
+            input: Option<NodeId>,
+            dx: i32,
+            dy: i32,
+            dz: i32,
+        },
+        Filter {
+            input: Option<NodeId>,
+            predicate: LegacyPredicate,
+        },
+        Mask {
+            subject: Option<NodeId>,
+            mask: Option<NodeId>,
+            mode: LegacyMaskMode,
+        },
+        Combine {
+            a: Option<NodeId>,
+            b: Option<NodeId>,
+            op: LegacyCombineOp,
+        },
+        Output {
+            input: Option<NodeId>,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum LegacyPredicate {
+        YAbove(i32),
+        YBelow(i32),
+        MatchesColor([u8; 4]),
+        InsideBox {
+            min: (i32, i32, i32),
+            max: (i32, i32, i32),
+        },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum LegacyMaskMode {
+        AboveColumn,
+        BelowColumn,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum LegacyCombineOp {
+        Union,
+        Difference,
+        Intersect,
+    }
+
+    impl LegacyGraph {
+        pub fn is_empty(&self) -> bool {
+            self.nodes.is_empty()
+        }
+
+        /// Convert to the live graph. Total — every old shape has an
+        /// exact counterpart, which is why the move could keep the same
+        /// data model instead of inventing a second one.
+        pub fn to_graph(&self) -> procgen::PipelineGraph {
+            let mut graph = procgen::PipelineGraph {
+                nodes: self
+                    .nodes
+                    .iter()
+                    .map(|node| procgen::GraphNode {
+                        id: node.id,
+                        kind: node.kind.to_kind(),
+                        position: node.position,
+                    })
+                    .collect(),
+                next_id: self.next_id,
+                output_node: self.output_node,
+            };
+            graph.normalize();
+            graph
+        }
+    }
+
+    impl LegacyKind {
+        fn to_kind(&self) -> procgen::NodeKind {
+            use procgen::NodeKind as K;
+            match self {
+                Self::Terrain(g) => K::Terrain(g.clone()),
+                Self::Tree(g) => K::Tree(g.clone()),
+                Self::Wfc(g) => K::Wfc(g.clone()),
+                Self::Translate { input, dx, dy, dz } => K::Translate {
+                    input: *input,
+                    dx: *dx,
+                    dy: *dy,
+                    dz: *dz,
+                },
+                Self::Filter { input, predicate } => K::Filter {
+                    input: *input,
+                    predicate: predicate.to_predicate(),
+                },
+                Self::Mask {
+                    subject,
+                    mask,
+                    mode,
+                } => K::Mask {
+                    subject: *subject,
+                    mask: *mask,
+                    mode: match mode {
+                        LegacyMaskMode::AboveColumn => procgen::MaskMode::AboveColumn,
+                        LegacyMaskMode::BelowColumn => procgen::MaskMode::BelowColumn,
+                    },
+                },
+                Self::Combine { a, b, op } => K::Combine {
+                    a: *a,
+                    b: *b,
+                    op: match op {
+                        LegacyCombineOp::Union => procgen::CombineOp::Union,
+                        LegacyCombineOp::Difference => procgen::CombineOp::Difference,
+                        LegacyCombineOp::Intersect => procgen::CombineOp::Intersect,
+                    },
+                },
+                Self::Output { input } => K::Output { input: *input },
+            }
+        }
+    }
+
+    impl LegacyPredicate {
+        fn to_predicate(&self) -> procgen::FilterPredicate {
+            use procgen::FilterPredicate as P;
+            match self {
+                Self::YAbove(t) => P::YAbove(*t),
+                Self::YBelow(t) => P::YBelow(*t),
+                Self::MatchesColor(rgba) => P::MatchesColor(*rgba),
+                Self::InsideBox { min, max } => P::InsideBox {
+                    min: *min,
+                    max: *max,
+                },
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A graph written by a build that kept graphs in prefs must survive
+    /// the move into project files — the user's work, not a cache.
+    #[test]
+    fn a_graph_from_an_older_prefs_file_still_reads() {
+        let ron = r#"(
+            graph: (
+                nodes: [
+                    (id: 0, kind: Terrain((seed: 7, width: 16, depth: 16,
+                        min_height: 0, max_height: 4, frequency: 0.03, octaves: 3)),
+                        position: (60.0, 40.0)),
+                    (id: 1, kind: Filter(input: Some(0), predicate: YAbove(2)),
+                        position: (280.0, 40.0)),
+                    (id: 2, kind: Output(input: Some(1)), position: (500.0, 40.0)),
+                ],
+                next_id: 3,
+                output_node: Some(2),
+            )
+        )"#;
+        let prefs: Prefs = ron::from_str(ron).expect("an older prefs file must still parse");
+        assert!(!prefs.graph.is_empty());
+        assert!(!prefs.graph_migrated, "a file that predates the flag");
+
+        let graph = prefs.graph.to_graph();
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.next_id, 3);
+        assert_eq!(graph.output_node, Some(2));
+        // It isn't just parsed, it runs.
+        assert!(!graph.evaluate().expect("migrated graph evaluates").is_empty());
+    }
 
     #[test]
     fn test_default_roundtrip() {

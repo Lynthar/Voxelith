@@ -364,7 +364,14 @@ impl App {
         // borrowed, keeps that borrow out of the answering path.
         let batch = match &call.request {
             AgentRequest::ApplyOps(batch) => Some((
-                agent_ops::run_batch(&self.world, self.editor.selection, batch),
+                agent_ops::run_batch(
+                    agent_ops::BatchInput {
+                        world: &self.world,
+                        selection: self.editor.selection,
+                        graph: &self.ui.graph,
+                    },
+                    batch,
+                ),
                 batch.options.dry_run,
             )),
             _ => None,
@@ -472,6 +479,10 @@ impl App {
                 world: &outcome.world,
                 selection: outcome.selection,
                 sockets: &self.editor.sockets,
+                // Same rule as the world: under a dry run the graph to
+                // describe is the one the batch *would* leave, which is
+                // the editor's own unless the batch carried a new one.
+                graph: outcome.graph.as_ref().unwrap_or(&self.ui.graph),
                 // The history genuinely did not move, so these are the
                 // editor's real depths rather than the preview's zeros.
                 undo_depth: self.editor.history.undo_count(),
@@ -542,6 +553,19 @@ impl App {
             None => self.deselect(),
         }
 
+        // A graph the batch carried goes straight into the Graph panel.
+        // This is what sending a graph is *for*: the agent picks the
+        // generators and wires them, the human takes over at the
+        // sliders. Laid out on arrival, since an agent sends no
+        // positions and every node would otherwise pile up on the
+        // origin.
+        if let Some(mut graph) = outcome.graph {
+            if graph.all_at_origin() {
+                graph.relayout();
+            }
+            self.ui.graph = graph;
+        }
+
         self.agent.applied += 1;
         self.ui
             .set_status(format!("Agent applied {changed} voxel changes"));
@@ -571,6 +595,7 @@ impl App {
             world: &self.world,
             selection: self.editor.selection,
             sockets: &self.editor.sockets,
+            graph: &self.ui.graph,
             undo_depth: self.editor.history.undo_count(),
             redo_depth: self.editor.history.redo_count(),
         }

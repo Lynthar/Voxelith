@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use voxelith::{core::Voxel, editor::Socket, io, ui::ExportReport};
+use voxelith::{core::Voxel, editor::Socket, io, procgen::PipelineGraph, ui::ExportReport};
 
 use super::App;
 
@@ -82,6 +82,23 @@ fn sockets_from_state(state: &io::EditorState) -> Vec<Socket> {
         .iter()
         .map(|s| Socket::new(s.name.clone(), s.position, s.normal))
         .collect()
+}
+
+/// Take the pipeline graph out of a loaded `EditorState`, ready for the
+/// Graph panel.
+///
+/// `normalize` because the file is an external input — its `next_id` is
+/// whatever wrote it, and a stale one hands the next added node an id
+/// that is already taken. The re-layout covers the two writers that
+/// have no business inventing panel coordinates: a build older than
+/// `position`, and an agent, which sends nodes with no layout at all.
+fn graph_from_state(state: &io::EditorState) -> PipelineGraph {
+    let mut graph = state.graph.clone();
+    graph.normalize();
+    if graph.all_at_origin() {
+        graph.relayout();
+    }
+    graph
 }
 
 /// Which remembered directory a file dialog should open in. Keeping
@@ -192,6 +209,10 @@ impl App {
                     normal: s.normal,
                 })
                 .collect(),
+            // Document data, like the sockets above: the graph says how
+            // this model was made, so it belongs to the project rather
+            // than to whoever's machine the editor is running on.
+            graph: self.ui.graph.clone(),
         }
     }
 
@@ -248,6 +269,7 @@ impl App {
             .collect();
         self.editor.current_tool = super::tool_from_index(editor_state.selected_tool as u8);
         self.editor.sockets = sockets_from_state(&editor_state);
+        self.ui.graph = graph_from_state(&editor_state);
         let camera = camera_from_state(&editor_state);
         if let (Some(renderer), Some((position, target))) = (&mut self.renderer, camera) {
             renderer.camera.position = position;
@@ -357,6 +379,7 @@ impl App {
                 self.editor.current_tool =
                     super::tool_from_index(editor_state.selected_tool as u8);
                 self.editor.sockets = sockets_from_state(&editor_state);
+                self.ui.graph = graph_from_state(&editor_state);
 
                 let camera = camera_from_state(&editor_state);
                 if let (Some(renderer), Some((position, target))) =
@@ -555,6 +578,10 @@ impl App {
         self.world = world;
         self.reset_scene_session_state();
         self.editor.sockets = sockets_from_state(&state);
+        // The graph joins the world and the sockets on the "restore"
+        // side of this split rather than the camera's: an agent that
+        // rewrote the recipe means for the human to see the new one.
+        self.ui.graph = graph_from_state(&state);
         self.rebuild_all_meshes();
         // `rebuild_all_meshes` flags the document modified — true of an
         // edit, wrong here: this world came *out* of the user's file, so

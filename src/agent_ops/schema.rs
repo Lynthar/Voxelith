@@ -342,6 +342,52 @@ pub enum Op {
         #[serde(default)]
         write_mode: WriteMode,
     },
+    /// Store a procedural pipeline graph on the document and write what
+    /// it produces.
+    ///
+    /// A graph is `{"nodes": [ … ]}`, one flat object per node:
+    /// `{"id": 0, "kind": "builtin.perlin_terrain", "width": 32}`,
+    /// `{"id": 1, "kind": "filter", "input": 0, "predicate": {"y_above": 4}}`,
+    /// `{"id": 2, "kind": "output", "input": 1}`. Source nodes are named
+    /// by generator id and take that generator's parameters directly —
+    /// only the ones you want to differ. Transform nodes are
+    /// `translate` / `filter` / `mask` / `combine`, and exactly one
+    /// `output` node marks what the pipeline emits. Call
+    /// `list_generators` for a ready-made graph to copy.
+    ///
+    /// The graph is kept with the project, so a human can open it in the
+    /// editor's Graph panel afterwards and keep tuning the parameters —
+    /// which is the point of sending one instead of voxels. Set
+    /// `apply: false` to store it without evaluating, for building a
+    /// graph up over several batches.
+    Graph {
+        graph: serde_json::Value,
+        #[serde(default = "yes")]
+        apply: bool,
+        /// Offset applied to the whole patch, like `generate`'s.
+        #[serde(default)]
+        translate: [i32; 3],
+        #[serde(default)]
+        write_mode: WriteMode,
+    },
+    /// Change the graph the document already has, instead of resending
+    /// the whole thing.
+    ///
+    /// `describe` reports the current graph; these edits name nodes by
+    /// the ids it shows. The edits run in order against a copy, so a
+    /// batch that fails part-way leaves the graph exactly as it was —
+    /// a wire that would close a cycle is refused and nothing else in
+    /// the list has to be undone by hand. Same `apply` rule as `graph`:
+    /// on by default, `false` to edit without evaluating.
+    GraphEdit {
+        edits: Vec<GraphEdit>,
+        #[serde(default = "yes")]
+        apply: bool,
+        #[serde(default)]
+        translate: [i32; 3],
+        #[serde(default)]
+        write_mode: WriteMode,
+    },
     /// Set the session selection (later ops can then omit `region`).
     Select { min: [i32; 3], max: [i32; 3] },
     /// Clear the session selection.
@@ -382,6 +428,48 @@ pub enum Op {
         #[serde(default)]
         write_mode: WriteMode,
     },
+}
+
+/// One change to the document's pipeline graph.
+///
+/// Six verbs, each mapping to something `PipelineGraph` already does,
+/// which is why this is a vocabulary rather than a second graph API:
+/// the cycle check on `connect` is the editor's own, so an agent and a
+/// human dragging a wire are refused by the same code.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "edit", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum GraphEdit {
+    /// Add a node. `node` is one graph node — the same object a `graph`
+    /// op carries, `{"id": 3, "kind": "translate", "input": 1, "dy": 8}`
+    /// — and its id must not already be in the graph.
+    AddNode { node: serde_json::Value },
+    /// Remove a node. Wires pointing at it are cleared, so the rest of
+    /// the graph stays consistent.
+    RemoveNode { id: u32 },
+    /// Change a node's parameters in place. Only the ones you name;
+    /// the rest keep their values. `kind` can't be changed this way —
+    /// remove the node and add the one you meant.
+    SetParams {
+        id: u32,
+        params: serde_json::Value,
+    },
+    /// Wire `source`'s output into `target`'s input `slot` (0 for
+    /// single-input nodes; `mask` and `combine` take 0 and 1).
+    Connect {
+        target: u32,
+        #[serde(default)]
+        slot: usize,
+        source: u32,
+    },
+    /// Clear one input slot.
+    Disconnect {
+        target: u32,
+        #[serde(default)]
+        slot: usize,
+    },
+    /// Throw the whole graph away and start over.
+    Clear,
 }
 
 fn yes() -> bool {

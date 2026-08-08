@@ -43,6 +43,7 @@ use voxelith::{
     },
     mesh::{patch_to_mesh, GreedyMesher, Mesher},
     prefs::{EditorPrefs, Prefs, WindowPrefs},
+    procgen::PipelineGraph,
     render::Renderer,
     ui::{RenderStats, Ui},
 };
@@ -339,7 +340,7 @@ pub(super) enum GenerateKind {
 
 impl App {
     pub fn new() -> Self {
-        let prefs = Prefs::load();
+        let mut prefs = Prefs::load();
 
         let mut editor = Editor::new();
         editor.brush_color = Voxel::from_rgba(
@@ -370,11 +371,22 @@ impl App {
         ui.state.panels = prefs.panels.clone();
         ui.viewport = prefs.viewport.clone();
         ui.procgen = prefs.procgen.clone();
-        ui.graph = prefs.graph.clone();
-        // Pre-position-field prefs deserialize every node at [0, 0].
-        // Spread them out so the visual editor can see them.
-        if ui.graph.all_at_origin() {
-            ui.graph.relayout();
+        // The graph belongs to the project now, so a fresh session opens
+        // with an empty one — except the first time a build that stores
+        // it there meets a prefs file that still holds the user's graph.
+        // That one gets carried in front of them, once: re-running the
+        // migration every launch would drop the old graph on top of
+        // whatever they had been editing since.
+        if !prefs.graph_migrated && !prefs.graph.is_empty() {
+            ui.graph = prefs.graph.to_graph();
+            // Pre-position-field prefs deserialize every node at [0, 0].
+            if ui.graph.all_at_origin() {
+                ui.graph.relayout();
+            }
+            prefs.graph_migrated = true;
+            ui.set_status(
+                "Your pipeline graph now travels with the project — save this one to keep it",
+            );
         }
         ui.recent_files = prefs.recent_files.clone();
         ui.recent_ai_prompts = prefs.recent_ai_prompts.clone();
@@ -478,7 +490,10 @@ impl App {
         self.prefs.panels = self.ui.state.panels.clone();
         self.prefs.viewport = self.ui.viewport.clone();
         self.prefs.procgen = self.ui.procgen.clone();
-        self.prefs.graph = self.ui.graph.clone();
+        // `prefs.graph` is deliberately *not* written back: the live
+        // graph goes into the project file now, and the copy in prefs is
+        // a one-time migration source that keeps its old contents until
+        // the field is removed a version from now. Only the flag moves.
         self.prefs.editor = EditorPrefs {
             brush_color: [
                 self.editor.brush_color.r,
@@ -849,6 +864,11 @@ impl App {
         // move ghost — see `App::deselect`.
         self.deselect();
         self.editor.sockets.clear();
+        // The graph is document data like the sockets, so it goes with
+        // the scene. Open / reload put the incoming file's graph back
+        // immediately after this call; New Scene is the path that wants
+        // the empty one this leaves behind.
+        self.ui.graph = PipelineGraph::default();
         self.shape_drag = None;
         self.stroke_plane = None;
         self.last_stroke_voxel = None;

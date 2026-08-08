@@ -31,14 +31,24 @@ pub type NodeId = u32;
 
 /// One graph node: id + payload describing what it does + UI position.
 ///
+/// On the wire and on disk the payload is *flattened* into the node, so
+/// a node reads `{"id": 1, "kind": "translate", "input": 0, "dx": 4}`
+/// rather than nesting the payload under a second key. One object per
+/// node, one `kind` field naming what it is — the same shape an ops
+/// batch uses (`{"op": "box", …}`), because an agent that has learned
+/// one should not have to learn the other.
+///
 /// `position` is panel-space coordinates rendered by the visual graph
 /// editor. It's part of the persisted state so node layout survives
-/// restarts. `#[serde(default)]` keeps older prefs files (without
-/// position) loadable — they'll deserialize as `[0.0, 0.0]` and the
-/// hydrate path detects that case to re-layout.
+/// restarts. `#[serde(default)]` keeps files without it loadable —
+/// they deserialize as `[0.0, 0.0]` and the hydrate path detects that
+/// case to re-layout. It is also what lets an agent leave layout alone
+/// entirely: a graph it writes has no positions, and the editor lays it
+/// out on the way in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: NodeId,
+    #[serde(flatten)]
     pub kind: NodeKind,
     #[serde(default)]
     pub position: [f32; 2],
@@ -54,24 +64,48 @@ const NODE_LAYOUT_ORIGIN: [f32; 2] = [60.0, 40.0];
 /// inputs and embed their generator's parameters directly. Transform
 /// variants reference other nodes by id — `None` means "input not
 /// connected yet" and `evaluate` will report it as a `MissingInput`.
+///
+/// The serialized name of each source variant **is its generator id in
+/// the agent-ops registry** (`builtin.perlin_terrain`, …), not a second
+/// spelling of the same thing. A generator an agent can name in a
+/// `generate` op is named identically as a graph node, so the two ways
+/// of reaching one generator don't need two vocabularies.
+///
+/// Every field carries `#[serde(default)]` for the same reason the
+/// registry merges partial params over a generator's defaults: a node
+/// should only have to spell out what it wants to differ. It is also
+/// the forward-compat discipline `.vxlt` follows — a graph written by
+/// an older build stays loadable when a node grows a field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
 pub enum NodeKind {
+    #[serde(rename = "builtin.perlin_terrain")]
     Terrain(PerlinTerrain),
+    #[serde(rename = "builtin.lsystem_tree")]
     Tree(LSystemTree),
+    #[serde(rename = "builtin.wfc")]
     Wfc(WfcGenerator),
     /// Shift every voxel of `input` by `(dx, dy, dz)` world units.
+    #[serde(rename = "translate")]
     Translate {
+        #[serde(default)]
         input: Option<NodeId>,
+        #[serde(default)]
         dx: i32,
+        #[serde(default)]
         dy: i32,
+        #[serde(default)]
         dz: i32,
     },
     /// Per-voxel filter: keep only those satisfying `predicate`. Intended
     /// for compositions like "keep tree voxels above ground level" or
     /// "keep only the grass-colored layer of a stratified terrain". For
     /// position-set operations against another patch, use Combine.
+    #[serde(rename = "filter")]
     Filter {
+        #[serde(default)]
         input: Option<NodeId>,
+        #[serde(default)]
         predicate: FilterPredicate,
     },
     /// Two-input column mask: keep voxels of `subject` based on what's
@@ -80,19 +114,29 @@ pub enum NodeKind {
     /// enabling workflows like "keep tree voxels in any column where
     /// terrain has any voxel below" (`AboveColumn`), which Combine and
     /// Filter alone can't express.
+    #[serde(rename = "mask")]
     Mask {
+        #[serde(default)]
         subject: Option<NodeId>,
+        #[serde(default)]
         mask: Option<NodeId>,
+        #[serde(default)]
         mode: MaskMode,
     },
     /// Set-theoretic combination of two patches.
+    #[serde(rename = "combine")]
     Combine {
+        #[serde(default)]
         a: Option<NodeId>,
+        #[serde(default)]
         b: Option<NodeId>,
+        #[serde(default)]
         op: CombineOp,
     },
     /// Pass-through marker for the patch the pipeline emits.
+    #[serde(rename = "output")]
     Output {
+        #[serde(default)]
         input: Option<NodeId>,
     },
 }
@@ -104,6 +148,7 @@ pub enum NodeKind {
 /// Color match uses raw RGBA bytes so the filter can be persisted in
 /// prefs without coupling to `Voxel`'s serde shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FilterPredicate {
     /// Keep voxels with `y >= threshold`.
     YAbove(i32),
@@ -146,6 +191,7 @@ impl Default for FilterPredicate {
 /// `(x, y, z)` matches — that's what distinguishes Mask from
 /// Combine's set ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MaskMode {
     /// Keep `subject` voxel at `(x, y, z)` iff `mask` has at least one
     /// voxel in the same column with `y_mask < y`. Use for "trees
@@ -172,9 +218,11 @@ impl Default for MaskMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CombineOp {
     /// Voxels from `a` and `b`. Cells present in both: `b` wins.
+    #[default]
     Union,
     /// Cells in `a` not also in `b`. (`a - b`)
     Difference,
@@ -249,8 +297,12 @@ pub enum GraphError {
     Cycle(NodeId),
     #[error("node {node} has unconnected input slot")]
     MissingInput { node: NodeId },
-    #[error("node {0} references nonexistent node")]
+    #[error("no node with id {0}")]
     DanglingReference(NodeId),
+    #[error("two nodes share id {0}; ids must be unique")]
+    DuplicateId(NodeId),
+    #[error("{count} nodes in one graph; at most {max} are allowed")]
+    TooManyNodes { count: usize, max: usize },
     /// The node exists but has no such input slot. Distinct from
     /// `DanglingReference`, which reported the same thing and read as
     /// "the node is missing" — the opposite of what happened.
@@ -264,15 +316,33 @@ impl From<GraphError> for GenError {
     }
 }
 
+/// Nodes one graph may hold.
+///
+/// Not a taste judgment: [`PipelineGraph::visit`] is a recursive
+/// descent, so a long enough chain overflows the stack — and a stack
+/// overflow aborts the process rather than raising the error an agent
+/// could act on. A hand-built pipeline is a handful of nodes; this is
+/// two orders of magnitude above that and still far below the depth
+/// that hurts.
+pub const MAX_GRAPH_NODES: usize = 64;
+
 /// A pipeline of generator / transform / combine nodes.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PipelineGraph {
     pub nodes: Vec<GraphNode>,
     /// Next id to hand out. Monotonic per graph instance — ids are
     /// never reused so dropdowns can rely on stable references.
+    ///
+    /// Internal bookkeeping, hence `#[serde(default)]`: a graph an agent
+    /// wrote has no reason to carry one, and [`Self::normalize`] derives
+    /// a safe value from the nodes themselves. A file that *does* carry
+    /// one keeps it if it's larger, so ids stay unique across a
+    /// save / load / add cycle.
+    #[serde(default)]
     pub next_id: NodeId,
     /// Cached id of the (sole) Output node. Invalidated if you remove
     /// the output — call `find_output` to rediscover.
+    #[serde(default)]
     pub output_node: Option<NodeId>,
 }
 
@@ -284,22 +354,89 @@ impl PipelineGraph {
         let id = self.next_id;
         self.next_id += 1;
         let is_output = matches!(kind, NodeKind::Output { .. });
-        // Cascade position keyed on the monotonic id, NOT `nodes.len()`:
-        // len shrinks when a node is deleted, so the next add would land
-        // exactly on top of an existing node. Ids never repeat, so slots
-        // never collide (Auto Layout re-compacts on demand).
-        let n = id as usize;
-        let position = [
-            NODE_LAYOUT_ORIGIN[0]
-                + ((n % NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DX,
-            NODE_LAYOUT_ORIGIN[1]
-                + ((n / NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DY,
-        ];
+        let position = Self::place(id);
         self.nodes.push(GraphNode { id, kind, position });
         if is_output {
             self.output_node = Some(id);
         }
         id
+    }
+
+    /// Cascade slot for a node, keyed on its id.
+    ///
+    /// On the id, NOT on `nodes.len()`: len shrinks when a node is
+    /// deleted, so the next add would land exactly on top of an
+    /// existing node. Ids never repeat, so slots never collide (Auto
+    /// Layout re-compacts on demand). Also what a node added by an
+    /// agent gets, since an agent sends no layout.
+    pub fn place(id: NodeId) -> [f32; 2] {
+        let n = id as usize;
+        [
+            NODE_LAYOUT_ORIGIN[0] + ((n % NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DX,
+            NODE_LAYOUT_ORIGIN[1] + ((n / NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DY,
+        ]
+    }
+
+    /// Make a graph that came from outside safe to use: `next_id` past
+    /// every id present, `output_node` pointing at a real Output.
+    ///
+    /// Every path that takes a graph from a file or from an agent runs
+    /// this — the two fields are bookkeeping neither of those writers
+    /// owns, and a `next_id` that trails the nodes hands the next
+    /// [`add`](Self::add) an id that is already taken.
+    pub fn normalize(&mut self) {
+        let highest = self.nodes.iter().map(|n| n.id).max();
+        if let Some(highest) = highest {
+            self.next_id = self.next_id.max(highest.saturating_add(1));
+        }
+        self.output_node = self
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Output { .. }))
+            .map(|n| n.id);
+    }
+
+    /// Everything that has to hold before a graph is worth evaluating,
+    /// checked in one pass so a caller hears about *all* of it before
+    /// anything runs rather than discovering the third problem after
+    /// the first two evaluations.
+    ///
+    /// [`evaluate`](Self::evaluate) catches cycles and dangling refs on
+    /// its own, but only along the path it walks from the Output — a
+    /// duplicate id or a broken wire on an unreachable branch stays
+    /// silent there, and silence is the one answer an agent can't act
+    /// on. `get` resolving a duplicate id by taking the first match is
+    /// exactly the kind of quiet wrong answer this exists to prevent.
+    pub fn validate(&self) -> Result<(), GraphError> {
+        if self.nodes.len() > MAX_GRAPH_NODES {
+            return Err(GraphError::TooManyNodes {
+                count: self.nodes.len(),
+                max: MAX_GRAPH_NODES,
+            });
+        }
+        let mut ids = std::collections::HashSet::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            if !ids.insert(node.id) {
+                return Err(GraphError::DuplicateId(node.id));
+            }
+        }
+        for node in &self.nodes {
+            for input in node.kind.inputs() {
+                if !ids.contains(&input) {
+                    return Err(GraphError::DanglingReference(input));
+                }
+            }
+        }
+        self.find_output_immut()?;
+        // Every node, not just what the Output reaches: a cycle on a
+        // branch nobody consumes is still a graph the user can't edit
+        // their way out of without being told where it is.
+        let mut state: HashMap<NodeId, u8> = HashMap::new();
+        let mut order = Vec::new();
+        for node in &self.nodes {
+            self.visit(node.id, &mut state, &mut order)?;
+        }
+        Ok(())
     }
 
     /// Re-layout all nodes in cascade order. Useful when loading a
@@ -367,13 +504,23 @@ impl PipelineGraph {
     }
 
     /// Read the current value of input slot `slot` on `target`.
-    /// Returns `Ok(None)` for sources (which have no inputs).
+    ///
+    /// A slot the node doesn't have is an error, including *every* slot
+    /// on a source node — those have no inputs at all. Reporting it
+    /// mattered the moment something other than the panel could ask:
+    /// the UI only ever names slots it drew, but an agent naming slot 1
+    /// on a `translate` (or any slot on a terrain) has made a mistake,
+    /// and answering "not connected" would leave it believing a wire it
+    /// asked for exists.
     pub fn get_input(
         &self,
         target: NodeId,
         slot: usize,
     ) -> Result<Option<NodeId>, GraphError> {
         let node = self.get(target).ok_or(GraphError::DanglingReference(target))?;
+        if slot >= Self::input_count(&node.kind) {
+            return Err(GraphError::InvalidSlot { node: target, slot });
+        }
         Ok(match &node.kind {
             NodeKind::Terrain(_) | NodeKind::Tree(_) | NodeKind::Wfc(_) => None,
             NodeKind::Translate { input, .. }
@@ -381,17 +528,11 @@ impl PipelineGraph {
             | NodeKind::Output { input } => *input,
             NodeKind::Mask { subject, mask, .. } => match slot {
                 0 => *subject,
-                1 => *mask,
-                _ => {
-                    return Err(GraphError::InvalidSlot { node: target, slot })
-                }
+                _ => *mask,
             },
             NodeKind::Combine { a, b, .. } => match slot {
                 0 => *a,
-                1 => *b,
-                _ => {
-                    return Err(GraphError::InvalidSlot { node: target, slot })
-                }
+                _ => *b,
             },
         })
     }
@@ -400,10 +541,10 @@ impl PipelineGraph {
     /// `new_input` is `Some`), reachability from `target` is checked
     /// before committing — if the proposed wire would form a cycle,
     /// the change is reverted and `GraphError::Cycle` is returned.
-    /// `target` must exist (a missing node is `Err(DanglingReference)`,
-    /// surfaced by the `get_input` call below). A source node has no input
-    /// slots, so setting one on it is a silent no-op: the tentative apply
-    /// does nothing and the call returns `Ok(())`.
+    /// `target` must exist (a missing node is `Err(DanglingReference)`)
+    /// and must have the slot (a source node has none, so any slot on
+    /// one is `Err(InvalidSlot)`) — both surfaced by the `get_input`
+    /// call below.
     pub fn set_input(
         &mut self,
         target: NodeId,
@@ -809,6 +950,146 @@ mod tests {
         );
     }
 
+    // -------- the wire / on-disk shape --------
+
+    /// One flat object per node, `kind` naming what it is — the same
+    /// shape an ops batch uses. A source node's `kind` is its generator
+    /// id in the registry, so `generate` and a graph node name one
+    /// generator one way.
+    #[test]
+    fn a_node_serializes_as_one_flat_object_tagged_by_kind() {
+        let mut g = PipelineGraph::default();
+        let src = g.add(NodeKind::Terrain(PerlinTerrain {
+            width: 8,
+            ..Default::default()
+        }));
+        g.add(NodeKind::Output { input: Some(src) });
+
+        let json = serde_json::to_value(&g).expect("graph serializes");
+        let node = &json["nodes"][0];
+        assert_eq!(node["kind"], "builtin.perlin_terrain");
+        assert_eq!(node["id"], 0);
+        // Flattened: the generator's own parameters sit on the node,
+        // not nested under a second key.
+        assert_eq!(node["width"], 8);
+        assert_eq!(json["nodes"][1]["kind"], "output");
+        assert_eq!(json["nodes"][1]["input"], 0);
+    }
+
+    /// A graph an agent wrote: no `next_id`, no `position`, and each
+    /// node naming only the parameters it wants to differ. All three
+    /// are bookkeeping or defaults the writer shouldn't have to know.
+    #[test]
+    fn a_graph_arrives_without_bookkeeping_or_full_parameters() {
+        let json = r#"{"nodes":[
+            {"id":0,"kind":"builtin.perlin_terrain","width":16,"depth":16},
+            {"id":1,"kind":"filter","input":0,"predicate":{"y_above":2}},
+            {"id":2,"kind":"output","input":1}
+        ]}"#;
+        let mut g: PipelineGraph = serde_json::from_str(json).expect("graph parses");
+        g.normalize();
+
+        assert_eq!(g.next_id, 3, "next_id must clear every id present");
+        assert_eq!(g.output_node, Some(2));
+        match &g.get(0).unwrap().kind {
+            NodeKind::Terrain(t) => {
+                assert_eq!(t.width, 16);
+                assert_eq!(
+                    t.seed,
+                    PerlinTerrain::default().seed,
+                    "unnamed parameters keep their default"
+                );
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        g.validate().expect("this graph is well formed");
+        assert!(!g.evaluate().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_graph_round_trips_through_json() {
+        let g = combine_graph();
+        let text = serde_json::to_string(&g).unwrap();
+        let back: PipelineGraph = serde_json::from_str(&text).unwrap();
+        assert_eq!(g, back);
+    }
+
+    // -------- validation an agent depends on --------
+
+    #[test]
+    fn a_duplicate_id_is_refused_rather_than_silently_resolved() {
+        // `get` takes the first match, so a duplicate id makes half the
+        // graph point at a node the author didn't mean — the quiet wrong
+        // answer `validate` exists to prevent.
+        let json = r#"{"nodes":[
+            {"id":0,"kind":"builtin.perlin_terrain"},
+            {"id":0,"kind":"translate","input":0},
+            {"id":1,"kind":"output","input":0}
+        ]}"#;
+        let g: PipelineGraph = serde_json::from_str(json).unwrap();
+        assert!(matches!(g.validate(), Err(GraphError::DuplicateId(0))));
+    }
+
+    #[test]
+    fn a_wire_to_a_node_that_does_not_exist_is_refused() {
+        let json = r#"{"nodes":[
+            {"id":0,"kind":"translate","input":7},
+            {"id":1,"kind":"output","input":0}
+        ]}"#;
+        let g: PipelineGraph = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            g.validate(),
+            Err(GraphError::DanglingReference(7))
+        ));
+    }
+
+    #[test]
+    fn too_many_nodes_is_refused_before_anything_recurses() {
+        // The chain below is exactly what overflows the stack if it is
+        // allowed to grow: `visit` is a recursive descent.
+        let mut g = PipelineGraph::default();
+        for i in 0..=MAX_GRAPH_NODES {
+            let input = (i > 0).then(|| i as NodeId - 1);
+            g.add(NodeKind::Translate {
+                input,
+                dx: 0,
+                dy: 0,
+                dz: 0,
+            });
+        }
+        assert!(matches!(
+            g.validate(),
+            Err(GraphError::TooManyNodes { .. })
+        ));
+    }
+
+    #[test]
+    fn a_cycle_is_caught_even_where_the_output_cannot_reach_it() {
+        // `evaluate` only walks what the Output consumes, so a cycle on
+        // an unreachable branch never surfaces there — and the user (or
+        // agent) can't fix what nobody named.
+        let mut g = PipelineGraph::default();
+        let src = g.add(NodeKind::Terrain(PerlinTerrain::default()));
+        g.add(NodeKind::Output { input: Some(src) });
+        let a = g.add(NodeKind::Translate {
+            input: None,
+            dx: 0,
+            dy: 0,
+            dz: 0,
+        });
+        let b = g.add(NodeKind::Translate {
+            input: Some(a),
+            dx: 0,
+            dy: 0,
+            dz: 0,
+        });
+        if let NodeKind::Translate { input, .. } = &mut g.get_mut(a).unwrap().kind {
+            *input = Some(b);
+        }
+        assert!(g.evaluate().is_ok(), "the output branch is still fine");
+        assert!(matches!(g.validate(), Err(GraphError::Cycle(_))));
+    }
+
     #[test]
     fn notes_are_not_duplicated_when_paths_rejoin() {
         let mut notes = vec!["over-constrained".to_string()];
@@ -830,6 +1111,25 @@ mod tests {
         });
         assert!(matches!(
             g.get_input(c, 2),
+            Err(GraphError::InvalidSlot { .. })
+        ));
+        // A source node has no inputs at all, so wiring anything into
+        // one is a mistake worth reporting rather than a no-op: the
+        // caller asked for a connection it isn't going to get.
+        assert!(matches!(
+            g.set_input(a, 0, Some(c)),
+            Err(GraphError::InvalidSlot { .. })
+        ));
+        // Single-input nodes used to ignore the slot number entirely,
+        // so slot 7 quietly meant slot 0.
+        let t = g.add(NodeKind::Translate {
+            input: None,
+            dx: 0,
+            dy: 0,
+            dz: 0,
+        });
+        assert!(matches!(
+            g.set_input(t, 7, Some(a)),
             Err(GraphError::InvalidSlot { .. })
         ));
         // A genuinely missing node still reports the dangling case.

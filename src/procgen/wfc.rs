@@ -529,6 +529,11 @@ impl Cell {
 
 /// WFC parameters and the entry point implementing `VoxelGenerator`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+// Every field defaults, so a partial set of parameters is a legal
+// one: the agent-ops registry merges what a caller named over
+// these, a graph node spells out only what it wants to differ,
+// and a `.vxlt` written before a field existed still loads.
+#[serde(default)]
 pub struct WfcGenerator {
     pub seed: u32,
     /// Grid width in tiles. Total voxel width = `width * TILE_SIZE`.

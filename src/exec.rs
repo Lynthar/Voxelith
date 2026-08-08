@@ -195,10 +195,13 @@ pub fn generators_json() -> String {
     struct Catalog {
         ok: bool,
         generators: Vec<crate::agent_ops::GeneratorInfo>,
+        /// A working pipeline graph to copy into a `graph` op.
+        graph_template: serde_json::Value,
     }
     let catalog = Catalog {
         ok: true,
         generators: crate::agent_ops::generator_infos(),
+        graph_template: crate::agent_ops::graph_template(),
     };
     serde_json::to_string_pretty(&catalog).expect("the catalog must serialize")
 }
@@ -303,6 +306,13 @@ pub(crate) fn open_session(
         .iter()
         .map(|socket| Socket::new(socket.name.clone(), socket.position, socket.normal))
         .collect();
+    // The graph rides in the session for the same reason the sockets do:
+    // it is document data, and a load → edit → save round trip that
+    // dropped it would quietly delete the recipe the model was built
+    // from. `normalize` because the file is an external input — its
+    // `next_id` is whatever some other build wrote there.
+    session.graph = state.graph.clone();
+    session.graph.normalize();
     Ok((session, state))
 }
 
@@ -342,6 +352,7 @@ pub(crate) fn save_project(
             normal: socket.normal,
         })
         .collect();
+    state.graph = session.graph.clone();
     io::save_world_with_state(&session.world, state, path).map_err(|e| {
         ExecError::new(
             "save_failed",

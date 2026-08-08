@@ -6,12 +6,13 @@
 //! what colors), [`slice`] is one plane as ASCII art, which is what
 //! actually catches "the door is one cell too high".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
 use crate::core::World;
 use crate::editor::{Selection, Socket};
+use crate::procgen::PipelineGraph;
 
 use super::schema::{Aabb, AxisSpec};
 use super::{ErrorCode, OpsError};
@@ -48,6 +49,18 @@ pub struct Description {
     pub selection: Option<Aabb>,
     pub undo_depth: usize,
     pub redo_depth: usize,
+    /// Deterministic structural measurements, or `null` when the
+    /// document is too big to measure cheaply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structure: Option<Structure>,
+    /// The document's pipeline graph, whole, when it has one.
+    ///
+    /// Whole rather than summarized because it is small (a graph is
+    /// capped at 64 nodes) and because reading it back is what makes
+    /// editing one possible: an agent can take this, change a parameter
+    /// or a wire, and send it straight back as a `graph` op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph: Option<PipelineGraph>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +105,183 @@ pub enum SliceMode {
     Color,
 }
 
+/// Loose parts listed individually. Past a handful the list stops
+/// telling an agent anything the count didn't.
+const MAX_LOOSE_PARTS: usize = 8;
+
+/// Voxels above which the structural pass is skipped.
+///
+/// It is three linear passes with hash lookups per neighbor, which is
+/// nothing on a model and real work on a scene. `describe` is answered
+/// on the editor's main thread when an agent is driving the in-editor
+/// bridge, so a document big enough to stutter it reports `null` and
+/// says why rather than freezing the person watching.
+const MAX_STRUCTURE_VOXELS: u64 = 2_000_000;
+
+/// Deterministic measurements of the shape itself — what an agent can't
+/// reliably read off a rendered view.
+///
+/// Every number here is a measurement, not a verdict. Three connected
+/// components is wrong for a sword and right for a forest; a floating
+/// part is a bug in a chair and the whole point of a tree canopy. The
+/// judgment belongs to whoever asked for the model. What this removes
+/// is the guessing: "are those two towers actually joined" has an exact
+/// answer, and no isometric render reliably gives it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Structure {
+    /// Connected components under 6-connectivity (faces only — two
+    /// voxels touching at a corner are not joined, which is what the
+    /// mesher, the flood fill and a physical print all agree on).
+    pub components: usize,
+    /// Voxels in the largest component.
+    pub largest_component: u64,
+    /// The rest, biggest first, capped at eight.
+    pub loose_parts: Vec<LoosePart>,
+    /// Components that don't reach the scene's lowest layer. The
+    /// "floating island" of print preparation, and the usual shape of
+    /// "I meant to attach that".
+    pub floating_components: usize,
+    /// Solid voxels whose six face neighbors are all solid: the
+    /// interior `hollow` would remove, and dead weight in an export.
+    pub enclosed: u64,
+    /// Mirror mismatch per axis, measured across the scene bounding
+    /// box's own midplane.
+    pub symmetry: [SymmetryCheck; 3],
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoosePart {
+    pub voxels: u64,
+    pub aabb: Aabb,
+}
+
+/// How close the model is to symmetric about one axis.
+///
+/// Cell semantics, not point semantics: a voxel is the cell `[p, p+1)`,
+/// so the reflection of `p` across a box is `min + max - p`. Using the
+/// point formula would report every even-sized model as asymmetric by
+/// its whole width — the same off-by-one `io::vox::rotate_cell` exists
+/// to avoid.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymmetryCheck {
+    pub axis: &'static str,
+    /// Solid voxels whose mirror image is not also solid.
+    pub mismatched: u64,
+    /// `mismatched` as a fraction of the model, rounded to 4 places.
+    /// 0.0 is exact symmetry.
+    pub ratio: f64,
+}
+
+/// Measure a world. `None` when it is too big to do cheaply — the
+/// answer says so rather than making the caller wait.
+pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
+    if voxel_count == 0 || voxel_count > MAX_STRUCTURE_VOXELS {
+        return None;
+    }
+    let solids: HashSet<(i32, i32, i32)> = world
+        .chunks()
+        .flat_map(|(pos, chunk)| {
+            let base = pos.world_origin();
+            chunk
+                .read()
+                .iter_solid()
+                .map(|(local, _)| {
+                    (
+                        base.0 + local.x as i32,
+                        base.1 + local.y as i32,
+                        base.2 + local.z as i32,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let (min, max) = world.scene_aabb()?;
+
+    let mut components = components_of(&solids);
+    // Biggest first, then by position so equal-sized parts don't
+    // reorder between runs (the set iteration is a HashSet).
+    components.sort_unstable_by(|a, b| b.voxels.cmp(&a.voxels).then(a.aabb.min.cmp(&b.aabb.min)));
+    let component_count = components.len();
+    let largest_component = components.first().map(|c| c.voxels).unwrap_or(0);
+    let floating_components = components
+        .iter()
+        .filter(|part| part.aabb.min[1] > min.1)
+        .count();
+    // The list is capped; the count is not. A model in 300 pieces has
+    // to say 300, or the cap turns a disaster into a tidy-looking eight.
+    let loose_parts: Vec<LoosePart> = components
+        .into_iter()
+        .skip(1)
+        .take(MAX_LOOSE_PARTS)
+        .collect();
+
+    let enclosed = solids
+        .iter()
+        .filter(|&&pos| super::compile::is_enclosed(world, pos))
+        .count() as u64;
+
+    let axes = [("x", 0usize), ("y", 1), ("z", 2)];
+    let bounds = [(min.0, max.0), (min.1, max.1), (min.2, max.2)];
+    let symmetry = axes.map(|(name, index)| {
+        let (low, high) = bounds[index];
+        let mismatched = solids
+            .iter()
+            .filter(|&&pos| {
+                let mut mirrored = [pos.0, pos.1, pos.2];
+                mirrored[index] = low + high - mirrored[index];
+                !solids.contains(&(mirrored[0], mirrored[1], mirrored[2]))
+            })
+            .count() as u64;
+        SymmetryCheck {
+            axis: name,
+            mismatched,
+            ratio: ((mismatched as f64 / voxel_count as f64) * 10_000.0).round() / 10_000.0,
+        }
+    });
+
+    Some(Structure {
+        components: component_count,
+        largest_component,
+        loose_parts,
+        floating_components,
+        enclosed,
+        symmetry,
+    })
+}
+
+/// Flood fill every solid cell into components, 6-connected.
+fn components_of(solids: &HashSet<(i32, i32, i32)>) -> Vec<LoosePart> {
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::with_capacity(solids.len());
+    let mut parts = Vec::new();
+    let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+
+    for &start in solids {
+        if !seen.insert(start) {
+            continue;
+        }
+        let mut voxels = 0u64;
+        let mut min = start;
+        let mut max = start;
+        queue.push_back(start);
+        while let Some(pos) = queue.pop_front() {
+            voxels += 1;
+            min = (min.0.min(pos.0), min.1.min(pos.1), min.2.min(pos.2));
+            max = (max.0.max(pos.0), max.1.max(pos.1), max.2.max(pos.2));
+            for (dx, dy, dz) in super::compile::FACE_NEIGHBORS {
+                let next = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                if solids.contains(&next) && seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        parts.push(LoosePart {
+            voxels,
+            aabb: Aabb::from_pair((min, max)),
+        });
+    }
+    parts
+}
+
 pub(super) fn solid_voxel_count(world: &World) -> u64 {
     world
         .chunks()
@@ -114,6 +304,7 @@ pub struct DocumentView<'a> {
     pub sockets: &'a [Socket],
     pub undo_depth: usize,
     pub redo_depth: usize,
+    pub graph: &'a PipelineGraph,
 }
 
 pub fn describe(view: DocumentView<'_>) -> Description {
@@ -177,6 +368,8 @@ pub fn describe(view: DocumentView<'_>) -> Description {
             })
             .collect(),
         selection: view.selection.map(Aabb::from),
+        structure: structure(world, voxel_count),
+        graph: (!view.graph.nodes.is_empty()).then(|| view.graph.clone()),
         undo_depth: view.undo_depth,
         redo_depth: view.redo_depth,
     }
@@ -312,6 +505,98 @@ mod tests {
 
     fn request(json: &str) -> SliceRequest {
         serde_json::from_str(json).expect("slice request should parse")
+    }
+
+    // -------- structure --------
+
+    fn filled(cells: impl IntoIterator<Item = (i32, i32, i32)>) -> World {
+        let mut world = World::new();
+        for (x, y, z) in cells {
+            world.set_voxel(x, y, z, Voxel::from_rgb(120, 120, 120));
+        }
+        world
+    }
+
+    fn measure(world: &World) -> Structure {
+        structure(world, solid_voxel_count(world)).expect("this world is measurable")
+    }
+
+    /// Two cubes a cell apart: the failure an agent can't see in a
+    /// render and can't reliably catch in a slice.
+    #[test]
+    fn a_gap_of_one_cell_reads_as_two_components() {
+        let touching = filled((0..4).flat_map(|x| (0..2).map(move |y| (x, y, 0))));
+        assert_eq!(measure(&touching).components, 1);
+
+        let split = filled(
+            (0..2)
+                .chain(3..5)
+                .flat_map(|x| (0..2).map(move |y| (x, y, 0))),
+        );
+        let report = measure(&split);
+        assert_eq!(report.components, 2);
+        assert_eq!(report.largest_component, 4);
+        assert_eq!(report.loose_parts.len(), 1);
+        assert_eq!(report.loose_parts[0].voxels, 4);
+    }
+
+    #[test]
+    fn corner_contact_is_not_a_connection() {
+        // 6-connectivity, stated: two voxels meeting only at a corner
+        // are two parts to the mesher, the flood fill and a printer.
+        let report = measure(&filled([(0, 0, 0), (1, 1, 0)]));
+        assert_eq!(report.components, 2);
+    }
+
+    #[test]
+    fn a_part_that_never_reaches_the_lowest_layer_is_floating() {
+        // The ground slab plus a block hanging four cells above it.
+        let world = filled(
+            (0..3)
+                .flat_map(|x| (0..3).map(move |z| (x, 0, z)))
+                .chain([(1, 4, 1)]),
+        );
+        let report = measure(&world);
+        assert_eq!(report.components, 2);
+        assert_eq!(report.floating_components, 1);
+        // …and it is a measurement, not a verdict: the same number is
+        // right for a tree canopy.
+    }
+
+    #[test]
+    fn enclosed_counts_the_interior_hollow_would_remove() {
+        // A solid 3³ block has exactly one fully-surrounded cell.
+        let cube = filled((0..3).flat_map(|x| {
+            (0..3).flat_map(move |y| (0..3).map(move |z| (x, y, z)))
+        }));
+        assert_eq!(measure(&cube).enclosed, 1);
+        // A 3×3 slab has none — every cell is on a face.
+        let slab = filled((0..3).flat_map(|x| (0..3).map(move |z| (x, 0, z))));
+        assert_eq!(measure(&slab).enclosed, 0);
+    }
+
+    #[test]
+    fn symmetry_uses_cell_semantics_not_point_semantics() {
+        // An even-sized symmetric shape is the case that separates the
+        // two: reflecting `p` to `-p` would call this 100% asymmetric.
+        let world = filled((0..4).map(|x| (x, 0, 0)));
+        let report = measure(&world);
+        let x = &report.symmetry[0];
+        assert_eq!(x.axis, "x");
+        assert_eq!(x.mismatched, 0, "a 4-wide bar is symmetric about x");
+        assert_eq!(x.ratio, 0.0);
+
+        // Same bar with a two-cell bump on one side only: exactly the
+        // two voxels whose mirror image is missing are counted.
+        let lopsided = filled((0..4).map(|x| (x, 0, 0)).chain([(0, 1, 0), (1, 1, 0)]));
+        let report = measure(&lopsided);
+        assert_eq!(report.symmetry[0].mismatched, 2, "x is the lopsided axis");
+        assert_eq!(report.symmetry[2].mismatched, 0, "z is a single layer");
+    }
+
+    #[test]
+    fn an_empty_world_has_nothing_to_measure() {
+        assert!(structure(&World::new(), 0).is_none());
     }
 
     /// A 3-wide, 2-tall wall at z = 0 with a marked corner.

@@ -6,6 +6,7 @@
 //! - Editor state (camera position, tool settings, palette)
 
 use crate::core::{Chunk, ChunkPos, Voxel, World, CHUNK_SIZE, CHUNK_VOLUME};
+use crate::procgen::PipelineGraph;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -111,6 +112,18 @@ pub struct EditorState {
     /// contract as `brush_flags`.
     #[serde(default)]
     pub brush_tint_zone: u8,
+    /// The procedural pipeline graph, if this project has one.
+    ///
+    /// It lives with the project rather than in the editor's prefs
+    /// because it is *how this model was made* — document data, like
+    /// sockets, not workspace state like the camera. That distinction
+    /// is what makes an agent's graph reachable at all: the headless
+    /// half (`voxelith exec`, the MCP server) has no prefs file, so a
+    /// graph stored there could never be handed back to a human to keep
+    /// tuning. `#[serde(default)]` for the usual reason — projects
+    /// written before graphs lived here still load, with an empty one.
+    #[serde(default)]
+    pub graph: PipelineGraph,
 }
 
 /// Where the editor's camera starts on a new scene, so a project built
@@ -141,6 +154,7 @@ impl Default for EditorState {
             sockets: Default::default(),
             brush_flags: Default::default(),
             brush_tint_zone: Default::default(),
+            graph: Default::default(),
         }
     }
 }
@@ -535,6 +549,42 @@ mod tests {
     }
 
     #[test]
+    fn the_pipeline_graph_survives_a_save_and_load() {
+        // The graph is document data: it says how this model was made,
+        // and a round trip that dropped it would delete the recipe while
+        // keeping the result.
+        use crate::procgen::{NodeKind, PerlinTerrain};
+
+        let mut state = EditorState::default();
+        let src = state.graph.add(NodeKind::Terrain(PerlinTerrain {
+            width: 24,
+            ..Default::default()
+        }));
+        state.graph.add(NodeKind::Output { input: Some(src) });
+
+        let project = Project::from_world_with_state(&World::new(), state.clone());
+        let mut buffer = Vec::new();
+        project.save(&mut buffer).unwrap();
+        let loaded = Project::load(&mut buffer.as_slice()).unwrap();
+
+        assert_eq!(loaded.editor_state.graph, state.graph);
+    }
+
+    #[test]
+    fn a_project_written_before_graphs_still_loads() {
+        // `#[serde(default)]`, stated as a test: the header is JSON, and
+        // an older build's header simply has no `graph` key.
+        let header = r#"[{"name":"old","description":"","author":"","created_at":0,
+            "modified_at":0,"app_version":"0.0.1"},
+            {"camera_position":[0.0,20.0,40.0],"camera_target":[0.0,0.0,0.0],
+             "brush_color":[1,2,3,255],"palette":[],"selected_tool":0}]"#;
+        let (_, state): (ProjectMetadata, EditorState) =
+            serde_json::from_str(header).expect("an older header must still parse");
+        assert!(state.graph.nodes.is_empty());
+        assert_eq!(state.brush_color, [1, 2, 3, 255]);
+    }
+
+    #[test]
     fn save_bytes_are_chunk_order_independent() {
         // The chunk store is a HashMap (per-instance, per-process random
         // iteration order), so two worlds with identical content built in
@@ -601,6 +651,7 @@ mod tests {
                     normal: [1.0, 0.0, 0.0],
                 },
             ],
+            graph: Default::default(),
         };
 
         let project = Project::from_world_with_state(&world, state.clone());

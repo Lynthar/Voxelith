@@ -44,6 +44,7 @@ use serde::Serialize;
 
 use crate::core::World;
 use crate::editor::{Command, CommandHistory, Selection, Socket, VoxelChange};
+use crate::procgen::PipelineGraph;
 
 mod compile;
 mod describe;
@@ -51,11 +52,13 @@ mod registry;
 mod schema;
 
 pub use describe::{
-    describe, slice, ColorCount, Description, DocumentView, SliceMode, SliceRequest, SocketInfo,
+    describe, slice, ColorCount, Description, DocumentView, LoosePart, SliceMode, SliceRequest,
+    SocketInfo, Structure, SymmetryCheck,
 };
-pub use registry::{generator_infos, GeneratorInfo};
+pub use registry::{generator_infos, graph_template, GeneratorInfo};
 pub use schema::{
-    Aabb, AxisSpec, BatchOptions, Op, OpsBatch, SolidVoxel, VoxelEntry, VoxelSpec, WriteMode,
+    Aabb, AxisSpec, BatchOptions, GraphEdit, Op, OpsBatch, SolidVoxel, VoxelEntry, VoxelSpec,
+    WriteMode,
 };
 
 /// Wire-format version an [`OpsBatch`] must declare. Bumped only for a
@@ -92,6 +95,20 @@ pub const MAX_BATCH_CELLS: u64 = 8_388_608;
 /// building 5 km up. It also keeps the mirror reflection (`2·plane −
 /// 1 − p`) and shape bounding boxes far away from `i32` overflow.
 pub const MAX_COORD: i32 = 1 << 20;
+
+/// Source nodes one graph may hold.
+///
+/// Evaluation memoizes a patch per node and hands each consumer a
+/// clone, so peak memory is the sum of the sources — and all of it is
+/// resident before the first cell reaches the batch cell budget.
+/// A graph that needs more than eight sources wants to be run in
+/// stages, which is free: its output is already in the world.
+pub const MAX_GRAPH_SOURCES: usize = 8;
+
+/// Edits one `graph_edit` op may carry. A graph tops out at 64 nodes,
+/// so a change list longer than this is quicker to send as a whole
+/// graph — and cheaper for the agent to get right.
+pub const MAX_GRAPH_EDITS: usize = 64;
 
 /// Chunks one batch may bring into existence beyond what the session
 /// already had. Each is a 256 KB allocation, so scattered writes are
@@ -130,6 +147,12 @@ pub enum ErrorCode {
     InvalidParams,
     /// The generator ran and refused (its own validation).
     GeneratorFailed,
+    /// The graph is malformed: a duplicate id, a wire to a node that
+    /// isn't there, a cycle, no Output node or several.
+    InvalidGraph,
+    /// The graph is well formed but too big to evaluate — too many
+    /// nodes, too many sources, or sources covering too many cells.
+    GraphTooLarge,
     /// A requested slice is bigger than the ASCII view supports.
     SliceTooLarge,
 }
@@ -149,6 +172,8 @@ impl ErrorCode {
             ErrorCode::UnknownGenerator => "unknown_generator",
             ErrorCode::InvalidParams => "invalid_params",
             ErrorCode::GeneratorFailed => "generator_failed",
+            ErrorCode::InvalidGraph => "invalid_graph",
+            ErrorCode::GraphTooLarge => "graph_too_large",
             ErrorCode::SliceTooLarge => "slice_too_large",
         }
     }
@@ -260,6 +285,12 @@ pub struct BatchOutcome {
     /// on either host — a caller that commits `changes` assigns this
     /// alongside it, and one that discards them leaves its own alone.
     pub selection: Option<Selection>,
+    /// The pipeline graph a `graph` op left on the document, if the
+    /// batch carried one. Document data, assigned by whoever commits —
+    /// same contract as `selection`, and the reason an agent's graph
+    /// ends up in front of the human who opens the project: in the
+    /// editor this is the graph its own Graph panel shows.
+    pub graph: Option<PipelineGraph>,
     /// The world the batch produced. A caller that commits ignores it
     /// (`changes` is the same edit, without replacing the world the
     /// renderer already has meshes for); one that only wants a look —
@@ -268,19 +299,31 @@ pub struct BatchOutcome {
     pub world: World,
 }
 
-/// Validate a batch and run it against a copy of `world`, committing
-/// nothing.
+/// The document a batch runs against, borrowed from whoever owns it.
+///
+/// The same shape — and the same reason — as [`DocumentView`]: an
+/// [`AgentSession`] keeps these together, the editor keeps them on
+/// three different structs, and neither should have to pretend to be
+/// the other. Growing a field here beats growing another positional
+/// parameter on [`run_batch`] every time the document does.
+pub struct BatchInput<'a> {
+    pub world: &'a World,
+    pub selection: Option<Selection>,
+    /// The graph the document currently holds — the starting point a
+    /// `graph_edit` op edits. A batch that never mentions graphs never
+    /// reads it.
+    pub graph: &'a PipelineGraph,
+}
+
+/// Validate a batch and run it against a copy of the document,
+/// committing nothing.
 ///
 /// The single execution path. Every entry point above this layer — the
 /// CLI, the MCP server, the editor's own agent bridge — comes through
 /// here, which is what makes a preview and a real run incapable of
 /// disagreeing: they are the same run, and only the caller's decision
 /// afterwards differs.
-pub fn run_batch(
-    world: &World,
-    selection: Option<Selection>,
-    batch: &OpsBatch,
-) -> Result<BatchOutcome, OpsError> {
+pub fn run_batch(input: BatchInput<'_>, batch: &OpsBatch) -> Result<BatchOutcome, OpsError> {
     if batch.version != SCHEMA_VERSION {
         return Err(OpsError::new(
             ErrorCode::UnsupportedVersion,
@@ -307,7 +350,7 @@ pub fn run_batch(
         ));
     }
 
-    let mut scratch = compile::Scratch::new(world, selection);
+    let mut scratch = compile::Scratch::new(input);
     for (index, op) in batch.ops.iter().enumerate() {
         scratch.run_op(index, op).map_err(|e| e.at(index))?;
     }
@@ -317,6 +360,7 @@ pub fn run_batch(
         report,
         changes: outcome.changes,
         selection: outcome.selection,
+        graph: outcome.graph,
         world: outcome.world,
     })
 }
@@ -336,6 +380,12 @@ pub struct AgentSession {
     /// and export to glTF), carried here so a load → edit → save round
     /// trip doesn't drop them. No v1 op modifies them.
     pub sockets: Vec<Socket>,
+    /// The document's procedural pipeline graph. Document data for the
+    /// same reason the sockets are — it persists in `.vxlt` and a round
+    /// trip must not drop it — and the reason it is *here* rather than
+    /// only in the editor: a graph an agent built has to be reachable
+    /// by the human who opens the project afterwards.
+    pub graph: PipelineGraph,
 }
 
 impl Default for AgentSession {
@@ -351,6 +401,7 @@ impl AgentSession {
             history: CommandHistory::new(HISTORY_DEPTH),
             selection: None,
             sockets: Vec::new(),
+            graph: PipelineGraph::default(),
         }
     }
 
@@ -358,7 +409,7 @@ impl AgentSession {
     /// applied (or, for a dry run, would have been); on failure nothing
     /// changed.
     pub fn apply_ops(&mut self, batch: &OpsBatch) -> Result<ApplyReport, OpsError> {
-        let outcome = run_batch(&self.world, self.selection, batch)?;
+        let outcome = run_batch(self.batch_input(), batch)?;
 
         if !batch.options.dry_run {
             // One command for the whole batch: one undo entry, and a
@@ -367,6 +418,9 @@ impl AgentSession {
             self.history
                 .execute(Command::set_voxels(outcome.changes), &mut self.world);
             self.selection = outcome.selection;
+            if let Some(graph) = outcome.graph {
+                self.graph = graph;
+            }
         }
         Ok(outcome.report)
     }
@@ -379,7 +433,7 @@ impl AgentSession {
     /// the resulting world comes back inside a [`Preview`] to be looked
     /// at.
     pub fn preview_ops(&self, batch: &OpsBatch) -> Result<Preview, OpsError> {
-        let mut outcome = run_batch(&self.world, self.selection, batch)?;
+        let mut outcome = run_batch(self.batch_input(), batch)?;
         // Nothing was committed, whatever the batch asked for. A batch
         // sent here without `dry_run` set is still only being looked at.
         outcome.report.dry_run = true;
@@ -390,17 +444,29 @@ impl AgentSession {
                 history: CommandHistory::new(HISTORY_DEPTH),
                 selection: outcome.selection,
                 sockets: self.sockets.clone(),
+                graph: outcome.graph.unwrap_or_else(|| self.graph.clone()),
             },
         })
     }
 
-    /// This session's four parts, borrowed as the shape the description
+    /// This session's document, borrowed as the shape [`run_batch`]
+    /// takes.
+    pub fn batch_input(&self) -> BatchInput<'_> {
+        BatchInput {
+            world: &self.world,
+            selection: self.selection,
+            graph: &self.graph,
+        }
+    }
+
+    /// This session's parts, borrowed as the shape the description
     /// and slice helpers take.
     pub fn view(&self) -> DocumentView<'_> {
         DocumentView {
             world: &self.world,
             selection: self.selection,
             sockets: &self.sockets,
+            graph: &self.graph,
             undo_depth: self.history.undo_count(),
             redo_depth: self.history.redo_count(),
         }
@@ -476,7 +542,16 @@ mod tests {
         // all it needs from this layer.
         let mut world = World::new();
         let mut history = CommandHistory::new(HISTORY_DEPTH);
-        let outcome = run_batch(&world, None, &batch).expect("batch should run");
+        let graph = PipelineGraph::default();
+        let outcome = run_batch(
+            BatchInput {
+                world: &world,
+                selection: None,
+                graph: &graph,
+            },
+            &batch,
+        )
+        .expect("batch should run");
         history.execute(Command::set_voxels(outcome.changes), &mut world);
 
         assert_eq!(outcome.report.changed_voxels, session_report.changed_voxels);
@@ -507,7 +582,16 @@ mod tests {
     #[test]
     fn run_batch_leaves_its_input_world_alone() {
         let world = World::new();
-        let outcome = run_batch(&world, None, &parse(BATCH)).expect("batch should run");
+        let graph = PipelineGraph::default();
+        let outcome = run_batch(
+            BatchInput {
+                world: &world,
+                selection: None,
+                graph: &graph,
+            },
+            &parse(BATCH),
+        )
+        .expect("batch should run");
         assert!(outcome.report.voxel_count > 0, "the batch built something");
         assert_eq!(
             world.chunk_count(),

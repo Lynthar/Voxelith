@@ -49,12 +49,19 @@ jobs:
       - name: Test (headless)
         run: cargo test --no-default-features --verbose
 
-      # `mcp-http` is the only configuration that compiles the HTTP
-      # transport, and `--no-default-features` above is the only one that
-      # compiles `agent_ops` *without* the schemars derives — so both
-      # need a build of their own or one of them rots unnoticed. Build
-      # only: serving over HTTP needs a socket, not a compiler.
-      - name: Build (MCP over HTTP)
+      # Two MCP configurations neither of the builds above covers.
+      # `--no-default-features` compiles `agent_ops` *without* the
+      # schemars derives; the default build has both MCP features on
+      # (`gui` turns `mcp-http` on, since the editor hosts a server of
+      # its own). That leaves the two headless server builds untested,
+      # and each has code the other doesn't compile: `mcp` alone is the
+      # stdio-only server, and `mcp-http` adds the HTTP transport
+      # without a GUI dragging it in. Build only — serving needs a
+      # socket, not a compiler.
+      - name: Build (MCP over stdio, headless)
+        run: cargo build --no-default-features --features mcp --all-targets --verbose
+
+      - name: Build (MCP over HTTP, headless)
         run: cargo build --no-default-features --features mcp-http --all-targets --verbose
 
       # Informational for now. The codebase carries a handful of

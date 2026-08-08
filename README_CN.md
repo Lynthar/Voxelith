@@ -33,8 +33,9 @@
 | ▭ **盒选** | `0` 切到 Select 工具。拖角创建 AABB,选区内拖动 = 整团搬运(单一可撤销 Command,正确处理重叠);方向键平移 X/Z(`Ctrl+↑↓` 走 Y 轴,`Shift` × 10)。`R`/`Shift+R` 旋转、`M` 镜像,各算一步 undo。`Ctrl+C/X/V`、`Ctrl+Shift+V` 粘到光标、`Del` 删除、`Ctrl+A` 选所有非空、`Esc`/`Ctrl+D` 取消。粘贴后自动选中目标 AABB,可链式 Paste→拖→Paste |
 | ⚓ **挂点(Socket)** | 在任意体素面上放置命名挂点(位置 + 朝外法线),随工程保存,导出 GLB 时变成 glTF 空节点 —— 武器挂载、特效锚点、旗帜插槽,交给引擎挂接部件 |
 | 🤖 **AI 生成** | 接 fal.ai Hunyuan3D 文生 3D:输入提示词,返回的网格自动体素化进场景,算一步可撤销编辑。跑在后台运行时(编辑器不卡),中途可取消;API key 存 OS 钥匙串,不落配置文件 |
+| 🔌 **Agent 桥** | 编辑器自己托管一个 MCP server,agent 直接编辑你开着的工程 —— 它的批次进的是**你的**撤销栈,一批一次 Ctrl+Z,你随时可以接管。它还能直接给你一张节点图而不是一堆体素,结果依然可调参。也可以让它先问:批次以半透明几何上屏,由你决定应用还是丢弃。没人看着的时候还有无头版(命令行和独立 server) |
 | 🏷️ **游戏资产材质** | 每笔刷的自发光 / 金属标记,外加 4 档阵营 **tint zone**,导出 GLB 时分别落成 glTF materials 与逐顶点 `_TINTZONE` 属性,供下游换色 shader 使用 |
-| 🌱 **程序化生成** | Perlin 地形、L-System 树、WFC 多套 tileset(Dungeon + City)—— 单生成器面板,或在可视化节点图里用 Translate / Filter / Mask / Combine 组合 |
+| 🌱 **程序化生成** | Perlin 地形、L-System 树、WFC 多套 tileset(Dungeon + City)—— 单生成器面板,或在可视化节点图里用 Translate / Filter / Mask / Combine 组合。节点图随工程保存,agent 也能直接产出一张图交给你继续调 |
 | ✨ **实时预览** | 防抖半透明叠加,生成结果落世界前可见 |
 | 📁 **文件支持** | 原生 `.vxlt`(gzip+状态)、MagicaVoxel `.vox` 导入(v150 + v200 多模型场景图)/导出(v150),Wavefront `.obj` 和 glTF Binary `.glb` 导出。OBJ/GLB 还有 Marching Cubes "smoothed" 变体(light: 圆角方块 / heavy: 黏土感)支持有机模型导出 |
 | 💾 **状态持久化** | 窗口布局、面板状态、生成器参数、最近文件跨重启保留 |
@@ -64,6 +65,11 @@ cargo run --release -- generators        # generate op 能调用哪些生成器
 # 加 --checkpoint 后每次编辑都写回工程文件,编辑器会自动重载 ——
 # 开着那个 .vxlt 就能看着 agent 一步步建模
 cargo run --release -- mcp --root ./models --checkpoint
+
+# 或者干脆不经过文件:编辑器自己就托管一个 server,agent 直接编辑你
+# 开着的工程,批次进的是你自己的撤销栈。把客户端指向它打印的 URL
+# (仅回环地址)
+cargo run --release -- --agent-port 8737
 ```
 
 以上子命令全部无头。`cargo build --no-default-features` 构建的正是这

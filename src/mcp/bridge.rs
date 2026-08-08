@@ -359,20 +359,27 @@ impl BridgeMcp {
     #[tool(
         description = "List the generators an op with \"op\": \"generate\" can call, each \
                        with its parameters at their default values. That listing is the \
-                       parameter template: copy it, change what you want, send it back."
+                       parameter template: copy it, change what you want, send it back. \
+                       Also returns graph_template, a working pipeline graph for the \
+                       \"graph\" op — read it before writing one, it is where the node \
+                       format is defined."
     )]
     fn list_generators(&self) -> Result<CallToolResult, McpError> {
         // The registry is static data, so this one needs nothing from
         // the editor and doesn't queue a call for it.
         answered(Generators {
             generators: crate::agent_ops::generator_infos(),
+            graph_template: crate::agent_ops::graph_template(),
         })
     }
 
     #[tool(
         description = "Summarize the project open in the editor: voxel and chunk counts, \
                        bounding box, the most common colors, emissive / metallic / \
-                       tint-zone tallies, sockets, selection and undo depth."
+                       tint-zone tallies, sockets, selection and undo depth. Also measures \
+                       the shape itself — connected components, floating parts, enclosed \
+                       voxels, per-axis symmetry — which a rendered view cannot tell you \
+                       reliably, and returns the pipeline graph the editor has open."
     )]
     async fn describe(&self) -> Result<CallToolResult, McpError> {
         match self.editor.call(AgentRequest::Describe).await {
@@ -482,6 +489,10 @@ impl BridgeMcp {
 #[derive(Serialize)]
 struct Generators {
     generators: Vec<crate::agent_ops::GeneratorInfo>,
+    /// A working pipeline graph to copy — the only place the graph
+    /// format is spelled out, since the `graph` op's schema keeps it an
+    /// opaque object rather than costing every turn nine definitions.
+    graph_template: serde_json::Value,
 }
 
 #[tool_handler(router = self.tool_router)]
