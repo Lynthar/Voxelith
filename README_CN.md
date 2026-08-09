@@ -1,10 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/branding/voxelith-logo-dark.svg">
-  <img src="assets/branding/voxelith-logo-light.svg" alt="Voxelith" width="520">
-</picture>
-
+<img src="assets/branding/voxelith-banner.svg" alt="Voxelith — 刻着发光体素 V 的符文碑" width="100%">
 
 **程序化优先的体素资产创作工具**
 
@@ -13,6 +9,12 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [English](README.md)
+
+<br>
+
+<img src="docs/media/agent-castle-keep.png" width="30%" alt="Agent 通过 ops 协议建造的城堡主楼"> <img src="docs/media/agent-terrain.png" width="30%" alt="程序化节点图生成的分层地形"> <img src="docs/media/agent-arched-bridge.png" width="30%" alt="拱桥 —— footprint 读数区分拱与墙">
+
+<sub>直接出自工具本身：agent 经 ops 协议建造，<code>voxelith render</code> 出图，<code>voxelith eval</code> 判分。</sub>
 
 </div>
 

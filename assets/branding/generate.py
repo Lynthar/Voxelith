@@ -261,6 +261,40 @@ def write_mark_svg(path, size=512):
                 f'width="{size}" height="{size}">\n<defs>{defs}</defs>\n{body}\n</svg>\n')
     print('wrote', path)
 
+def write_banner_svg(path, W=1200, H=300):
+    """README hero: the mark and wordmark on the brand's dark ground,
+    with the amber glow pooled behind the stone. Committed dark on both
+    GitHub themes — a deliberate panel, not a theme-dependent lockup.
+    Everything is paths and rects; no fonts to fall back."""
+    mark_s = 200
+    defs, mark_body, _ = mark_svg_body(mark_s, margin=0.04)
+    u = 12.6                                    # wordmark pixel unit
+    gap = 46
+    rects, xend = wordmark_rects('VOXELITH', u, 0, 0, '#E8ECF4')
+    word_w = xend
+    total = mark_s + gap + word_w
+    mx = (W - total) / 2
+    my = (H - mark_s) / 2
+    wx = mx + mark_s + gap
+    wy = (H - 7 * u) / 2
+    word, _ = wordmark_rects('VOXELITH', u, wx, wy, '#E8ECF4')
+    gcx, gcy = mx + mark_s / 2, H / 2
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
+            f'width="{W}" height="{H}">\n'
+            f'<defs>{defs}'
+            f'<radialGradient id="vxamb" cx="50%" cy="50%" r="50%">'
+            f'<stop offset="0" stop-color="{svg_hex(PAL["glow"])}" stop-opacity="0.13"/>'
+            f'<stop offset="1" stop-color="{svg_hex(PAL["glow"])}" stop-opacity="0"/>'
+            f'</radialGradient></defs>\n'
+            f'<rect x="1.5" y="1.5" width="{W-3}" height="{H-3}" rx="18" '
+            f'fill="#14161C" stroke="#2A3145" stroke-width="2"/>\n'
+            f'<ellipse cx="{gcx:.0f}" cy="{gcy:.0f}" rx="330" ry="150" fill="url(#vxamb)"/>\n'
+            f'<g transform="translate({mx:.2f},{my:.2f})">\n{mark_body}\n</g>\n'
+            + '\n'.join(word) + '\n</svg>\n')
+    print('wrote', path)
+
 def write_lockup_svg(path, text_color, size=160):
     defs, body, bbox = mark_svg_body(size, margin=0.10)
     u = size * 7.4 / 100
@@ -282,6 +316,7 @@ def main():
     write_mark_svg(out('voxelith-mark.svg'))
     write_lockup_svg(out('voxelith-logo-dark.svg'), '#E8ECF4')    # on dark bg
     write_lockup_svg(out('voxelith-logo-light.svg'), '#232838')   # on light bg
+    write_banner_svg(out('voxelith-banner.svg'))                  # README hero
     sizes = [256, 128, 64, 48, 32, 24, 16]
     icons = {sz: plated_icon(sz) for sz in sizes}
     icons[64].save(out('icon_64.png'))            # embedded as the window icon

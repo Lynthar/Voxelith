@@ -1,10 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/branding/voxelith-logo-dark.svg">
-  <img src="assets/branding/voxelith-logo-light.svg" alt="Voxelith" width="520">
-</picture>
-
+<img src="assets/branding/voxelith-banner.svg" alt="Voxelith — a runestone tablet with a V of glowing voxels" width="100%">
 
 **Procedural-first Voxel Asset Creation Tool**
 
@@ -13,6 +9,12 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [中文文档](README_CN.md)
+
+<br>
+
+<img src="docs/media/agent-castle-keep.png" width="30%" alt="Castle keep, built by an agent over the ops protocol"> <img src="docs/media/agent-terrain.png" width="30%" alt="Layered terrain from the procedural node graph"> <img src="docs/media/agent-arched-bridge.png" width="30%" alt="Arched bridge — footprint is what tells an arch from a wall">
+
+<sub>Straight out of the tool: models built by an agent over the ops protocol, drawn by <code>voxelith render</code>, graded by <code>voxelith eval</code>.</sub>
 
 </div>
 
