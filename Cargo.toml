@@ -119,6 +119,14 @@ tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros
 # carry.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+# Embeds assets/branding/voxelith.ico into the .exe as its resource icon
+# (Explorer, taskbar pins, shortcuts). The running window's icon is a
+# separate mechanism — `window_icon()` in src/app/handler.rs. Keyed to
+# Windows so the headless-in-a-container build (Linux) doesn't carry
+# it; build.rs `#[cfg]`s its only use out on the same condition.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
 [profile.dev]
 opt-level = 1  # Some optimization for faster debug builds
 

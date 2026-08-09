@@ -23,6 +23,20 @@ use super::{App, PendingAction};
 /// tremor without blocking deliberate drags.
 const DRAG_THRESHOLD_PX_SQ: f32 = 8.0 * 8.0;
 
+/// The window icon (title bar, Alt-Tab, the running taskbar button),
+/// decoded from the 64 px plated icon in assets/branding — same
+/// artwork the exe resource icon is built from (build.rs), so the
+/// pinned and the running taskbar item look identical. 64 px because
+/// the places Windows shows *this* icon are small; feeding it the
+/// 256 px master just makes the title bar blurrier. `None` on decode
+/// failure: a missing icon is not worth failing startup over.
+fn window_icon() -> Option<winit::window::Icon> {
+    let bytes = include_bytes!("../../assets/branding/icon_64.png");
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
 impl App {
     /// Persist prefs, drop the crash-recovery autosave (a clean exit
     /// means the next launch shouldn't offer recovery), and stop the
@@ -58,6 +72,7 @@ impl ApplicationHandler for App {
             };
             let window_attrs = Window::default_attributes()
                 .with_title("Voxelith")
+                .with_window_icon(window_icon())
                 .with_inner_size(winit::dpi::LogicalSize::new(w, h));
 
             let window = event_loop.create_window(window_attrs).unwrap();

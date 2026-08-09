@@ -1,13 +1,10 @@
-```
-██╗   ██╗ ██████╗ ██╗  ██╗███████╗██╗     ██╗████████╗██╗  ██╗
-██║   ██║██╔═══██╗╚██╗██╔╝██╔════╝██║     ██║╚══██╔══╝██║  ██║
-██║   ██║██║   ██║ ╚███╔╝ █████╗  ██║     ██║   ██║   ███████║
-╚██╗ ██╔╝██║   ██║ ██╔██╗ ██╔══╝  ██║     ██║   ██║   ██╔══██║
- ╚████╔╝ ╚██████╔╝██╔╝ ██╗███████╗███████╗██║   ██║   ██║  ██║
-  ╚═══╝   ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝
-```
-
 <div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/branding/voxelith-logo-dark.svg">
+  <img src="assets/branding/voxelith-logo-light.svg" alt="Voxelith" width="520">
+</picture>
+
 
 **Procedural-first Voxel Asset Creation Tool**
 
