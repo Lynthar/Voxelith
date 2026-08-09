@@ -319,17 +319,24 @@ pub(super) enum GenerateKind {
     Pyramid,
 }
 
+/// A stored `[r, g, b, a]` as a brush-ready voxel.
+///
+/// The alpha is dropped rather than restored, and that is the point:
+/// every voxel that reaches the world is opaque, and the brush is one
+/// step from the world. A stored alpha of 0 would hand the brush the
+/// greedy mesher's "no visible face" sentinel — solid to every count,
+/// invisible in every picture — and both files this reads from
+/// (`prefs.ron`, `.vxlt`) are files something else can write.
+pub(super) fn brush_from_stored(color: [u8; 4]) -> Voxel {
+    Voxel::from_rgb(color[0], color[1], color[2])
+}
+
 impl App {
     pub fn new() -> Self {
         let mut prefs = Prefs::load();
 
         let mut editor = Editor::new();
-        editor.brush_color = Voxel::from_rgba(
-            prefs.editor.brush_color[0],
-            prefs.editor.brush_color[1],
-            prefs.editor.brush_color[2],
-            prefs.editor.brush_color[3],
-        );
+        editor.brush_color = brush_from_stored(prefs.editor.brush_color);
         editor.brush_color.flags = prefs.editor.brush_flags;
         editor.brush_color.set_tint_zone(prefs.editor.brush_tint_zone);
         editor.brush_size = prefs.editor.brush_size.max(1);
@@ -344,7 +351,7 @@ impl App {
                 .editor
                 .palette
                 .iter()
-                .map(|c| Voxel::from_rgba(c[0], c[1], c[2], c[3]))
+                .map(|&c| brush_from_stored(c))
                 .collect();
         }
 
@@ -963,6 +970,24 @@ impl App {
             .sync_orbit_state_from_camera(&renderer.camera);
     }
 
+    /// The document differs from the user's file, and the autosave
+    /// timer owes it a write.
+    ///
+    /// Two flags on purpose, and neither is the other's shorthand:
+    /// `unsaved_changes` is "dirty relative to the file the user owns"
+    /// and only a manual save / open / new clears it; `autosave_pending`
+    /// is the timer's own bookkeeping. Autosave must never clear the
+    /// first, or "edit → autosave fires → close" would skip the guard
+    /// and then delete the only copy on the way out.
+    ///
+    /// Callers are the two ways a document changes: voxels (through the
+    /// mesh rebuild below, which every edit funnels into) and the
+    /// pipeline graph, which reaches no chunk and so has to say so.
+    pub(super) fn mark_document_modified(&mut self) {
+        self.unsaved_changes = true;
+        self.autosave_pending = true;
+    }
+
     /// Rebuild meshes for all dirty chunks and upload them to the GPU.
     ///
     /// Mesh generation runs on rayon's thread pool. Uploads stay on
@@ -970,9 +995,9 @@ impl App {
     /// trivially shareable with workers and uploads are cheap
     /// relative to mesh construction.
     pub(super) fn rebuild_all_meshes(&mut self) {
-        let Some(renderer) = &mut self.renderer else {
+        if self.renderer.is_none() {
             return;
-        };
+        }
 
         let dirty = self.world.dirty_chunks();
         if dirty.is_empty() {
@@ -986,8 +1011,7 @@ impl App {
         // through, so it's where we flag the document as modified. The
         // load / new / initial-scene paths clear the flags again after
         // their own rebuild.
-        self.unsaved_changes = true;
-        self.autosave_pending = true;
+        self.mark_document_modified();
 
         // Concurrent reads only: mesher acquires read locks on the dirty
         // chunk + its 26 Moore neighbors (3³−1 — per-vertex AO samples
@@ -1000,6 +1024,11 @@ impl App {
             .map(|&pos| mesher.generate(world, pos))
             .collect();
 
+        // Checked at the top; taken here so the flag write above isn't
+        // holding a borrow of it.
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
         for mesh in &meshes {
             renderer.upload_mesh(mesh);
         }

@@ -254,6 +254,18 @@ impl App {
     /// worth surfacing in the status bar (the explicit "Run Pipeline"
     /// button still surfaces them).
     fn regen_graph_preview(&mut self) {
+        // Checked before evaluating, for the reason `run_graph` gives —
+        // and this path needs it more, because nobody clicked anything:
+        // opening a project with the preview toggle on is enough to
+        // reach the evaluator, and the ceilings it walks past are the
+        // ones that end the process rather than the frame.
+        if let Err(refusal) = voxelith::agent_ops::check_graph(&self.ui.graph) {
+            log::debug!("Graph preview skipped: {}", refusal.message);
+            if let Some(r) = &mut self.renderer {
+                r.clear_preview();
+            }
+            return;
+        }
         let patch = match self.ui.graph.evaluate() {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {

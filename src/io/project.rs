@@ -405,8 +405,19 @@ fn rle_decode_chunk(data: &[u8]) -> Option<Chunk> {
 
         // Read voxel (8 bytes)
         let voxel_bytes: [u8; 8] = data[offset..offset + 8].try_into().ok()?;
-        let voxel: Voxel = *bytemuck::from_bytes(&voxel_bytes);
+        let mut voxel: Voxel = *bytemuck::from_bytes(&voxel_bytes);
         offset += 8;
+        // Every voxel that reaches the world is opaque. `.vox` import
+        // and GLB voxelization both normalize on the way in; the native
+        // format used to be the one door that didn't, and these bytes
+        // are as external as either — bytemuck hands back whatever the
+        // file said. A solid voxel whose `color()` is `[0, 0, 0, 0]` is
+        // the greedy mesher's "no visible face" sentinel and is
+        // indistinguishable from air to the flood fill, so it would be
+        // solid to every count and invisible to every picture.
+        if voxel.is_solid() {
+            voxel.a = 255;
+        }
 
         // Add voxels
         for _ in 0..count {
@@ -619,13 +630,14 @@ mod tests {
         // This pins the two things most likely to regress if RLE / chunk-
         // index / header handling drifts: (a) full EditorState equality,
         // and (b) exact voxel round-trip across negative coordinates and
-        // several chunks (incl. alpha).
+        // several chunks. Alpha is the one field that does *not* survive
+        // verbatim — see `a_solid_voxel_arrives_opaque_whatever_the_file_said`.
         let mut world = World::new();
         let samples = [
             ((0, 0, 0), Voxel::from_rgb(255, 0, 0)),
             ((-1, -1, -1), Voxel::from_rgb(0, 255, 0)), // chunk (-1,-1,-1)
             ((31, 31, 31), Voxel::from_rgb(0, 0, 255)), // far corner of (0,0,0)
-            ((32, 5, -33), Voxel::from_rgba(10, 20, 30, 200)), // chunk (1,0,-2)
+            ((32, 5, -33), Voxel::from_rgb(10, 20, 30)), // chunk (1,0,-2)
         ];
         for ((x, y, z), v) in samples {
             world.set_voxel(x, y, z, v);
@@ -682,6 +694,36 @@ mod tests {
                 z
             );
         }
+    }
+
+    /// The native format was the last ingest door that took a file's
+    /// alpha at its word. A *solid* voxel whose `color()` is
+    /// `[0, 0, 0, 0]` is the greedy mesher's "no visible face" sentinel
+    /// and reads as air to the flood fill — solid to every count and
+    /// every export, invisible in every picture. `.vox` import and GLB
+    /// voxelization have always normalized on the way in; a `.vxlt` is
+    /// no less external than either.
+    #[test]
+    fn a_solid_voxel_arrives_opaque_whatever_the_file_said() {
+        let dir = std::env::temp_dir().join("voxelith_alpha_normalize");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proj.vxlt");
+
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgba(10, 20, 30, 0));
+        world.set_voxel(1, 0, 0, Voxel::from_rgba(40, 50, 60, 128));
+        save_world_with_state(&world, EditorState::default(), &path).unwrap();
+
+        let (loaded, _) = load_world_with_state(&path).unwrap();
+        assert_eq!(loaded.get_voxel(0, 0, 0), Voxel::from_rgb(10, 20, 30));
+        assert_eq!(loaded.get_voxel(1, 0, 0), Voxel::from_rgb(40, 50, 60));
+        // Air is left alone: it is the one voxel that is *supposed* to
+        // be fully transparent, and normalizing it would make every
+        // empty cell a solid black one.
+        assert!(loaded.get_voxel(2, 0, 0).is_air());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -757,7 +799,7 @@ mod tests {
 
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
-        world.set_voxel(40, 2, -3, Voxel::from_rgba(1, 2, 3, 200)); // forces a 2nd chunk
+        world.set_voxel(40, 2, -3, Voxel::from_rgb(1, 2, 3)); // forces a 2nd chunk
         let state = EditorState {
             brush_color: [12, 34, 56, 200],
             brush_flags: 0b11, // emissive + metallic
@@ -771,10 +813,7 @@ mod tests {
 
         let (loaded_world, loaded_state) = load_world_with_state(&path).unwrap();
         assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
-        assert_eq!(
-            loaded_world.get_voxel(40, 2, -3),
-            Voxel::from_rgba(1, 2, 3, 200)
-        );
+        assert_eq!(loaded_world.get_voxel(40, 2, -3), Voxel::from_rgb(1, 2, 3));
         assert_eq!(loaded_state.brush_color, [12, 34, 56, 200]);
         assert_eq!(loaded_state.brush_flags, 0b11);
         assert_eq!(loaded_state.brush_tint_zone, 2);

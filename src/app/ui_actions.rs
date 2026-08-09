@@ -138,6 +138,7 @@ impl App {
                 UiAction::ExportGlbSmoothedHeavy => self.export_glb_smoothed(true),
                 UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
+                UiAction::GraphEdited => self.mark_document_modified(),
                 UiAction::AgentStart(port) => self.start_agent_bridge(port),
                 UiAction::AgentStop => self.stop_agent_bridge(),
                 UiAction::AgentApproval(approval) => self.set_agent_approval(approval),
@@ -196,6 +197,19 @@ impl App {
     /// `CommandHistory` so it's undo-able. Errors / fallback notes
     /// are surfaced via the status bar.
     fn run_graph(&mut self) {
+        // The same two ceilings an agent's graph goes through, applied
+        // to the one in the panel. Not politeness: this runs on the
+        // thread that draws, the evaluator descends recursively, and a
+        // source generator sizes its buffer from its own parameters
+        // before anything downstream gets a look — so a graph out of a
+        // `.vxlt` (an external file, which can hold a chain long enough
+        // to overflow the stack or a terrain node whose height span
+        // overflows `i32`) doesn't fail here, it takes the editor.
+        if let Err(refusal) = voxelith::agent_ops::check_graph(&self.ui.graph) {
+            log::warn!("Graph refused before evaluation: {}", refusal.message);
+            self.ui.set_status(format!("Graph: {}", refusal.message));
+            return;
+        }
         let result = self.ui.graph.evaluate();
         let patch = match result {
             Ok(p) => p,
@@ -238,8 +252,8 @@ impl App {
     }
 
     /// Turn a generated [`VoxelPatch`] into an undoable `SetVoxels`
-    /// change list. Shared by the procgen panel, the graph, and the AI
-    /// result path so all three treat duplicate and identity writes
+    /// change list. Shared by the procgen panel, the graph and the
+    /// glTF import so all three treat duplicate and identity writes
     /// identically:
     /// 1. **Dedupe by position, last write wins** (`VoxelPatch::
     ///    dedup_last_write`) — otherwise re-running a generator that

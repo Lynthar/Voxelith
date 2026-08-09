@@ -1,17 +1,17 @@
 //! Pipeline graph: compose multiple generators + transforms into a DAG.
 //!
 //! Each `GraphNode` either produces a `VoxelPatch` from no inputs
-//! (source generators), transforms one input patch (`Translate`), or
-//! combines two input patches (`Combine`). An `Output` node marks
-//! the final patch the pipeline emits. Evaluation is a DFS topological
-//! sort starting from the output: visit inputs before consumers,
-//! memoize each node's patch in a `HashMap`, return the output's patch.
+//! (source generators), transforms one input patch (`Translate`,
+//! `Filter`), or combines two (`Mask`, `Combine`). An `Output` node
+//! marks the final patch the pipeline emits. Evaluation is a DFS
+//! topological sort starting from the output: visit inputs before
+//! consumers, memoize each node's patch, hand it to its readers, and
+//! drop it once the last of them has run.
 //!
-//! The graph deliberately stays small for now (no n-ary combine, no
-//! per-voxel filters, no visual wires). The data model and evaluator
-//! are written so those extensions only require new `NodeKind`
-//! variants — the surrounding plumbing (UI, prefs, undo) doesn't
-//! care what nodes do internally.
+//! The graph deliberately stays small (no n-ary combine, no scripted
+//! nodes). The data model and evaluator are written so extensions only
+//! require new `NodeKind` variants — the surrounding plumbing (the
+//! panel, the `.vxlt`, undo) doesn't care what nodes do internally.
 
 use std::collections::HashMap;
 
@@ -597,9 +597,31 @@ impl PipelineGraph {
 
     /// Run the pipeline and return the patch produced by the Output
     /// node (or an error describing what's wrong with the graph).
+    ///
+    /// A node's patch is dropped as soon as the last node that reads it
+    /// has run, so what is resident at any moment is the working front,
+    /// not the whole graph. That is what the source-count ceiling is
+    /// written against ("peak memory is the sum of the sources"): a
+    /// cache that only ever grew made a chain of transforms hold one
+    /// full copy *per node*, which a 64-node graph over a legal source
+    /// turns into gigabytes — all of it allocated before the first cell
+    /// reaches the batch cell budget that was supposed to bound it.
+    /// Transform nodes cost nothing per node now; the sources still
+    /// cost what they cover.
     pub fn evaluate(&self) -> GenResult<VoxelPatch> {
         let output_id = self.find_output_immut()?;
         let order = self.topo_sort_to(output_id)?;
+
+        // How many nodes still have to read each patch. Counted over
+        // `order` rather than over every node, because that is exactly
+        // the set about to run.
+        let mut readers: HashMap<NodeId, usize> = HashMap::new();
+        for &id in &order {
+            let Some(node) = self.get(id) else { continue };
+            for input in node.kind.inputs() {
+                *readers.entry(input).or_insert(0) += 1;
+            }
+        }
 
         let mut cache: HashMap<NodeId, VoxelPatch> = HashMap::new();
         for id in order {
@@ -607,6 +629,14 @@ impl PipelineGraph {
                 .get(id)
                 .ok_or(GraphError::DanglingReference(id))?;
             let patch = self.eval_node(node, &cache)?;
+            for input in node.kind.inputs() {
+                if let Some(left) = readers.get_mut(&input) {
+                    *left -= 1;
+                    if *left == 0 {
+                        cache.remove(&input);
+                    }
+                }
+            }
             cache.insert(id, patch);
         }
         // Output's patch is its sole input's patch (passed through
@@ -783,12 +813,30 @@ fn clear_input_if(kind: &mut NodeKind, id: NodeId) {
     }
 }
 
+/// Shift every voxel, saturating rather than wrapping.
+///
+/// Same reasoning as the `translate` op, which reaches this decision
+/// from the other side: a source generator handed an extreme origin can
+/// emit a position anywhere in `i32`, and the offset itself arrives from
+/// a wire that checks its *shape* and not its magnitude. The sum has to
+/// land somewhere the write door will refuse — `i32::MAX` does, a
+/// wrapped-around small number does not, and a bare `+` here took the
+/// whole process out on a debug build instead.
 fn translate_patch(patch: VoxelPatch, dx: i32, dy: i32, dz: i32) -> VoxelPatch {
     let mut result = VoxelPatch::new();
     result.voxels = patch
         .voxels
         .into_iter()
-        .map(|((x, y, z), v)| ((x + dx, y + dy, z + dz), v))
+        .map(|((x, y, z), v)| {
+            (
+                (
+                    x.saturating_add(dx),
+                    y.saturating_add(dy),
+                    z.saturating_add(dz),
+                ),
+                v,
+            )
+        })
         .collect();
     result.notes = patch.notes;
     result
@@ -931,6 +979,57 @@ mod tests {
         let out = g.add(NodeKind::Output { input: Some(c) });
         let _ = out;
         g
+    }
+
+    /// Freeing a patch when its last reader has run means counting the
+    /// readers right. A diamond is where getting it wrong shows: one
+    /// source feeds two branches, and dropping it after the first would
+    /// leave the second with a dangling input instead of a patch.
+    #[test]
+    fn a_patch_read_twice_survives_until_its_second_reader() {
+        let mut g = PipelineGraph::default();
+        let source = g.add(NodeKind::Terrain(PerlinTerrain {
+            width: 8,
+            depth: 8,
+            ..Default::default()
+        }));
+        let left = g.add(NodeKind::Translate {
+            input: Some(source),
+            dx: 100,
+            dy: 0,
+            dz: 0,
+        });
+        let right = g.add(NodeKind::Translate {
+            input: Some(source),
+            dx: 0,
+            dy: 0,
+            dz: 100,
+        });
+        let joined = g.add(NodeKind::Combine {
+            a: Some(left),
+            b: Some(right),
+            op: CombineOp::Union,
+        });
+        g.add(NodeKind::Output {
+            input: Some(joined),
+        });
+
+        let both = g.evaluate().expect("a diamond is a legal graph");
+        let one_branch = {
+            let mut g = PipelineGraph::default();
+            let source = g.add(NodeKind::Terrain(PerlinTerrain {
+                width: 8,
+                depth: 8,
+                ..Default::default()
+            }));
+            g.add(NodeKind::Output {
+                input: Some(source),
+            });
+            g.evaluate().expect("a source straight to output").voxels.len()
+        };
+        // Two disjoint copies of the same source: nothing was dropped
+        // early, and nothing was double-counted.
+        assert_eq!(both.voxels.len(), one_branch * 2);
     }
 
     #[test]

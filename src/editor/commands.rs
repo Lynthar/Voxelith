@@ -125,6 +125,9 @@ pub struct CommandHistory {
     /// next `end_stroke` / `execute` / `undo` / `redo` (which closes
     /// it). Required for `execute_merge` to merge instead of push.
     stroke_open: bool,
+    /// Bumped by every operation that changes the world through this
+    /// history. See [`CommandHistory::generation`].
+    generation: u64,
 }
 
 impl CommandHistory {
@@ -136,7 +139,28 @@ impl CommandHistory {
             max_size,
             last_push_at: None,
             stroke_open: false,
+            generation: 0,
         }
+    }
+
+    /// A counter that moves whenever this history changed the world,
+    /// and never moves back.
+    ///
+    /// The stack depths look like they say the same thing and don't:
+    /// `(undo, redo)` returns to a pair it already held in at least
+    /// three ordinary ways — undo then draw (the redo stack is cleared
+    /// by the new command), draw with the undo stack already at
+    /// `max_size` (the push trims the oldest), and continuing a stroke
+    /// (a merge folds into the entry already on top). Each of those
+    /// leaves a *different world* behind the same numbers.
+    ///
+    /// Anything holding a change list computed against an earlier world
+    /// — the editor's agent bridge parks one while a human decides —
+    /// has to be able to tell that the ground moved, because its
+    /// `old_voxel`s describe the world as it *was*, and committing them
+    /// afterwards makes undo restore a state that never existed.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Execute a command and push it as a fresh undo entry.
@@ -176,6 +200,9 @@ impl CommandHistory {
                 // invalidation and for refreshing the merge window.
                 self.redo_stack.clear();
                 self.last_push_at = Some(Instant::now());
+                // The world moved even though no stack did: the entry
+                // on top absorbed the change.
+                self.generation += 1;
                 return;
             }
         }
@@ -200,6 +227,7 @@ impl CommandHistory {
             self.undo_stack.pop_front();
         }
         self.last_push_at = Some(Instant::now());
+        self.generation += 1;
     }
 
     /// Undo the last command
@@ -209,6 +237,7 @@ impl CommandHistory {
             self.redo_stack.push_back(command);
             // Any active stroke is no longer at the top of undo.
             self.stroke_open = false;
+            self.generation += 1;
             true
         } else {
             false
@@ -221,6 +250,7 @@ impl CommandHistory {
             command.execute(world);
             self.undo_stack.push_back(command);
             self.stroke_open = false;
+            self.generation += 1;
             true
         } else {
             false
@@ -253,6 +283,10 @@ impl CommandHistory {
         self.redo_stack.clear();
         self.last_push_at = None;
         self.stroke_open = false;
+        // Nothing was undone, but everything anyone held about this
+        // history is now wrong — clearing accompanies throwing the
+        // world away.
+        self.generation += 1;
     }
 }
 
@@ -267,6 +301,81 @@ mod tests {
             old_voxel: world.get_voxel(pos.0, pos.1, pos.2),
             new_voxel,
         }])
+    }
+
+    /// The three ways `(undo_count, redo_count)` comes back to a pair
+    /// it already held while the world underneath it changed. Each was
+    /// a way for the agent bridge to accept a batch built against a
+    /// world that is gone; the generation counter is what tells them
+    /// apart.
+    #[test]
+    fn every_edit_moves_the_generation_even_when_the_depths_do_not() {
+        let mut world = World::new();
+        let solid = Voxel::from_rgb(200, 100, 50);
+
+        // (a) undo, then draw: the new push clears the redo stack, so
+        // the pair walks back to exactly where it started.
+        let mut history = CommandHistory::new(100);
+        for x in 0..3 {
+            history.execute(set_one(&world, (x, 0, 0), solid), &mut world);
+        }
+        let depths = (history.undo_count(), history.redo_count());
+        let mark = history.generation();
+        history.undo(&mut world);
+        history.execute(set_one(&world, (50, 0, 0), solid), &mut world);
+        assert_eq!(depths, (history.undo_count(), history.redo_count()));
+        assert_ne!(mark, history.generation());
+
+        // (b) the undo stack is already full: the push trims the oldest
+        // entry, so the depth doesn't move either.
+        let mut history = CommandHistory::new(4);
+        for x in 0..4 {
+            history.execute(set_one(&world, (x, 1, 0), solid), &mut world);
+        }
+        let depths = (history.undo_count(), history.redo_count());
+        let mark = history.generation();
+        history.execute(set_one(&world, (60, 1, 0), solid), &mut world);
+        assert_eq!(depths, (4, 0));
+        assert_eq!(depths, (history.undo_count(), history.redo_count()));
+        assert_ne!(mark, history.generation());
+
+        // (c) a stroke in progress: the merge folds into the entry
+        // already on top, and nothing is pushed at all.
+        let mut history = CommandHistory::new(100);
+        let window = Duration::from_secs(60);
+        history.execute_merge(set_one(&world, (0, 2, 0), solid), &mut world, window);
+        let depths = (history.undo_count(), history.redo_count());
+        let mark = history.generation();
+        history.execute_merge(set_one(&world, (1, 2, 0), solid), &mut world, window);
+        assert_eq!(depths, (history.undo_count(), history.redo_count()));
+        assert_ne!(mark, history.generation());
+    }
+
+    /// It only ever counts up, so a mark taken earlier can never be
+    /// matched again by later activity — including the `clear` that
+    /// accompanies throwing the world away, which lands both depths
+    /// back on `(0, 0)`.
+    #[test]
+    fn the_generation_never_returns_to_a_value_it_has_left() {
+        let mut world = World::new();
+        let solid = Voxel::from_rgb(200, 100, 50);
+        let mut history = CommandHistory::new(100);
+        let mut seen = vec![history.generation()];
+
+        history.execute(set_one(&world, (0, 0, 0), solid), &mut world);
+        seen.push(history.generation());
+        history.undo(&mut world);
+        seen.push(history.generation());
+        history.redo(&mut world);
+        seen.push(history.generation());
+        history.clear();
+        seen.push(history.generation());
+
+        assert_eq!((history.undo_count(), history.redo_count()), (0, 0));
+        let mut sorted = seen.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seen.len(), "a generation repeated: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "not monotonic: {seen:?}");
     }
 
     #[test]

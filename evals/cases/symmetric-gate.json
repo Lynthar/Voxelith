@@ -1,6 +1,6 @@
 {
   "id": "symmetric-gate",
-  "task": "Build a gateway arch standing on the ground, mirror-symmetric across the X axis, with an opening wide and tall enough to walk through. One connected piece.",
+  "task": "Build a gateway arch standing on the ground, mirror-symmetric across the X axis, with an opening wide and tall enough to walk through. One connected piece. Around 8 to 24 cells wide and tall, no more than 8 deep, using at least 100 voxels in all.",
   "notes": "Symmetry is easy to claim and easy to miss by one column. Measured in cell semantics, so an even-width arch is symmetric — the point formula would call every one of them wrong.",
   "expect": {
     "components": {

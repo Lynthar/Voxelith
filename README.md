@@ -4,9 +4,9 @@
 
 **Procedural-first Voxel Asset Creation Tool**
 
-[![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.88+-orange.svg)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-22.0-blue.svg)](https://wgpu.rs/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
 [中文文档](README_CN.md)
 
@@ -71,9 +71,12 @@ cargo run --release -- mcp --root ./models --checkpoint
 cargo run --release -- --agent-port 8737
 ```
 
-Every subcommand above is headless. `cargo build --no-default-features`
-builds exactly that half — library plus CLI, with no winit / wgpu / egui
-in the dependency tree — for a container or CI runner that has no GPU.
+Every subcommand above is headless; `--agent-port` is the editor itself.
+`cargo build --no-default-features` builds that headless half — library
+plus CLI, with no winit / wgpu / egui in the dependency tree — for a
+container or CI runner that has no GPU. Add `--features mcp` to keep the
+`mcp` subcommand in it: that one travels with its own feature, and a
+plain `--no-default-features` build doesn't have it.
 Run `voxelith exec --help` for the flags and `voxelith generators` for
 the generator catalog; the ops schema itself is documented on the types
 in `src/agent_ops/schema.rs`.
@@ -120,4 +123,4 @@ See [`docs/STATUS.md`](docs/STATUS.md) for current implementation state, the rem
 
 ## License
 
-MIT License © 2024
+Apache License 2.0 © 2024-2026 Lynthar

@@ -43,22 +43,27 @@ impl fmt::Display for PathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PathError::Empty => write!(f, "a path is required, and this one is empty"),
+            // Through this module's own `display`, not `Path::display`:
+            // these paths have been through `canonicalize`, which on
+            // Windows hands back the `\\?\` verbatim form. That prefix
+            // is correct, unreadable, and — pasted back by an agent
+            // taking the message at its word — not what it typed.
             PathError::Unanchored(path) => write!(
                 f,
                 "{} doesn't name a file — give a path ending in a file name",
-                path.display()
+                display(path)
             ),
             PathError::NoDirectory { path, source } => write!(
                 f,
                 "the directory holding {} can't be read ({source}); create it first",
-                path.display()
+                display(path)
             ),
             PathError::Outside { path, root } => write!(
                 f,
                 "{} is outside this server's root ({}); pass a path inside the root, \
                  or restart the server with --root pointing somewhere that contains it",
-                path.display(),
-                root.display()
+                display(path),
+                display(root)
             ),
         }
     }

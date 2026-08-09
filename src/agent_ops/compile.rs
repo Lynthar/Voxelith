@@ -42,6 +42,29 @@ pub(super) const FACE_NEIGHBORS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
+/// Step one cell from `pos`, or `None` when the step would leave `i32`.
+///
+/// The ops path never sees `None`: its coordinates came through
+/// [`check_coord`] and sit within ±[`MAX_COORD`], nowhere near the edge.
+/// The *measurement* path is the reason this exists — `describe` reads
+/// whatever a `.vxlt` happens to hold, and a cell parked at `i32::MAX`
+/// used to walk its own neighbor arithmetic straight into an overflow
+/// panic (in the editor, on the frame loop's thread).
+///
+/// A neighbor that can't be represented is a neighbor that can't hold a
+/// voxel, so reading `None` as "nothing there" is the honest answer, not
+/// a fallback that papers over a failure.
+pub(super) fn face_neighbor(
+    pos: (i32, i32, i32),
+    delta: (i32, i32, i32),
+) -> Option<(i32, i32, i32)> {
+    Some((
+        pos.0.checked_add(delta.0)?,
+        pos.1.checked_add(delta.1)?,
+        pos.2.checked_add(delta.2)?,
+    ))
+}
+
 pub(super) struct Scratch {
     world: World,
     /// `pos → (value before the batch, value now)`.
@@ -503,8 +526,7 @@ impl Scratch {
         mode: WriteMode,
     ) -> Result<(), OpsError> {
         graph.normalize();
-        graph.validate().map_err(graph_error)?;
-        registry::check_graph_sources(&graph)?;
+        check_graph(&graph)?;
 
         if apply {
             let patch = graph.evaluate().map_err(|e| {
@@ -723,6 +745,13 @@ fn set_node_params(
 /// A graph problem in this protocol's terms. The split is the one an
 /// agent acts on: a malformed graph gets edited, an oversized one gets
 /// split.
+/// Shape then size — see [`super::check_graph`], which is this under a
+/// name the editor can reach.
+pub(super) fn check_graph(graph: &PipelineGraph) -> Result<(), OpsError> {
+    graph.validate().map_err(graph_error)?;
+    registry::check_graph_sources(graph)
+}
+
 fn graph_error(error: crate::procgen::GraphError) -> OpsError {
     use crate::procgen::GraphError as G;
     let code = match error {
@@ -783,9 +812,10 @@ fn reject_unknown_graph_keys(
 /// tell whether hollowing would buy anything before exporting.
 pub(super) fn is_enclosed(world: &World, pos: (i32, i32, i32)) -> bool {
     world.get_voxel(pos.0, pos.1, pos.2).is_solid()
-        && FACE_NEIGHBORS
-            .iter()
-            .all(|(dx, dy, dz)| world.get_voxel(pos.0 + dx, pos.1 + dy, pos.2 + dz).is_solid())
+        && FACE_NEIGHBORS.iter().all(|&delta| {
+            face_neighbor(pos, delta)
+                .is_some_and(|n| world.get_voxel(n.0, n.1, n.2).is_solid())
+        })
 }
 
 fn tuple(p: [i32; 3]) -> (i32, i32, i32) {
@@ -1487,6 +1517,107 @@ mod tests {
             ]}}]}"#,
         );
         assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(
+            error.message.contains("node 0"),
+            "a graph names its nodes by id; the message must too, got: {}",
+            error.message
+        );
+    }
+
+    /// The editor loads a graph out of a `.vxlt` and evaluates it on
+    /// the thread that draws, so the two ceilings have to be reachable
+    /// from outside this module — and they have to fire *before* the
+    /// evaluator recurses or the generator allocates. Both of these
+    /// were measured taking the process: a chain this long overflowed
+    /// the stack, and the terrain node's own `max - min` overflowed
+    /// `i32` while sizing its buffer.
+    #[test]
+    fn check_graph_refuses_what_the_evaluator_cannot_survive() {
+        let mut nodes: Vec<String> = (0..60_000)
+            .map(|id| format!(r#"{{"id":{id},"kind":"translate","dx":1}}"#))
+            .collect();
+        nodes.push(r#"{"id":60000,"kind":"output"}"#.to_string());
+        let graph: crate::procgen::PipelineGraph =
+            serde_json::from_str(&format!(r#"{{"nodes":[{}]}}"#, nodes.join(",")))
+                .expect("a .vxlt could hold this");
+        let error = super::check_graph(&graph).expect_err("60,001 nodes is past the stack guard");
+        assert_eq!(error.code, ErrorCode::GraphTooLarge);
+
+        let graph: crate::procgen::PipelineGraph = serde_json::from_str(
+            r#"{"nodes":[
+                {"id":0,"kind":"builtin.perlin_terrain","width":1,"depth":1,
+                 "min_height":-2000000000,"max_height":2000000000},
+                {"id":1,"kind":"output","input":0}]}"#,
+        )
+        .expect("a .vxlt could hold this too");
+        let error = super::check_graph(&graph).expect_err("a four-billion-cell span is past the ceiling");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    /// A generator's origin is a coordinate, and every other coordinate
+    /// in this protocol is bounded before anything runs. These two were
+    /// not: the generator stamped `origin + offset` while building its
+    /// patch, which overflows on a build with overflow checks — the
+    /// abort takes the process, and with it whatever an editor had
+    /// unsaved. Release wrapped and the write door refused the result,
+    /// so the code an agent sees is the same one; it just arrives before
+    /// the work now, naming the field it wrote.
+    #[test]
+    fn a_generator_origin_past_the_coordinate_ceiling_is_refused() {
+        for generator in ["builtin.wfc", "builtin.lsystem_tree"] {
+            let mut session = AgentSession::new();
+            let error = refuse(
+                &mut session,
+                &format!(
+                    r#"{{"version":1,"ops":[{{"op":"generate","generator":"{generator}",
+                       "params":{{"origin":[2147483647,0,0]}}}}]}}"#
+                ),
+            );
+            assert_eq!(
+                error.code,
+                ErrorCode::CoordinateOutOfRange,
+                "{generator} should refuse an extreme origin"
+            );
+            assert!(
+                error.message.contains("origin"),
+                "the message must name the parameter, got: {}",
+                error.message
+            );
+        }
+    }
+
+    /// A Translate node's offset is checked for shape, not magnitude —
+    /// the schema takes any `i32`, `validate` looks at wires, and the
+    /// source ceiling looks at sizes. So the sum lands at the write
+    /// door, and it has to *arrive* there: a bare `+` in the node's
+    /// shift used to abort the process on a debug build instead.
+    #[test]
+    fn a_translate_node_offset_saturates_into_a_refusal() {
+        let mut session = AgentSession::new();
+        let error = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+                {"id":0,"kind":"builtin.perlin_terrain","width":4,"depth":4},
+                {"id":1,"kind":"translate","input":0,"dx":2147483647},
+                {"id":2,"kind":"output","input":1}
+            ]}}]}"#,
+        );
+        assert_eq!(error.code, ErrorCode::CoordinateOutOfRange);
+    }
+
+    /// Same ceiling through the graph door, which holds an
+    /// already-built generator the registry's build path never saw.
+    #[test]
+    fn a_graph_node_cannot_walk_past_the_origin_ceiling_either() {
+        let mut session = AgentSession::new();
+        let error = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"nodes":[
+                {"id":0,"kind":"builtin.lsystem_tree","origin":[2147483647,0,0]},
+                {"id":1,"kind":"output","input":0}
+            ]}}]}"#,
+        );
+        assert_eq!(error.code, ErrorCode::CoordinateOutOfRange);
         assert!(
             error.message.contains("node 0"),
             "a graph names its nodes by id; the message must too, got: {}",

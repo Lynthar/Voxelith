@@ -47,6 +47,16 @@ use super::{answered, refused, RenderArgs, Rendered};
 /// discover the clash by having one of them fail to start.
 pub const DEFAULT_PORT: u16 = 8737;
 
+/// Largest image edge this bridge will render.
+///
+/// Half the headless server's ceiling, for a reason that has nothing to
+/// do with the picture: these renders run on the editor's frame loop,
+/// so their cost is measured in seconds the window doesn't respond.
+/// The project's own measurement is ~480 ms for one 1024² view against
+/// a small model — seven of those is a program that looks hung. At 512
+/// a full sweep is a hitch; at the 256 default it is a frame.
+pub const BRIDGE_MAX_SIZE: u32 = 512;
+
 /// What the server asks the editor's main thread to do.
 ///
 /// One variant per tool, and no variant that writes a file: see the
@@ -432,6 +442,23 @@ impl BridgeMcp {
         Parameters(args): Parameters<RenderArgs>,
     ) -> Result<CallToolResult, McpError> {
         let size = args.size.unwrap_or(view::DEFAULT_SIZE);
+        // Lower than the headless server's ceiling, and refused rather
+        // than clamped like every other size in this protocol. The
+        // difference is whose thread this runs on: the editor renders
+        // in its frame loop, so the whole window stops responding for
+        // as long as it takes, and seven views at 1024² is more than
+        // three seconds of a program that looks hung. The same request
+        // to `voxelith mcp` is fine — nobody is sitting in front of it.
+        if size > BRIDGE_MAX_SIZE {
+            return refused(&ExecError::new(
+                "invalid_size",
+                format!(
+                    "size {size} would freeze the editor while it renders; \
+                     the in-editor bridge tops out at {BRIDGE_MAX_SIZE} pixels — \
+                     render larger images with `voxelith render` or `voxelith mcp`"
+                ),
+            ));
+        }
         let views = match args.views.is_empty() {
             true => vec![view::ViewKind::Iso],
             false => args.views,
@@ -462,6 +489,7 @@ impl BridgeMcp {
                 size: view.size,
                 framing: &view.framing,
                 empty: view.empty,
+                truncated: view.truncated,
             })
             .map_err(|e| {
                 McpError::internal_error(format!("could not describe the view: {e}"), None)

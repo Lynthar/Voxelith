@@ -879,7 +879,11 @@ impl App {
                 self.ui.set_status(format!("Selected all: {}×{}×{}", w, h, d));
             }
             None => {
-                self.editor.selection = None;
+                // Through `deselect`, not by assigning `None`: a
+                // selection is also the drag anchor, the move anchor and
+                // the translucent move ghost, and clearing only the
+                // field leaves those on screen.
+                self.deselect();
                 self.ui.set_status("World is empty — nothing to select");
             }
         }

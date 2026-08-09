@@ -1,6 +1,6 @@
 {
   "id": "symmetric-mech",
-  "task": "Build a mech standing on its own two feet: a torso, two arms and two legs, every limb joined to the body. About 20 cells tall, mirror-symmetric across X. Give it a glowing element — at least one emissive voxel.",
+  "task": "Build a mech standing on its own two feet: a torso, two arms and two legs, every limb joined to the body. About 20 cells tall, mirror-symmetric across X. Give it a glowing element — at least one emissive voxel. Around 10 to 26 cells wide and 4 to 16 deep, using between 400 and 6,000 voxels.",
   "notes": "Five parts that must end up as one piece, with the joints being exactly where a limb ends up one cell short. The emissive requirement checks that material flags are reachable at all; voxel_count is bounded above so a solid block of a mech doesn't pass.",
   "expect": {
     "components": {

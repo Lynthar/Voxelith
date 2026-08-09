@@ -98,11 +98,17 @@ pub const MAX_COORD: i32 = 1 << 20;
 
 /// Source nodes one graph may hold.
 ///
-/// Evaluation memoizes a patch per node and hands each consumer a
-/// clone, so peak memory is the sum of the sources — and all of it is
-/// resident before the first cell reaches the batch cell budget.
-/// A graph that needs more than eight sources wants to be run in
-/// stages, which is free: its output is already in the world.
+/// Evaluation drops a node's patch as soon as its last reader has run,
+/// so what is resident is the working front rather than the whole
+/// graph — and the sources are the floor under that front: each one
+/// exists from the moment it is generated until whatever consumes it
+/// runs, and all of that happens before the first cell reaches the
+/// batch cell budget. (It did not always work this way. A cache that
+/// only grew held one full copy per node, so a long enough chain of
+/// transforms over a legal source reached gigabytes while this comment
+/// claimed the sources bounded it.) A graph that needs more than eight
+/// sources wants to be run in stages, which is free: its output is
+/// already in the world.
 pub const MAX_GRAPH_SOURCES: usize = 8;
 
 /// Edits one `graph_edit` op may carry. A graph tops out at 64 nodes,
@@ -313,6 +319,28 @@ pub struct BatchInput<'a> {
     /// `graph_edit` op edits. A batch that never mentions graphs never
     /// reads it.
     pub graph: &'a PipelineGraph,
+}
+
+/// Everything that has to hold before a graph is worth evaluating.
+///
+/// Two checks that are easy to mistake for one: [`PipelineGraph::validate`]
+/// covers the *shape* (unique ids, no dangling wires, no cycles, one
+/// output, and — the one that isn't taste — no more nodes than the
+/// evaluator's recursive descent has stack for), and
+/// `check_graph_sources` covers the *size* (every source node against
+/// the same ceiling a `generate` op would hit, plus what the whole
+/// graph can materialize at once).
+///
+/// Public because the editor needs it too. A graph arrives there out of
+/// a `.vxlt` — an external file that can hold anything — and is then
+/// evaluated by Run Pipeline and, if the preview toggle is on, by the
+/// frame loop with nobody clicking anything. Both of those walked past
+/// both checks: a long enough chain overflowed the stack, and a source
+/// node past the registry's ceiling took the generator's own arithmetic
+/// with it. Neither is recoverable, and both are on the thread that
+/// draws.
+pub fn check_graph(graph: &PipelineGraph) -> Result<(), OpsError> {
+    compile::check_graph(graph)
 }
 
 /// Validate a batch and run it against a copy of the document,

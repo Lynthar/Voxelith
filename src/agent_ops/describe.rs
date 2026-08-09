@@ -34,7 +34,14 @@ pub struct Description {
     pub world_aabb: Option<Aabb>,
     /// `world_aabb` as extents, since "how big is it" is the question
     /// the AABB is usually standing in for.
-    pub size: Option<[i32; 3]>,
+    ///
+    /// `i64` because it is a *difference* of two coordinates: everything
+    /// this tool writes stays inside ±[`MAX_COORD`](super::MAX_COORD),
+    /// but a `.vxlt` is an external file, and a span wider than `i32`
+    /// used to overflow here rather than be reported. The extra width
+    /// costs nothing on the wire — every real document's extents fit in
+    /// three digits.
+    pub size: Option<[i64; 3]>,
     /// The most common colors, most first.
     pub colors: Vec<ColorCount>,
     /// Voxels whose color didn't make the list, and how many distinct
@@ -231,8 +238,16 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
 
     let mut components = components_of(&solids);
     // Biggest first, then by position so equal-sized parts don't
-    // reorder between runs (the set iteration is a HashSet).
-    components.sort_unstable_by(|a, b| b.voxels.cmp(&a.voxels).then(a.aabb.min.cmp(&b.aabb.min)));
+    // reorder between runs (the set iteration is a HashSet). Both
+    // corners, because two parts can share a `min` — an L and its
+    // mirror image do — and a key that ties is a key that lets the
+    // hash order through.
+    components.sort_unstable_by(|a, b| {
+        b.voxels
+            .cmp(&a.voxels)
+            .then(a.aabb.min.cmp(&b.aabb.min))
+            .then(a.aabb.max.cmp(&b.aabb.max))
+    });
     let component_count = components.len();
     let largest_component = components.first().map(|c| c.voxels).unwrap_or(0);
     let floating_components = components
@@ -256,18 +271,37 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
     let bounds = [(min.0, max.0), (min.1, max.1), (min.2, max.2)];
     let symmetry = axes.map(|(name, index)| {
         let (low, high) = bounds[index];
+        // `min + max - p` in i64. A `.vxlt` is an external file and can
+        // hold coordinates the ops path would have refused, and two of
+        // them added together overflowed i32 here — in the editor, on
+        // the thread that draws. A reflection that lands outside i32
+        // names no cell, so it counts as a mismatch, which is the same
+        // answer as landing on air.
+        let reflect = |p: i32| i32::try_from(low as i64 + high as i64 - p as i64).ok();
         let mismatched = solids
             .iter()
             .filter(|&&pos| {
                 let mut mirrored = [pos.0, pos.1, pos.2];
-                mirrored[index] = low + high - mirrored[index];
-                !solids.contains(&(mirrored[0], mirrored[1], mirrored[2]))
+                match reflect(mirrored[index]) {
+                    Some(reflected) => {
+                        mirrored[index] = reflected;
+                        !solids.contains(&(mirrored[0], mirrored[1], mirrored[2]))
+                    }
+                    None => true,
+                }
             })
             .count() as u64;
         SymmetryCheck {
             axis: name,
             mismatched,
-            ratio: ((mismatched as f64 / voxel_count as f64) * 10_000.0).round() / 10_000.0,
+            // Six places, not four: the structural pass runs on up to
+            // two million voxels, and at four a single mismatched cell
+            // in more than ten thousand rounds to `0.0` — a number an
+            // agent reads as "symmetric" when `mismatched` says
+            // otherwise two lines up. Six covers the whole range this
+            // pass will ever measure.
+            ratio: ((mismatched as f64 / voxel_count as f64) * 1_000_000.0).round()
+                / 1_000_000.0,
         }
     });
 
@@ -331,8 +365,10 @@ fn sealed_air(
                         || pos.1 == max.1
                         || pos.2 == min.2
                         || pos.2 == max.2;
-                    for (dx, dy, dz) in super::compile::FACE_NEIGHBORS {
-                        let next = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                    for delta in super::compile::FACE_NEIGHBORS {
+                        let Some(next) = super::compile::face_neighbor(pos, delta) else {
+                            continue;
+                        };
                         let inside = (min.0..=max.0).contains(&next.0)
                             && (min.1..=max.1).contains(&next.1)
                             && (min.2..=max.2).contains(&next.2);
@@ -369,8 +405,10 @@ fn components_of(solids: &HashSet<(i32, i32, i32)>) -> Vec<LoosePart> {
             voxels += 1;
             min = (min.0.min(pos.0), min.1.min(pos.1), min.2.min(pos.2));
             max = (max.0.max(pos.0), max.1.max(pos.1), max.2.max(pos.2));
-            for (dx, dy, dz) in super::compile::FACE_NEIGHBORS {
-                let next = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            for delta in super::compile::FACE_NEIGHBORS {
+                let Some(next) = super::compile::face_neighbor(pos, delta) else {
+                    continue;
+                };
                 if solids.contains(&next) && seen.insert(next) {
                     queue.push_back(next);
                 }
@@ -445,10 +483,11 @@ pub fn describe(view: DocumentView<'_>) -> Description {
         chunk_count: world.chunk_count(),
         world_aabb,
         size: world_aabb.map(|b| {
+            let span = |lo: i32, hi: i32| hi as i64 - lo as i64 + 1;
             [
-                b.max[0] - b.min[0] + 1,
-                b.max[1] - b.min[1] + 1,
-                b.max[2] - b.min[2] + 1,
+                span(b.min[0], b.max[0]),
+                span(b.min[1], b.max[1]),
+                span(b.min[2], b.max[2]),
             ]
         }),
         colors: ranked
@@ -491,9 +530,16 @@ pub fn slice(world: &World, request: &SliceRequest) -> Result<String, OpsError> 
     let (left, right) = axis_range(region, across);
     let (near, far) = axis_range(region, down);
 
-    let width = right - left + 1;
-    let height = far - near + 1;
-    if width > MAX_SLICE_SIDE || height > MAX_SLICE_SIDE {
+    // i64, and only then compared: `region` is a bare `[i32; 3]` pair
+    // that reaches here without passing `check_coord` (the ops path's
+    // ceiling lives in `compile`, and a region defaulted from the scene
+    // comes out of the file), so a span of four billion cells used to
+    // overflow this subtraction *before* the limit below could refuse
+    // it — and in the editor's bridge that panic lands on the frame
+    // loop's own thread.
+    let width = right as i64 - left as i64 + 1;
+    let height = far as i64 - near as i64 + 1;
+    if width > MAX_SLICE_SIDE as i64 || height > MAX_SLICE_SIDE as i64 {
         return Err(OpsError::new(
             ErrorCode::SliceTooLarge,
             format!(
@@ -506,8 +552,11 @@ pub fn slice(world: &World, request: &SliceRequest) -> Result<String, OpsError> 
     // highest Y. A top-down view reads like a map: the first row is the
     // lowest Z. Either way the header states the row order rather than
     // leaving the agent to guess it.
-    let top_down = down == 1;
-    let rows: Vec<i32> = if top_down {
+    // The vertical axis of the image is Y for an elevation and Z for a
+    // map. `down == 1` means the rows run along Y, which is the
+    // elevation case — the one that reads top-down, highest row first.
+    let elevation = down == 1;
+    let rows: Vec<i32> = if elevation {
         (near..=far).rev().collect()
     } else {
         (near..=far).collect()
@@ -882,5 +931,74 @@ mod tests {
             "the message should say how to narrow it, got: {}",
             error.message
         );
+    }
+
+    /// The width is a difference of two `i32`s that never went through
+    /// `check_coord`, so a region four billion cells wide has to be
+    /// *refused* rather than wrap into a small positive number and be
+    /// waved through — the wrap used to panic on the subtraction first.
+    #[test]
+    fn a_slice_wider_than_i32_is_refused_rather_than_wrapping() {
+        let session = wall();
+        let error = session
+            .slice(&request(
+                r#"{"axis":"y","index":0,"region":{"min":[-2000000000,0,0],"max":[2000000000,0,0]}}"#,
+            ))
+            .expect_err("four billion columns is past the limit");
+        assert_eq!(error.code, ErrorCode::SliceTooLarge);
+    }
+
+    // -------- coordinates a `.vxlt` can hold and the ops path cannot --------
+
+    /// `MAX_COORD` bounds what an *op* may write; it says nothing about
+    /// what an opened file holds. Every measurement below reads the
+    /// world as it found it, and each used to do its arithmetic in i32
+    /// — which the editor's bridge runs on the frame loop's own thread,
+    /// so the panic took the editor and its unsaved work with it.
+    #[test]
+    fn a_span_wider_than_i32_is_reported_rather_than_wrapped() {
+        let mut session = AgentSession::new();
+        session.world.set_voxel(-2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session.world.set_voxel(2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+
+        let description = session.describe();
+        assert_eq!(description.size, Some([4_000_000_001, 1, 1]));
+        let structure = description.structure.expect("two voxels is measurable");
+        assert_eq!(structure.components, 2);
+    }
+
+    /// The reflection is `min + max - p`: the *result* always lands back
+    /// inside the box, but the sum of two coordinates need not fit i32.
+    #[test]
+    fn symmetry_survives_a_pair_of_coordinates_that_sum_past_i32() {
+        let mut session = AgentSession::new();
+        session.world.set_voxel(1_500_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session.world.set_voxel(2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+
+        let structure = session.describe().structure.expect("measurable");
+        let x = structure.symmetry.iter().find(|s| s.axis == "x").unwrap();
+        // The two cells are each other's mirror image about the box's
+        // midpoint, so this is a symmetric model — a wrapped sum used to
+        // be the only reason it wasn't.
+        assert_eq!(x.mismatched, 0);
+    }
+
+    /// A cell sitting on `i32::MAX` has no neighbor past it. Three
+    /// separate walks step to a neighbor here — the component flood, the
+    /// enclosure test and the sealed-air flood — and all three read "no
+    /// such cell" rather than overflowing to find out.
+    #[test]
+    fn a_cell_at_the_edge_of_i32_has_no_neighbour_past_it() {
+        let mut session = AgentSession::new();
+        session.world.set_voxel(i32::MAX, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session.world.set_voxel(i32::MAX, 2, 0, Voxel::from_rgb(120, 120, 120));
+
+        let structure = session.describe().structure.expect("two voxels is measurable");
+        assert_eq!(structure.components, 2);
+        // Neither cell is walled in — the +x side isn't a cell at all.
+        assert_eq!(structure.enclosed, 0);
+        // The air cell between them reaches the box wall, so it is not
+        // a cavity; the point is that the flood got to say so.
+        assert_eq!(structure.cavities.map(|c| c.count), Some(0));
     }
 }

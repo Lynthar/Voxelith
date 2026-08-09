@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use voxelith::{
-    core::Voxel, editor::Command, editor::Socket, io, procgen::PipelineGraph,
-    ui::ExportReport,
+    editor::Command, editor::Socket, io, procgen::PipelineGraph, ui::ExportReport,
 };
 
 use super::App;
@@ -96,6 +95,12 @@ fn sockets_from_state(state: &io::EditorState) -> Vec<Socket> {
 /// that is already taken. The re-layout covers the two writers that
 /// have no business inventing panel coordinates: a build older than
 /// `position`, and an agent, which sends nodes with no layout at all.
+/// Loading keeps whatever the file holds, including a graph that can't
+/// be evaluated: dropping one here would delete the recipe a model was
+/// built from to protect a run nobody asked for yet. What makes
+/// evaluation safe is checked where evaluation happens — `run_graph`
+/// and the preview tick, both of which call `agent_ops::check_graph`
+/// first.
 fn graph_from_state(state: &io::EditorState) -> PipelineGraph {
     let mut graph = state.graph.clone();
     graph.normalize();
@@ -253,12 +258,7 @@ impl App {
         self.reset_scene_session_state();
         self.project_path = None;
         self.note_project_mtime();
-        self.editor.brush_color = Voxel::from_rgba(
-            editor_state.brush_color[0],
-            editor_state.brush_color[1],
-            editor_state.brush_color[2],
-            editor_state.brush_color[3],
-        );
+        self.editor.brush_color = super::brush_from_stored(editor_state.brush_color);
         // Same brush flag / tint-zone restore as `do_open_project` (#8) —
         // otherwise crash recovery drops the emissive / metallic /
         // faction-zone mode the user had when the autosave was written.
@@ -269,7 +269,7 @@ impl App {
         self.editor.palette = editor_state
             .palette
             .iter()
-            .map(|c| Voxel::from_rgba(c[0], c[1], c[2], c[3]))
+            .map(|&c| super::brush_from_stored(c))
             .collect();
         self.editor.current_tool = super::tool_from_index(editor_state.selected_tool as u8);
         self.editor.sockets = sockets_from_state(&editor_state);
@@ -361,16 +361,11 @@ impl App {
                 self.reset_scene_session_state();
                 self.project_path = Some(path.clone());
 
-                self.editor.brush_color = Voxel::from_rgba(
-                    editor_state.brush_color[0],
-                    editor_state.brush_color[1],
-                    editor_state.brush_color[2],
-                    editor_state.brush_color[3],
-                );
+                self.editor.brush_color = super::brush_from_stored(editor_state.brush_color);
                 // Restore the brush's material flags / tint zone too —
-                // `from_rgba` zeroes them, which used to silently clear
-                // the emissive / metallic / faction-zone mode on every
-                // open (#8). Round-trips via EditorState now.
+                // rebuilding it from a color zeroes them, which used to
+                // silently clear the emissive / metallic / faction-zone
+                // mode on every open (#8). Round-trips via EditorState now.
                 self.editor.brush_color.flags = editor_state.brush_flags;
                 self.editor
                     .brush_color
@@ -378,7 +373,7 @@ impl App {
                 self.editor.palette = editor_state
                     .palette
                     .iter()
-                    .map(|c| Voxel::from_rgba(c[0], c[1], c[2], c[3]))
+                    .map(|&c| super::brush_from_stored(c))
                     .collect();
                 self.editor.current_tool =
                     super::tool_from_index(editor_state.selected_tool as u8);
@@ -532,11 +527,29 @@ impl App {
             Ok(patch) => patch,
             Err(e) => {
                 log::error!("Failed to voxelize {:?}: {:#}", path, e);
+                // A `.gltf` that keeps its buffers and images in
+                // sidecar files is the textbook export, and it is
+                // exactly what this importer refuses: it reads no file
+                // but the one the user picked, on purpose. Saying so
+                // beats "Reading GLB buffers" and a shrug.
+                let sidecars = path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
+                let hint = match sidecars {
+                    true => {
+                        "\n\nA `.gltf` is only readable here when it carries its buffers \
+                         and images inside itself. One that references a `.bin` or a `.png` \
+                         beside it can't be: nothing outside the file you picked is read. \
+                         Export it as a single `.glb` instead."
+                    }
+                    false => "",
+                };
                 let detail = format!(
                     "Couldn't turn \"{}\" into voxels — {:#}.\n\nThe file has to \
-                     be a glTF binary containing at least one triangle mesh.",
+                     be a glTF binary containing at least one triangle mesh.{}",
                     file_label(&path),
-                    e
+                    e,
+                    hint
                 );
                 self.show_error_dialog("Import failed", &detail);
                 self.ui.set_status("Import failed: not a usable mesh");
@@ -559,8 +572,16 @@ impl App {
         self.rebuild_all_meshes();
         self.recenter_camera_on_scene();
         self.prefs.remember_import_dir(&path);
-        self.ui
-            .set_status(format!("Imported {} voxels from {}", count, file_label(&path)));
+        let mut status = format!("Imported {} voxels from {}", count, file_label(&path));
+        // A file that hit one of the walk's limits gives back part of
+        // itself, and saying so is the difference between "that came in
+        // wrong" and a model quietly missing half its geometry.
+        if !patch.notes.is_empty() {
+            status.push_str(" (");
+            status.push_str(&patch.notes.join("; "));
+            status.push(')');
+        }
+        self.ui.set_status(status);
         self.invalidate_preview();
     }
 
@@ -599,15 +620,24 @@ impl App {
 
         let on_disk = file_mtime(&path);
         let verdict = classify_disk_poll(self.watched_mtime, on_disk, self.unsaved_changes);
-        // Take the new time whatever the verdict, so a refused reload
-        // warns once rather than on every poll from here on.
-        if let Some(seen) = on_disk {
+        // Take the new time when this poll is settled — a refused
+        // reload warns once rather than on every poll from here on. A
+        // reload that *failed* is not settled: the file is still one
+        // this editor hasn't read, and recording its time would retire
+        // that version for good, so a lock held for one poll interval
+        // (a virus scanner or an indexer between rename and close) would
+        // cost the user an agent's whole batch, announced by one status
+        // line that scrolls away.
+        let settled = match verdict {
+            DiskPoll::Reload => self.reload_from_disk(&path),
+            _ => true,
+        };
+        if let (Some(seen), true) = (on_disk, settled) {
             self.watched_mtime = Some(seen);
         }
 
         match verdict {
-            DiskPoll::Ignore => {}
-            DiskPoll::Reload => self.reload_from_disk(&path),
+            DiskPoll::Ignore | DiskPoll::Reload => {}
             DiskPoll::WarnStale => {
                 log::info!(
                     "{} changed on disk; not reloading over unsaved changes",
@@ -635,7 +665,10 @@ impl App {
     /// `reset_scene_session_state` like every other path that throws one
     /// away: a selection or an undo entry left over from the old world
     /// addresses cells that may no longer be there.
-    fn reload_from_disk(&mut self, path: &Path) {
+    ///
+    /// Returns whether the file was actually read, so the caller knows
+    /// whether this version has been dealt with.
+    fn reload_from_disk(&mut self, path: &Path) -> bool {
         let (world, state) = match io::load_world_with_state(path) {
             Ok(loaded) => loaded,
             Err(e) => {
@@ -649,7 +682,7 @@ impl App {
                      good version",
                     file_label(path)
                 ));
-                return;
+                return false;
             }
         };
         self.world = world;
@@ -670,6 +703,7 @@ impl App {
         self.ui.state.disk_conflict = None;
         self.ui
             .set_status(format!("Reloaded: {} (changed on disk)", file_label(path)));
+        true
     }
 
     /// The strip's Reload button — take the file and drop the local
@@ -679,7 +713,13 @@ impl App {
         let Some(path) = self.project_path.clone() else {
             return;
         };
-        self.reload_from_disk(&path);
+        if self.reload_from_disk(&path) {
+            // The poll's mark, brought up to date by hand: this editor
+            // has now read that version, so the next poll has nothing
+            // to report. A failed read leaves the mark alone on purpose
+            // — see `tick_disk_reload`.
+            self.note_project_mtime();
+        }
     }
 
     /// OBJ export with Marching Cubes smoothing. `blur` selects the

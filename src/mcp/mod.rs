@@ -295,10 +295,23 @@ impl VoxelithMcp {
         // batch beside a description of the world before it is the one
         // way to make "what would this do?" actively misleading.
         let outcome = if batch.options.dry_run {
-            document
-                .session
-                .preview_ops(&batch)
-                .map(|preview| (preview.report, preview.session.describe()))
+            // The preview session carries its own empty history, and
+            // its depths are not the ones an `undo` call would act on —
+            // reporting them beside this answer's own `undo_depth`
+            // hands an agent two different numbers for the same stack.
+            // The history genuinely did not move, so the session's are
+            // the true ones. (The editor's bridge fixed this on its
+            // side; this is the same fix on the headless one.)
+            let depths = (
+                document.session.history.undo_count(),
+                document.session.history.redo_count(),
+            );
+            document.session.preview_ops(&batch).map(|preview| {
+                let mut description = preview.session.describe();
+                description.undo_depth = depths.0;
+                description.redo_depth = depths.1;
+                (preview.report, description)
+            })
         } else {
             document
                 .session
@@ -438,6 +451,7 @@ impl VoxelithMcp {
                 size: view.size,
                 framing: &view.framing,
                 empty: view.empty,
+                truncated: view.truncated,
             })
             .map_err(|e| McpError::internal_error(format!("could not describe the view: {e}"), None))?;
             blocks.push(ContentBlock::text(caption));
@@ -615,6 +629,12 @@ struct Rendered<'a> {
     framing: &'a view::Framing,
     /// The document held no voxels — the image is all background.
     empty: bool,
+    /// Rays ran out of steps before crossing the scene, so some of this
+    /// image is background because the walk gave up. Serialized only
+    /// when it happened: a flag that is false on every ordinary render
+    /// teaches an agent to ignore it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    truncated: bool,
 }
 
 // ---- transports ----

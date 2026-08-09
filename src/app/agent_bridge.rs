@@ -68,11 +68,11 @@ const REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 pub(super) struct PendingReview {
     call: BridgeCall,
     outcome: BatchOutcome,
-    /// Undo and redo depths when this was parked. Any editing the human
-    /// does meanwhile moves one of them, and that invalidates the batch:
-    /// its `old_voxel`s are what the world held *then*, so committing it
+    /// The edit generation when this was parked. Any editing the human
+    /// does meanwhile moves it, and that invalidates the batch: its
+    /// `old_voxel`s are what the world held *then*, so committing it
     /// later would make undo restore a state that never existed.
-    history_mark: (usize, usize),
+    history_mark: u64,
     parked_at: Instant,
 }
 
@@ -314,17 +314,22 @@ impl App {
         });
     }
 
-    /// `(undo, redo)` depths — the cheapest witness that the world may
-    /// have moved. Every edit in the editor goes through
-    /// `CommandHistory`, so one of these changes whenever one lands. It
-    /// over-reports (undo then redo returns to the same world by a
-    /// different pair), and that is the right way round: a spurious
-    /// resend costs an agent one call, a missed one corrupts undo.
-    fn history_mark(&self) -> (usize, usize) {
-        (
-            self.editor.history.undo_count(),
-            self.editor.history.redo_count(),
-        )
+    /// The witness that the world has not moved under a parked batch.
+    ///
+    /// This used to be the `(undo, redo)` depths, on the reasoning that
+    /// every edit goes through `CommandHistory` so one of them must
+    /// change. Every edit does — but the *pair* comes back to a value
+    /// it already held in three ordinary ways: undo then draw, draw
+    /// with the undo stack already full, and continuing a stroke. Each
+    /// leaves a different world behind the same two numbers, and
+    /// accepting a batch there commits `old_voxel`s describing a world
+    /// that is gone, so undoing it restores a state that never existed.
+    ///
+    /// `CommandHistory::generation` moves on every one of those and
+    /// never moves back, which makes the comparison below say what it
+    /// always claimed to say.
+    fn history_mark(&self) -> u64 {
+        self.editor.history.generation()
     }
 
     /// Drop whatever is parked, telling the agent why.
@@ -341,6 +346,26 @@ impl App {
         let Some(pending) = &self.agent.pending else {
             return;
         };
+        // Checked here as well as at Accept, and this is the copy that
+        // matters to the person: the moment they edit anything, the
+        // parked batch is already doomed (its `old_voxel`s describe the
+        // world as it was), and the three local paths that write
+        // straight into the world — Generate, Run Pipeline, Import —
+        // also clear the overlay it was being previewed in. Waiting for
+        // a click would leave the strip asking them to approve
+        // something they can no longer see, and leave the agent hanging
+        // for an answer that was decided the moment they picked up the
+        // brush.
+        if pending.history_mark != self.editor.history.generation() {
+            self.drop_pending_review(
+                "world_changed",
+                "the project was edited while this batch waited for approval, so it no longer \
+                 describes the world it was built against; nothing was applied — describe the \
+                 current world and send it again",
+                "dropped — the project changed while it waited",
+            );
+            return;
+        }
         if pending.call.abandoned() {
             self.drop_pending_review(
                 "batch_not_applied",
@@ -564,6 +589,11 @@ impl App {
                 graph.relayout();
             }
             self.ui.graph = graph;
+            // A batch that only carried a graph changed no voxel, so the
+            // re-mesh below finds nothing dirty and the document would
+            // answer "no unsaved changes" while holding a pipeline that
+            // exists nowhere on disk.
+            self.mark_document_modified();
         }
 
         self.agent.applied += 1;

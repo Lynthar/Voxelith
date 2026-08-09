@@ -34,7 +34,9 @@ pub const MAX_SIZE: u32 = 1024;
 
 /// Backstop on the walk. Rays stop when they leave the scene box, so
 /// this only fires on a bounding box already too big to draw — and it
-/// fires as a blank pixel rather than a hang.
+/// fires as a blank pixel rather than a hang. [`View::truncated`] then
+/// says it happened, because a blank pixel nobody explains reads as
+/// "the model is gone".
 const MAX_STEPS: u32 = 8192;
 
 /// Direction the scene is lit from. Off-axis on all three so no face of
@@ -233,6 +235,18 @@ pub struct View {
     /// instead of handing over a rectangle of background and letting the
     /// agent conclude its model vanished.
     pub empty: bool,
+    /// Set when at least one ray spent its whole step budget without
+    /// reaching the scene or leaving it — so those pixels are
+    /// background because the walk gave up, not because nothing is
+    /// there.
+    ///
+    /// `empty` covers the same mistake from the other side, and covers
+    /// it only for a world with no voxels at all: a scene whose extent
+    /// along the view direction is past what the walk can cross draws
+    /// as a full rectangle of background while `empty` is false and the
+    /// bounds say there is plenty to see. An agent reading that
+    /// concludes its model vanished and rebuilds it.
+    pub truncated: bool,
 }
 
 /// Render one view of `world`.
@@ -267,6 +281,7 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
                 forward: forward.to_array(),
             },
             empty: true,
+            truncated: false,
         });
     };
 
@@ -288,14 +303,26 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
     // small margin so the model doesn't touch the border.
     let cells_per_pixel = (extent_right.max(extent_up) * 2.05) / size as f32;
 
-    // Start every ray outside the box, far enough back that the corner
-    // furthest from the camera is still in front of it.
-    let depth = half.length() + 2.0;
+    // Start every ray just outside the box, measured *along the view
+    // direction* rather than by the box's diagonal. Both put the origin
+    // outside the scene, which is all the walk needs — but the diagonal
+    // charges a wide scene for width the camera is not looking through,
+    // and the walk gives up after `MAX_STEPS`. A scene 100,000 cells
+    // wide and one cell thick used to start its front-view rays 50,000
+    // cells away from a wall one cell deep, run out of steps, and hand
+    // back a picture of the background. This is the box's support
+    // distance in `forward`: for an axis view, half the thickness the
+    // camera actually looks through.
+    let depth = half.x * forward.x.abs()
+        + half.y * forward.y.abs()
+        + half.z * forward.z.abs()
+        + 2.0;
     let origin = center - forward * depth;
 
     let light_dir = key_light(forward);
     let mut pixels = vec![0u8; (size * size * 3) as usize];
     let row_bytes = (size * 3) as usize;
+    let ran_out = std::sync::atomic::AtomicBool::new(false);
     pixels
         .par_chunks_mut(row_bytes)
         .enumerate()
@@ -307,8 +334,12 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
                 let offset_right = ((x as f32 + 0.5) - size as f32 * 0.5) * cells_per_pixel;
                 let from = origin + right * offset_right + up * offset_up;
                 let color = match cast(world, from, forward, min, max) {
-                    Some(hit) => shade(world, &hit, forward, light_dir),
-                    None => BACKGROUND,
+                    Trace::Hit(hit) => shade(world, &hit, forward, light_dir),
+                    Trace::Missed => BACKGROUND,
+                    Trace::OutOfSteps => {
+                        ran_out.store(true, std::sync::atomic::Ordering::Relaxed);
+                        BACKGROUND
+                    }
                 };
                 row[x * 3..x * 3 + 3].copy_from_slice(&color);
             }
@@ -326,6 +357,7 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
             forward: forward.to_array(),
         },
         empty: false,
+        truncated: ran_out.into_inner(),
     })
 }
 
@@ -339,9 +371,12 @@ const MIN_FACING: f32 = 0.55;
 /// The key light for one view.
 ///
 /// [`LIGHT`] as written, then bent twice: mirrored across the view plane
-/// if it would other come from behind the model, and tilted toward the
-/// camera until at least [`MIN_FACING`] of it falls on what the camera
-/// can see.
+/// if it would otherwise come from behind the model, and tilted toward
+/// the camera until [`MIN_FACING`] of it falls on what the camera can
+/// see. The final re-normalize then shortens that share a little — the
+/// dimmest view comes out around 0.50 rather than the 0.55 asked for,
+/// which is close enough for a diagram and cheaper than solving for
+/// the exact tilt.
 ///
 /// Both exist because these are diagrams, not renders. A fixed
 /// world-space light makes `back`, `left` and `bottom` silhouettes in
@@ -360,6 +395,19 @@ fn key_light(forward: Vec3) -> Vec3 {
         light -= forward * (MIN_FACING - facing);
     }
     light.normalize()
+}
+
+/// What one ray found.
+enum Trace {
+    /// The first solid cell along the ray.
+    Hit(Hit),
+    /// The ray left the scene box without touching anything. Background,
+    /// and the model is what the picture says it is.
+    Missed,
+    /// The ray spent its whole step budget without either. Background
+    /// too — but for a reason that has nothing to do with the model,
+    /// which is why [`View::truncated`] exists to say so.
+    OutOfSteps,
 }
 
 /// Where a ray stopped: the cell it entered and the face it came through.
@@ -390,7 +438,7 @@ fn cast(
     direction: Vec3,
     box_min: (i32, i32, i32),
     box_max: (i32, i32, i32),
-) -> Option<Hit> {
+) -> Trace {
     let mut cell = (
         from.x.floor() as i32,
         from.y.floor() as i32,
@@ -409,7 +457,7 @@ fn cast(
         || (step.1 == 0 && (cell.1 < box_min.1 || cell.1 > box_max.1))
         || (step.2 == 0 && (cell.2 < box_min.2 || cell.2 > box_max.2))
     {
-        return None;
+        return Trace::Missed;
     }
     // A ray exactly parallel to an axis never crosses that axis's
     // boundaries: infinity keeps it from ever being chosen as the
@@ -463,19 +511,19 @@ fn cast(
             _ => (step.2 > 0 && cell.2 > box_max.2) || (step.2 < 0 && cell.2 < box_min.2),
         };
         if left_the_box {
-            return None;
+            return Trace::Missed;
         }
 
         let voxel = world.get_voxel(cell.0, cell.1, cell.2);
         if !voxel.is_air() {
-            return Some(Hit {
+            return Trace::Hit(Hit {
                 cell,
                 voxel,
                 normal,
             });
         }
     }
-    None
+    Trace::OutOfSteps
 }
 
 /// Light one hit: lambert against a fixed key light, floored at
@@ -645,6 +693,47 @@ mod tests {
         assert!(view.empty);
         assert!(view.framing.bounds.is_none());
         assert_eq!(count_non_background(&view), 0);
+    }
+
+    /// A scene far wider than it is deep. The ray origin used to be set
+    /// by the box's *diagonal*, so a front view — looking through one
+    /// cell of depth — started 50,000 cells out, ran out of steps, and
+    /// came back as a rectangle of background with `empty: false` beside
+    /// bounds promising a model. Measuring the start along the view
+    /// direction is what the camera is actually looking through.
+    #[test]
+    fn a_wide_thin_scene_is_still_drawn_from_the_front() {
+        let mut world = World::new();
+        let red = Voxel::from_rgb(200, 60, 60);
+        world.set_voxel(0, 0, 0, red);
+        world.set_voxel(100_000, 0, 0, red);
+
+        let view = render(&world, ViewKind::Front, 64).unwrap();
+        assert!(!view.empty);
+        assert!(!view.truncated, "the walk had one cell of depth to cross");
+        // The picture can still be blank, and honestly so: `framing`
+        // says each pixel covers about 1600 cells, and a one-cell voxel
+        // sampled at pixel centers is smaller than that. Aliasing an
+        // agent can compute from the numbers it was given is a
+        // different thing from a walk that quietly stopped.
+    }
+
+    /// The case the step budget genuinely can't cross: an isometric view
+    /// looks along the diagonal, so a scene this wide is past it whatever
+    /// the origin. The picture is still all background — the point is
+    /// that it now says why, instead of letting an agent read it as
+    /// "my model vanished" and build it again.
+    #[test]
+    fn a_scene_too_big_to_trace_says_the_walk_gave_up() {
+        let mut world = World::new();
+        let red = Voxel::from_rgb(200, 60, 60);
+        world.set_voxel(0, 0, 0, red);
+        world.set_voxel(100_000, 0, 0, red);
+
+        let view = render(&world, ViewKind::Iso, 32).unwrap();
+        assert!(!view.empty, "the world does hold voxels");
+        assert_eq!(count_non_background(&view), 0);
+        assert!(view.truncated, "background that nothing explains");
     }
 
     #[test]

@@ -206,12 +206,17 @@ pub fn generators_json() -> String {
     serde_json::to_string_pretty(&catalog).expect("the catalog must serialize")
 }
 
-/// Load → apply → describe → save → export, in that order.
+/// Load → apply → describe → export → save, in that order.
 ///
-/// The order matters: reports describe the world as saved, and a failure
-/// anywhere stops before anything is written. Ops themselves are already
-/// all-or-nothing ([`AgentSession::apply_ops`]), so a refused batch can't
-/// leave a half-edited file behind either.
+/// The order is a promise about what a failure can leave behind. Ops
+/// are all-or-nothing ([`AgentSession::apply_ops`]), so a refused batch
+/// writes nothing at all. Past that, everything that can be checked
+/// without writing is checked first, and then the two writes run
+/// derived-file-first: an agent that reruns after a failure re-derives
+/// the export, but must never find the *project* file already carrying
+/// half the batch — `--in x --out x` is the documented editing loop,
+/// and ops like `translate` and `mirror_copy` applied twice are a model
+/// nobody asked for and a report that says everything went fine.
 pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
     // Parsed before anything else runs. This command *is* the session:
     // nothing survives it but the files it writes, so a typo in --slice
@@ -267,18 +272,39 @@ pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
     };
     let description = request.describe.then(|| view.describe());
 
+    // Everything about an export that can be known before writing
+    // anything, checked before writing anything. The extension used to
+    // be read inside `export_mesh`, which runs *after* the project has
+    // been saved: `--in x.vxlt --out x.vxlt --export x.fbx` overwrote
+    // the input, then failed, and reported an envelope saying nothing
+    // was written — so an agent following the documented "fix that one
+    // op and resend" loop applied its non-idempotent ops to an already
+    // edited file, twice, and got a clean report both times.
+    if let Some(path) = &request.export {
+        check_export_target(path)?;
+    }
+
+    // Export first, save last. The checks above cover the failures a
+    // path can be inspected for, and this covers the rest: a full disk
+    // or a revoked permission leaves the *derived* file half-written
+    // rather than the source one, and re-running regenerates it. The
+    // project file — the thing that isn't reproducible — is written by
+    // the last fallible step there is.
+    let exported = match &request.export {
+        Some(path) => Some(export_mesh(&session, path)?),
+        None => None,
+    };
+    let saved = match &request.output {
+        Some(path) => Some(save_project(&session, state, path)?),
+        None => None,
+    };
+
     Ok(ExecOutcome {
         report,
         description,
         slice,
-        saved: match &request.output {
-            Some(path) => Some(save_project(&session, state, path)?),
-            None => None,
-        },
-        exported: match &request.export {
-            Some(path) => Some(export_mesh(&session, path)?),
-            None => None,
-        },
+        saved,
+        exported,
     })
 }
 
@@ -397,6 +423,13 @@ pub struct RenderedInfo {
     /// model disappeared.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub empty: bool,
+    /// True when rays ran out of steps before crossing the scene: part
+    /// of this image is background because the walk gave up, not
+    /// because nothing is there. Same job as `empty` for the case
+    /// `empty` can't see — a scene too big to trace, where the bounds
+    /// promise plenty and the picture shows none of it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Turn a `--view` spec (`"iso"`, `"front,top"`, `"all"`) into
@@ -446,6 +479,7 @@ pub fn run_render(request: &RenderRequest) -> Result<RenderOutcome, ExecError> {
             bytes: view.png.len() as u64,
             framing: view.framing,
             empty: view.empty,
+            truncated: view.truncated,
         });
     }
     Ok(RenderOutcome { views: rendered })
@@ -459,6 +493,41 @@ fn image_path(base: &Path, kind: ViewKind) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "view".to_string());
     base.with_file_name(format!("{stem}-{}.png", kind.as_str()))
+}
+
+/// What an export target can be refused for without writing a byte:
+/// an extension nothing here can produce, or a directory that isn't
+/// there. Called before any write, and again (for the format) by
+/// [`export_mesh`], which needs the answer anyway.
+pub(crate) fn check_export_target(path: &Path) -> Result<(), ExecError> {
+    let format = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !matches!(format.as_str(), "glb" | "obj" | "vox") {
+        return Err(ExecError::new(
+            "unsupported_export_format",
+            format!(
+                "don't know how to export {:?} (from {}); supported: .glb, .obj, .vox",
+                format,
+                path.display()
+            ),
+        ));
+    }
+    // An empty parent is a bare file name — the working directory,
+    // which exists by definition.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if !parent.is_dir() {
+            return Err(ExecError::new(
+                "export_failed",
+                format!(
+                    "the directory holding {} doesn't exist; create it first",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportInfo, ExecError> {
@@ -756,6 +825,51 @@ mod tests {
         .expect_err("fbx is not an export format");
         assert_eq!(error.code, "unsupported_export_format");
         assert!(error.message.contains(".glb"), "got: {}", error.message);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--in x --out x --export y` is the documented editing loop, and
+    /// a failed export must not leave the project half-edited behind an
+    /// envelope that says nothing was written: an agent told to "fix
+    /// that op and resend" would then apply the batch to an already
+    /// edited file. `translate`, `rotate` and `mirror_copy` are not
+    /// idempotent, and the second run reports success.
+    #[test]
+    fn a_refused_export_leaves_the_project_file_untouched() {
+        let dir = scratch("export_then_save");
+        let project = dir.join("hut.vxlt");
+
+        run_exec(&ExecRequest {
+            ops: Some(write_ops(&dir, HUT)),
+            output: Some(project.clone()),
+            ..Default::default()
+        })
+        .expect("the first run writes the project");
+        let before = std::fs::read(&project).unwrap();
+
+        for (name, export) in [
+            ("a format nothing here writes", dir.join("hut.fbx")),
+            ("a directory that isn't there", dir.join("no_such_dir/hut.glb")),
+        ] {
+            let ops = write_ops(
+                &dir,
+                r#"{"version":1,"ops":[{"op":"mirror_copy","axis":"x","region":{"min":[0,0,0],"max":[6,4,6]}}]}"#,
+            );
+            let error = run_exec(&ExecRequest {
+                ops: Some(ops),
+                input: Some(project.clone()),
+                output: Some(project.clone()),
+                export: Some(export),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                std::fs::read(&project).unwrap() == before,
+                "{name}: the project was rewritten under a failed run ({})",
+                error.code
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

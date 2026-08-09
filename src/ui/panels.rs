@@ -96,6 +96,17 @@ pub enum UiAction {
     GenerateProcedural,
     /// Run the pipeline graph and apply its output via CommandHistory.
     RunGraph,
+    /// The Graph panel changed the pipeline graph — a node, a wire, a
+    /// parameter or a position.
+    ///
+    /// The graph is document data: it rides in the `.vxlt` and it is
+    /// the recipe the model was built from. Voxel edits mark the
+    /// document modified through the mesh rebuild, which a graph edit
+    /// never reaches, so it has to say so itself — otherwise building a
+    /// pipeline and quitting without running it loses the pipeline with
+    /// no prompt, and the disk poll reloads a checkpoint straight over
+    /// it ("nothing local to lose").
+    GraphEdited,
 
     // Camera operations
     ResetCamera,

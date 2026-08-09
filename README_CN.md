@@ -4,9 +4,9 @@
 
 **程序化优先的体素资产创作工具**
 
-[![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.88+-orange.svg)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-22.0-blue.svg)](https://wgpu.rs/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 
 [English](README.md)
 
@@ -71,9 +71,11 @@ cargo run --release -- mcp --root ./models --checkpoint
 cargo run --release -- --agent-port 8737
 ```
 
-以上子命令全部无头。`cargo build --no-default-features` 构建的正是这
-一半——库加 CLI,依赖树里没有 winit / wgpu / egui——供没有 GPU 的容器
-或 CI 使用。参数见 `voxelith exec --help`,生成器目录见
+以上子命令全部无头,`--agent-port` 那条则是编辑器本身。
+`cargo build --no-default-features` 构建的正是无头这一半——库加 CLI,
+依赖树里没有 winit / wgpu / egui——供没有 GPU 的容器或 CI 使用。想在
+里面保留 `mcp` 子命令要加 `--features mcp`:它跟着自己的 feature 走,
+纯 `--no-default-features` 的构建里没有这个子命令。参数见 `voxelith exec --help`,生成器目录见
 `voxelith generators`,ops 协议本身的说明写在 `src/agent_ops/schema.rs`
 的类型文档上。
 
@@ -119,4 +121,4 @@ cargo run --release -- --agent-port 8737
 
 ## 许可证
 
-MIT License © 2024
+Apache License 2.0 © 2024-2026 Lynthar

@@ -18,7 +18,7 @@ use crate::procgen::{
     WfcGenerator, WFC_TILE_SIZE,
 };
 
-use super::{ErrorCode, OpsError, MAX_BATCH_CELLS, MAX_GRAPH_SOURCES};
+use super::{ErrorCode, OpsError, MAX_BATCH_CELLS, MAX_COORD, MAX_GRAPH_SOURCES};
 
 /// Ceiling on `width × depth × height-span` for terrain. Not a taste
 /// judgment — `PerlinTerrain` sizes its patch buffer from these three
@@ -236,11 +236,41 @@ pub(super) fn check_terrain(terrain: &PerlinTerrain) -> Result<(), OpsError> {
 }
 
 fn build_tree(params: &Value) -> Result<Box<dyn VoxelGenerator>, OpsError> {
-    // No size cap: `LSystemTree` already refuses more than 7 rewrite
-    // rounds, and 7 rounds is a few hundred thousand voxels — inside
-    // the batch cell budget, which catches it downstream.
     let tree: LSystemTree = from_partial(params)?;
+    check_tree(&tree)?;
     Ok(Box::new(tree))
+}
+
+/// No size cap: `LSystemTree` already refuses more than 7 rewrite
+/// rounds, and 7 rounds is a few hundred thousand voxels — inside the
+/// batch cell budget, which catches it downstream. The origin still
+/// needs a look, for the reason [`check_origin`] gives.
+pub(super) fn check_tree(tree: &LSystemTree) -> Result<(), OpsError> {
+    check_origin(tree.origin)
+}
+
+/// A generator's world-space origin, bounded before the generator runs.
+///
+/// The write door refuses anything past ±[`MAX_COORD`] anyway, so this
+/// changes no answer an agent gets — it changes *when*. A generator
+/// stamps its cells at `origin + offset` while it builds its patch, and
+/// on a build with overflow checks (every `cargo test`, every
+/// `cargo run` without `--release`, and the editor if it was built that
+/// way) that addition aborted the process before the door ever saw the
+/// coordinate. Naming the parameter also beats reporting the summed
+/// coordinate the agent never wrote.
+fn check_origin(origin: (i32, i32, i32)) -> Result<(), OpsError> {
+    let out_of_range = |v: i32| !(-MAX_COORD..=MAX_COORD).contains(&v);
+    if out_of_range(origin.0) || out_of_range(origin.1) || out_of_range(origin.2) {
+        return Err(OpsError::new(
+            ErrorCode::CoordinateOutOfRange,
+            format!(
+                "origin ({}, {}, {}) is outside ±{MAX_COORD} on some axis",
+                origin.0, origin.1, origin.2
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn build_wfc(params: &Value) -> Result<Box<dyn VoxelGenerator>, OpsError> {
@@ -269,7 +299,7 @@ pub(super) fn check_wfc(wfc: &WfcGenerator) -> Result<(), OpsError> {
             ),
         ));
     }
-    Ok(())
+    check_origin(wfc.origin)
 }
 
 /// Check every source node in a graph against the same ceilings a
@@ -277,13 +307,15 @@ pub(super) fn check_wfc(wfc: &WfcGenerator) -> Result<(), OpsError> {
 /// materialize at once.
 ///
 /// Two different failures, both real. One oversized node is the
-/// `generate` ceiling arriving by another door. Many legal nodes are
-/// something only a graph can do: evaluation memoizes a patch per node
-/// and clones it per consumer, so the peak is the sum, and it is all
-/// resident *before* the first cell reaches [`Scratch::write`] and its
-/// budget. `builtin.lsystem_tree` isn't counted for the same reason it
-/// has no ceiling in the registry: its own 7-round rewrite limit is the
-/// bound, and its output isn't a function of a size parameter.
+/// `generate` ceiling arriving by another door. Many legal sources are
+/// something only a graph can do: they are generated before anything
+/// downstream runs, and all of it happens *before* the first cell
+/// reaches [`Scratch::write`] and its budget. Transform nodes are not
+/// counted because the evaluator frees each patch once its last reader
+/// has run, so a chain of them costs the working front, not a copy per
+/// node. `builtin.lsystem_tree` isn't counted for the same reason it
+/// has no size ceiling in the registry: its own 7-round rewrite limit
+/// is the bound, and its output isn't a function of a size parameter.
 ///
 /// [`Scratch::write`]: super::compile::Scratch::write
 pub(super) fn check_graph_sources(graph: &PipelineGraph) -> Result<(), OpsError> {
@@ -295,7 +327,10 @@ pub(super) fn check_graph_sources(graph: &PipelineGraph) -> Result<(), OpsError>
                 check_terrain(terrain).map_err(|e| at_node(e, node.id))?;
                 terrain_cells(terrain)
             }
-            NodeKind::Tree(_) => 0,
+            NodeKind::Tree(tree) => {
+                check_tree(tree).map_err(|e| at_node(e, node.id))?;
+                0
+            }
             NodeKind::Wfc(wfc) => {
                 check_wfc(wfc).map_err(|e| at_node(e, node.id))?;
                 wfc_cells(wfc)

@@ -54,12 +54,12 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     //
     // `gltf::import_slice` would do both in one call, but it decodes
     // *every* embedded image eagerly, keeps them all resident, and
-    // offers nowhere to hand the image crate a `Limits`. The GLB comes
-    // off the network, so a few-hundred-KB file can declare a
-    // 20000×20000 PNG and turn into a multi-gigabyte allocation on a
-    // `spawn_blocking` thread — where a failed allocation aborts the
-    // whole process. Splitting the two steps lets us decode only the
-    // textures a material actually samples, under explicit limits.
+    // offers nowhere to hand the image crate a `Limits`. A
+    // few-hundred-KB file can declare a 20000×20000 PNG and turn into a
+    // multi-gigabyte allocation — and a failed allocation aborts the
+    // process, which here is the editor and everything unsaved in it.
+    // Splitting the two steps lets us decode only the textures a
+    // material actually samples, under explicit limits.
     let gltf::Gltf { document, blob } =
         gltf::Gltf::from_slice(bytes).context("Parsing GLB")?;
     // `None` base path: any image or buffer referencing an external
@@ -72,6 +72,7 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     // if neither exists, walk all meshes directly (some exporters
     // produce GLBs with no scene node — rare but seen in the wild).
     let mut triangles = Vec::new();
+    let mut limits = WalkLimits::default();
     let scene = document.default_scene().or_else(|| document.scenes().next());
     if let Some(scene) = scene {
         for node in scene.nodes() {
@@ -81,6 +82,8 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
                 &buffers,
                 &textures,
                 &mut triangles,
+                0,
+                &mut limits,
             );
         }
     } else {
@@ -101,10 +104,21 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     let max_extent = extent.max_element().max(1e-6);
     let voxel_size = max_extent / resolution as f32;
 
-    let accumulator = rasterize_triangles(&triangles, aabb_min, voxel_size);
+    let accumulator =
+        rasterize_triangles(&triangles, aabb_min, aabb_max, voxel_size, resolution);
     let surface = finalize_surface(accumulator);
     let filled = fill_interior(&surface);
-    Ok(build_patch(filled))
+    let mut patch = build_patch(filled);
+    if limits.exhausted {
+        // The log line says which limit; this is the half the person
+        // who picked the file gets to see. A truncated import that
+        // looks like a complete one is how someone exports a model with
+        // half its geometry.
+        patch
+            .notes
+            .push("only part of this file was voxelized — see the log for which limit it hit".into());
+    }
+    Ok(patch)
 }
 
 // -------------------- glTF extraction --------------------
@@ -215,22 +229,96 @@ fn decode_texture(encoded: &[u8], budget: &mut u64) -> Result<DecodedImage> {
     })
 }
 
+/// Depth cap for the node walk. Real hierarchies are a handful of
+/// levels; this exists so a hand-built chain of nodes can't recurse the
+/// main thread into a stack overflow.
+const MAX_NODE_DEPTH: usize = 256;
+
+/// Triangles one file may hand over. Nothing else bounds this: a mesh
+/// can be referenced from any number of nodes, so a few hundred bytes
+/// of JSON can ask for the same geometry a thousand times over. At
+/// ~48 bytes each this is about a hundred megabytes, well past any
+/// mesh worth voxelizing at 256³.
+const MAX_TRIANGLES: usize = 2_000_000;
+
+/// Budget tracking for [`walk_node`], the same shape and the same
+/// reason as `.vox`'s `FlattenLimits`: an imported file is one the user
+/// didn't write, and these limits are about refusing to be talked into
+/// a stack overflow or an out-of-memory abort by a small one.
+#[derive(Default)]
+struct WalkLimits {
+    /// Nodes already walked. glTF 2.0 requires the node hierarchy to be
+    /// "a set of disjoint strict trees" — no cycles, and no node with
+    /// two parents — so arriving at one twice means the file is
+    /// malformed, and refusing the second arrival loses nothing a
+    /// conforming file would have had. (`.vox` is the opposite case and
+    /// its walk is written the opposite way: there a shared subtree is
+    /// how the format says "this part appears in several places", so it
+    /// guards the current path only.) The `gltf` crate's validation
+    /// checks that indices are in range and nothing more, so without
+    /// this a node listing itself as its own child is a stack overflow.
+    visited: std::collections::HashSet<usize>,
+    exhausted: bool,
+}
+
+impl WalkLimits {
+    /// Abandon the rest of the walk, keeping what was extracted so
+    /// far — a partial model the user can see beats a hang.
+    fn stop(&mut self, why: &str) {
+        if !self.exhausted {
+            log::warn!("glTF: {why}; import stopped early");
+            self.exhausted = true;
+        }
+    }
+}
+
 fn walk_node(
     node: &gltf::Node,
     parent_transform: Mat4,
     buffers: &[gltf::buffer::Data],
     textures: &HashMap<usize, DecodedImage>,
     triangles: &mut Vec<Triangle>,
+    depth: usize,
+    limits: &mut WalkLimits,
 ) {
+    if limits.exhausted {
+        return;
+    }
+    if depth > MAX_NODE_DEPTH {
+        limits.stop("node hierarchy is nested too deeply");
+        return;
+    }
+    if !limits.visited.insert(node.index()) {
+        // Prune this branch rather than the whole import: one
+        // malformed link shouldn't cost the geometry that was fine.
+        log::warn!(
+            "glTF: node {} is reachable more than once; pruning (the spec requires a tree)",
+            node.index()
+        );
+        return;
+    }
+
     let local = mat4_from_transform(node.transform());
     let transform = parent_transform * local;
 
     if let Some(mesh) = node.mesh() {
         extract_from_mesh(&mesh, transform, buffers, textures, triangles);
+        if triangles.len() > MAX_TRIANGLES {
+            limits.stop("mesh has more triangles than an import can hold");
+            return;
+        }
     }
 
     for child in node.children() {
-        walk_node(&child, transform, buffers, textures, triangles);
+        walk_node(
+            &child,
+            transform,
+            buffers,
+            textures,
+            triangles,
+            depth + 1,
+            limits,
+        );
     }
 }
 
@@ -416,10 +504,38 @@ type ColorAccum = [u32; 5];
 fn rasterize_triangles(
     triangles: &[Triangle],
     origin: Vec3,
+    far_corner: Vec3,
     voxel_size: f32,
+    resolution: u32,
 ) -> HashMap<(i32, i32, i32), ColorAccum> {
     let mut grid: HashMap<(i32, i32, i32), ColorAccum> = HashMap::new();
+    // The last cell index each axis has. Geometry sitting exactly on
+    // the box's far face divides to a whole number and `floor` keeps
+    // it, which puts those samples one layer past the model: an
+    // axis-aligned cube — Blender's default export — came out
+    // `resolution + 1` cells across, with the extra layer covering only
+    // the faces that touched the plane, so the outer shell broke up
+    // into a fringe. A cell spans `[p, p+1)`; the face at the end
+    // belongs to the cell before it.
+    let last_cell = |extent: f32| ((extent / voxel_size).ceil() as i32 - 1).max(0);
+    let last = (
+        last_cell(far_corner.x - origin.x),
+        last_cell(far_corner.y - origin.y),
+        last_cell(far_corner.z - origin.z),
+    );
     let voxel_area = voxel_size * voxel_size;
+    // No triangle can be bigger than the box every triangle sits in, so
+    // an honest sample grid tops out near 2·`resolution` a side (the
+    // biggest triangle that fits has ~1.2·extent² of area, and
+    // `voxel_size` is that extent over `resolution`). Twice that is the
+    // ceiling, and it is here because the area below is an `f32`
+    // product of coordinate differences: vertices around 2e10 — a
+    // `scale` of 1e10 on a unit cube — overflow it to infinity, and
+    // `f32 → usize` saturates rather than wrapping, so `grid_n` came
+    // out at 4.29 billion and the loop below asked for 1.8e19
+    // iterations on the thread that draws. Bounded work is the fix;
+    // clamping costs nothing on a mesh whose numbers are real.
+    let max_grid = 4 * resolution as usize;
 
     for tri in triangles {
         // Adaptive sampling density. The area term gives ≈4 samples per
@@ -441,7 +557,7 @@ fn rasterize_triangles(
             .max((tri.v0 - tri.v2).length());
         let edge_n = (longest_edge / voxel_size).ceil() as usize + 1;
 
-        let grid_n = area_n.max(edge_n);
+        let grid_n = area_n.max(edge_n).min(max_grid);
         let grid_n_f = grid_n as f32;
 
         // Stratified grid in barycentric space. The `u + v > 1` reject
@@ -457,9 +573,9 @@ fn rasterize_triangles(
                 let w = 1.0 - u - v;
                 let pos = tri.v0 * w + tri.v1 * u + tri.v2 * v;
                 let cell = (
-                    ((pos.x - origin.x) / voxel_size).floor() as i32,
-                    ((pos.y - origin.y) / voxel_size).floor() as i32,
-                    ((pos.z - origin.z) / voxel_size).floor() as i32,
+                    (((pos.x - origin.x) / voxel_size).floor() as i32).min(last.0),
+                    (((pos.y - origin.y) / voxel_size).floor() as i32).min(last.1),
+                    (((pos.z - origin.z) / voxel_size).floor() as i32).min(last.2),
                 );
                 let entry = grid.entry(cell).or_insert([0; 5]);
                 entry[0] +=
@@ -770,7 +886,7 @@ mod tests {
             c1: c,
             c2: c,
         };
-        let grid = rasterize_triangles(&[tri], Vec3::ZERO, 1.0);
+        let grid = rasterize_triangles(&[tri], Vec3::ZERO, Vec3::new(20.0, 1.0, 1.0), 1.0, 20);
         for x in 0..20 {
             assert!(
                 grid.keys().any(|&(gx, _, _)| gx == x),
@@ -778,6 +894,105 @@ mod tests {
                 x
             );
         }
+    }
+
+    /// `resolution` is "the number of voxels along the longest axis",
+    /// and geometry touching the far face used to make it one more than
+    /// that: the division is exact there, `floor` keeps the whole
+    /// number, and the samples land a layer past the model. An
+    /// axis-aligned cube — the default export out of every DCC tool —
+    /// touches that face with a whole side.
+    #[test]
+    fn geometry_on_the_far_face_lands_in_the_last_cell_not_past_it() {
+        let c = [255u8, 255, 255, 255];
+        let tri = Triangle {
+            v0: Vec3::new(0.0, 0.0, 0.0),
+            v1: Vec3::new(10.0, 0.0, 0.0),
+            v2: Vec3::new(10.0, 10.0, 0.0),
+            c0: c,
+            c1: c,
+            c2: c,
+        };
+        let grid = rasterize_triangles(
+            &[tri],
+            Vec3::ZERO,
+            Vec3::new(10.0, 10.0, 0.0),
+            1.0,
+            10,
+        );
+        let widest = grid.keys().map(|&(x, _, _)| x).max().unwrap();
+        let tallest = grid.keys().map(|&(_, y, _)| y).max().unwrap();
+        assert_eq!(widest, 9, "10 cells across means indices 0..=9");
+        assert_eq!(tallest, 9);
+    }
+
+    /// A node listing itself as its own child. The `gltf` crate's
+    /// validation only checks that indices are in range, so this used
+    /// to recurse until the stack ran out — an abort, on the thread
+    /// holding whatever the user hadn't saved, from a file 112 bytes
+    /// long. It is also invalid glTF: the spec requires the node
+    /// hierarchy to be a set of disjoint strict trees.
+    #[test]
+    fn a_self_referencing_node_is_pruned_rather_than_followed() {
+        let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"children":[0]}]}"#;
+        let mut chunk = json.to_vec();
+        while chunk.len() % 4 != 0 {
+            chunk.push(b' ');
+        }
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&((12 + 8 + chunk.len()) as u32).to_le_bytes());
+        glb.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
+        glb.extend_from_slice(&chunk);
+
+        // The walk terminates; there is no geometry in it, so the
+        // ordinary "nothing to voxelize" refusal is what comes back.
+        let error = voxelize_glb(&glb, 32).expect_err("this file has no triangles");
+        assert!(
+            error.to_string().contains("no triangle primitives"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Vertices around 2e10 — a node `scale` of 1e10 on a unit cube —
+    /// overflow the `f32` cross product to infinity, and `f32 → usize`
+    /// saturates rather than wrapping. The sample grid used to come out
+    /// at 4.29 billion a side: 1.8e19 iterations of the inner loop, on
+    /// the thread that draws, with nothing to do but kill the process.
+    #[test]
+    fn a_triangle_with_overflowing_coordinates_samples_a_bounded_grid() {
+        let c = [255u8, 255, 255, 255];
+        let tri = Triangle {
+            v0: Vec3::ZERO,
+            v1: Vec3::new(2.0e10, 0.0, 0.0),
+            v2: Vec3::new(0.0, 2.0e10, 0.0),
+            c0: c,
+            c1: c,
+            c2: c,
+        };
+        let resolution = 32u32;
+        let voxel_size = 2.0e10 / resolution as f32;
+        assert!(
+            (0.5 * (tri.v1 - tri.v0).cross(tri.v2 - tri.v0).length()).is_infinite(),
+            "precondition: this triangle's area overflows f32"
+        );
+
+        let grid = rasterize_triangles(
+            &[tri],
+            Vec3::ZERO,
+            Vec3::new(2.0e10, 2.0e10, 0.0),
+            voxel_size,
+            resolution,
+        );
+        let max_grid = 4 * resolution as usize;
+        assert!(
+            grid.len() <= max_grid * max_grid,
+            "sampled {} cells; the grid is capped at {}²",
+            grid.len(),
+            max_grid
+        );
     }
 
     #[test]

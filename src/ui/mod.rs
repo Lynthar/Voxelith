@@ -108,7 +108,14 @@ pub struct Ui {
     pub state: UiState,
     pub viewport: ViewportSettings,
     pub procgen: ProcgenSettings,
-    /// Pipeline graph edited in the Graph panel. Persisted in prefs.
+    /// Pipeline graph edited in the Graph panel.
+    ///
+    /// Document data, not workspace state: it rides in the `.vxlt`
+    /// (`EditorState.graph`) because it is the recipe the model was
+    /// built from, and it used to live in `prefs.ron`, where it
+    /// followed the machine instead of the work. It sits on `Ui`
+    /// because the panel edits it directly — which is why that panel
+    /// tells `App` when it changed (`UiAction::GraphEdited`).
     pub graph: PipelineGraph,
     /// Currently-selected node in the visual graph editor. Drives
     /// the sidebar parameter editor. Cleared automatically when the
@@ -1897,6 +1904,21 @@ impl Ui {
     }
 
     fn show_graph_panel(&mut self, ctx: &Context) {
+        // The graph as this frame found it. The panel edits it in a
+        // dozen places — four deferred actions, a node drag, and every
+        // widget in the inspector — and a `.vxlt` carries the result, so
+        // *any* of them leaving the document looking unmodified is a
+        // silent way to lose work: the unsaved-changes guard waves the
+        // exit through, and the disk poll reloads over it.
+        //
+        // Comparing beginning to end of this one call is what makes the
+        // signal trustworthy: everything that writes `self.graph` from
+        // outside the panel (an agent's batch, opening a file, a reload)
+        // happens between frames, so it can't be mistaken for a person
+        // editing — the file paths deliberately land on a *clean*
+        // document, and an agent's batch flags itself.
+        let before = self.graph.clone();
+
         // Deferred actions: collected during the immediate-mode pass,
         // applied after the window closure releases its borrows on
         // `self.graph` and `self.state`.
@@ -2025,6 +2047,9 @@ impl Ui {
         }
         if run {
             self.state.request(UiAction::RunGraph);
+        }
+        if self.graph != before {
+            self.state.request(UiAction::GraphEdited);
         }
     }
 
@@ -2290,7 +2315,13 @@ impl Ui {
                     ui.add_space(16.0);
                     ui.separator();
                     ui.add_space(8.0);
-                    ui.label("MIT License");
+                    // Read off the manifest rather than typed here: the
+                    // license was stated in five places and one of them
+                    // was this dialog, which is the copy nobody greps.
+                    // `env!` makes it the same string `Cargo.toml`
+                    // publishes, and a build with no license field
+                    // fails to compile rather than shipping a blank.
+                    ui.label(format!("{} License", env!("CARGO_PKG_LICENSE")));
                 });
             });
     }

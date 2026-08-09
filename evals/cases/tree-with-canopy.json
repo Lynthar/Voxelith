@@ -1,6 +1,6 @@
 {
   "id": "tree-with-canopy",
-  "task": "Build a tree: a trunk rising from the ground with a leafy canopy above it. The canopy may be several separate clumps of leaves.",
+  "task": "Build a tree: a trunk rising from the ground with a leafy canopy above it. The canopy may be several separate clumps of leaves. Around 10 to 40 cells tall and 5 to 30 across, using at least 150 voxels in all.",
   "notes": "Deliberately silent about components and floating parts. Clumps of leaves that don't touch are a tree, not a defect — the very numbers that fail `standing-chair` are expected here. That is what it means for the report to state measurements and leave the verdict to the case; a grader that hard-coded 'one component, nothing floating' would mark a correct tree wrong.",
   "expect": {
     "size": [

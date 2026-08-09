@@ -4,8 +4,15 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Voxelith Contributors"]
 description = "Procedural-first voxel asset creation tool with a headless agent interface"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/Lynthar/Voxelith"
+# Stated so cargo refuses an older toolchain with one clear line instead
+# of a wall of type errors from somewhere in the dependency tree. The
+# number comes from the tree, not from taste: `image` (unconditional —
+# `io::voxelize` decodes base-color textures) and `rmcp` both declare
+# 1.88. This crate's own floor is lower — `Option::is_none_or` in
+# `eval` needs 1.82 — so a headless build is not the cheaper case here.
+rust-version = "1.88"
 
 [features]
 default = ["gui", "mcp"]
@@ -30,6 +37,10 @@ gui = [
     "dep:egui-wgpu",
     "dep:egui-winit",
     "dep:rfd",
+    # `prefs` is the editor's saved workspace and nothing else reads it,
+    # so its two dependencies belong to the editor too.
+    "dep:ron",
+    "dep:dirs",
 ]
 
 # `voxelith mcp`: the same editing primitives as a resident MCP tool set,
@@ -66,8 +77,10 @@ bytemuck = { version = "1.19", features = ["derive"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
-ron = "0.8"  # Rusty Object Notation for config files
+# `prefs.ron` only — hence `optional`, pulled in by `gui`. Still 0.8:
+# internally tagged enums need 0.9, which is why the pipeline graph
+# lives in the JSON half of a `.vxlt` rather than here.
+ron = { version = "0.8", optional = true }
 
 # CLI (headless batch export: `voxelith bake <spec.json>`)
 clap = { version = "4", features = ["derive"] }
@@ -80,7 +93,9 @@ thiserror = "2.0"
 parking_lot = "0.12"  # Better mutexes
 flate2 = "1.0"  # Compression for project files
 rfd = { version = "0.15", optional = true }  # Native file dialogs (GUI only)
-dirs = "5.0"  # Cross-platform user config / cache / data directories
+# Where `prefs.ron` and the crash-recovery autosave live. GUI-only for
+# the same reason as `ron`.
+dirs = { version = "5.0", optional = true }
 
 # MCP server (`mcp` / `mcp-http` features). `transport-io` is the stdio
 # transport; `server` + `macros` come in by default. `schemars` generates

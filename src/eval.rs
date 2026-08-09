@@ -290,9 +290,25 @@ fn load_cases(path: &Path) -> Result<Vec<EvalCase>, EvalError> {
                 format!("could not read {}: {e}", path.display()),
             )
         })?;
-        for entry in entries.flatten() {
-            let entry = entry.path();
-            if entry.extension().is_some_and(|e| e == "json") {
+        for entry in entries {
+            // A directory entry that can't be read is not "no case
+            // here": suite mode reports a missing result as a failed
+            // case, so a case that silently vanished from the *set*
+            // would shrink the bar instead of failing anything.
+            let entry = entry
+                .map_err(|e| {
+                    EvalError::new(
+                        "cases_unreadable",
+                        format!("could not read an entry in {}: {e}", path.display()),
+                    )
+                })?
+                .path();
+            // Case-insensitive: the cases are data files, and on
+            // Windows `.JSON` is the same file the author meant.
+            let is_case = entry
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+            if is_case {
                 files.push(entry);
             }
         }
@@ -362,12 +378,26 @@ pub fn grade(case: &EvalCase, description: &Description) -> CaseReport {
         checks.push(check("voxel_count", bound, description.voxel_count as f64));
     }
     if let Some(bounds) = &expect.size {
-        let size = description.size.unwrap_or([0, 0, 0]);
-        for (axis, (bound, actual)) in ["size.x", "size.y", "size.z"]
-            .iter()
-            .zip(bounds.iter().zip(size.iter()))
-        {
-            checks.push(check(axis, *bound, *actual as f64));
+        match description.size {
+            Some(size) => {
+                for (axis, (bound, actual)) in ["size.x", "size.y", "size.z"]
+                    .iter()
+                    .zip(bounds.iter().zip(size.iter()))
+                {
+                    checks.push(check(axis, *bound, *actual as f64));
+                }
+            }
+            // An empty document has no extent to measure, and treating
+            // that as `[0, 0, 0]` passes any bound written as a ceiling
+            // alone — "at most 10 cells across" is true of nothing at
+            // all. Same rule as the structural pass below: a bar that
+            // was never measured doesn't get to report a pass.
+            None => checks.push(Check {
+                name: "size".to_string(),
+                expected: "measurable".to_string(),
+                actual: "not measured (the document is empty)".to_string(),
+                pass: false,
+            }),
         }
     }
 
@@ -464,6 +494,29 @@ pub fn grade(case: &EvalCase, description: &Description) -> CaseReport {
 }
 
 fn check(name: &str, bound: Bound, actual: f64) -> Check {
+    // A bound that can't be met, or can't be missed, is an authoring
+    // mistake rather than a judgment about the model — and the failure
+    // mode of the empty one is the dangerous direction: `{}` reads as a
+    // bar in the case file and grades every result as a pass. Failing
+    // it here names the case and the field; the alternative, refusing
+    // to load the whole suite, punishes the eleven cases that are fine.
+    let unusable = match (bound.min, bound.max) {
+        (None, None) => Some("names neither min nor max, so it asserts nothing".to_string()),
+        (Some(min), Some(max)) if min > max => Some(format!(
+            "asks for {} .. {}, which nothing can satisfy",
+            number(min),
+            number(max)
+        )),
+        _ => None,
+    };
+    if let Some(why) = unusable {
+        return Check {
+            name: name.to_string(),
+            expected: "a usable bound".to_string(),
+            actual: format!("the case {why}"),
+            pass: false,
+        };
+    }
     Check {
         name: name.to_string(),
         expected: bound.describe(),
@@ -620,7 +673,7 @@ mod tests {
     #[test]
     fn every_case_in_the_repository_loads_and_is_named_after_its_id() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for (folder, least) in [("evals/cases", 6), ("evals/advanced", 5)] {
+        for (folder, least) in [("evals/cases", 6), ("evals/advanced", 6)] {
             let dir = root.join(folder);
             let cases = load_cases(&dir).expect("the shipped cases must load");
             assert!(
