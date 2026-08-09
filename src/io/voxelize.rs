@@ -21,9 +21,13 @@
 //!    so the caller can apply it via `Command::set_voxels` and the
 //!    result lands at the world origin (downstream tools can Move it).
 //!
-//! Phase 3 is the first place this gets called (Phase 2 only
-//! downloaded the GLB and dropped the bytes); Phase 4 will polish
-//! placement, auto-select, and recent-prompts MRU.
+//! This was written to land the output of a remote text-to-3D service.
+//! That feature is gone; the conversion outlived it because nothing
+//! about it was ever AI-specific — it turns a triangle mesh into voxels,
+//! and a mesh off the network and a mesh off the disk are the same
+//! problem. The hardening stayed for the same reason: `File ▸ Import`
+//! opens a file the user did not write either, and a GLB can declare a
+//! 20000×20000 texture whichever way it arrived.
 
 use std::collections::{HashMap, HashSet};
 
@@ -120,8 +124,8 @@ struct DecodedImage {
     height: u32,
 }
 
-/// Per-axis ceiling on a decoded texture. Hunyuan3D ships 4K at most;
-/// 8192² is generous and still bounds one decode at 256 MiB of RGBA.
+/// Per-axis ceiling on a decoded texture. 8192² is well past anything a
+/// voxel import needs and still bounds one decode at 256 MiB of RGBA.
 const MAX_TEXTURE_DIM: u32 = 8192;
 /// Ceiling on a single decode's own allocations.
 const MAX_TEXTURE_ALLOC: u64 = 256 * 1024 * 1024;
@@ -256,9 +260,9 @@ fn extract_from_mesh(
 ) {
     for primitive in mesh.primitives() {
         if primitive.mode() != gltf::mesh::Mode::Triangles {
-            // Skip lines / points / triangle strips — Hunyuan3D V3
-            // doesn't emit them, but a future provider might and we'd
-            // rather no-op a primitive than panic.
+            // Skip lines / points / triangle strips. Only triangles
+            // have an interior to fill, and an imported file may well
+            // contain the others — no-op the primitive, don't panic.
             continue;
         }
         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
@@ -270,9 +274,9 @@ fn extract_from_mesh(
 
         // Vertex colors (optional). Per the glTF spec COLOR_0 is an
         // additional linear multiplier on the base color — it multiplies
-        // with the texture and factor rather than replacing them — though
-        // for AI 3D-gen output COLOR_0 is usually absent and the texture
-        // (or bare factor) carries the color.
+        // with the texture and factor rather than replacing them. Most
+        // exported meshes omit it entirely and let the texture (or the
+        // bare factor) carry the color.
         let vertex_colors: Option<Vec<[f32; 4]>> = reader
             .read_colors(0)
             .map(|c| c.into_rgba_f32().collect());
@@ -338,9 +342,15 @@ fn sample_texture(tex: &DecodedImage, u: f32, v: f32) -> [f32; 4] {
     let u = u.rem_euclid(1.0);
     let v = v.rem_euclid(1.0);
     let x = ((u * tex.width as f32) as u32).min(tex.width.saturating_sub(1));
-    // glTF UVs use bottom-left origin; image rows are top-down. Flip Y.
-    let y = (((1.0 - v) * tex.height as f32) as u32)
-        .min(tex.height.saturating_sub(1));
+    // No flip. glTF 2.0 puts UV origin (0,0) at the image's **top-left**
+    // and grows v downward, which is the same direction `to_rgba8()`
+    // lays its rows out — so v maps straight onto the row index. This
+    // line used to read `(1.0 - v)` under a comment asserting a
+    // bottom-left origin; that was a net second flip, and every model
+    // with a base-color texture took its colors from the vertically
+    // mirrored position (a face sampling the legs) while still looking
+    // plausible enough to survive four months.
+    let y = ((v * tex.height as f32) as u32).min(tex.height.saturating_sub(1));
     let idx = ((y * tex.width + x) * 4) as usize;
     [
         tex.rgba[idx] as f32 / 255.0,
@@ -657,6 +667,48 @@ mod tests {
         let bytes: &[u8] = b"not a glb";
         let result = voxelize_glb(bytes, 64);
         assert!(result.is_err());
+    }
+
+    /// Two rows, red on top and blue on the bottom. glTF's v grows
+    /// downward from a top-left origin, so v = 0 has to land on red.
+    ///
+    /// This is the test that was missing while `sample_texture` carried
+    /// a net vertical flip: every assertion here fails with the axis
+    /// inverted, and none of them needs a GLB, a network, or a GPU.
+    #[test]
+    fn texture_v_axis_runs_top_down_like_gltf_says() {
+        let tex = DecodedImage {
+            rgba: vec![
+                255, 0, 0, 255, // row 0 — red
+                0, 0, 255, 255, // row 1 — blue
+            ],
+            width: 1,
+            height: 2,
+        };
+
+        let top = sample_texture(&tex, 0.5, 0.0);
+        assert_eq!(top[0], 1.0, "v = 0 must sample the top row");
+        assert_eq!(top[2], 0.0);
+
+        let bottom = sample_texture(&tex, 0.5, 0.99);
+        assert_eq!(bottom[2], 1.0, "v near 1 must sample the bottom row");
+        assert_eq!(bottom[0], 0.0);
+    }
+
+    /// v = 1.0 exactly is a legal UV and wraps to 0.0 under REPEAT, so
+    /// it samples the *top* row — and the clamp keeps any value that
+    /// slips through from indexing past the last row.
+    #[test]
+    fn texture_sampling_stays_in_bounds_at_the_edges() {
+        let tex = DecodedImage {
+            rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            width: 1,
+            height: 2,
+        };
+
+        assert_eq!(sample_texture(&tex, 0.0, 1.0)[0], 1.0);
+        // Far outside on both axes: wraps, never panics.
+        let _ = sample_texture(&tex, -3.7, 42.9);
     }
 
     #[test]

@@ -3,7 +3,7 @@ name = "voxelith"
 version = "0.1.0"
 edition = "2021"
 authors = ["Voxelith Contributors"]
-description = "Procedural-first voxel asset creation tool with AI generation capabilities"
+description = "Procedural-first voxel asset creation tool with a headless agent interface"
 license = "MIT"
 repository = "https://github.com/Lynthar/Voxelith"
 
@@ -38,7 +38,7 @@ gui = [
 # over MCP the schema is the only place an agent can learn the ops format,
 # so a hand-written one would be exactly the drift the generator registry
 # exists to avoid. Off, the derives vanish and `agent_ops` is untouched.
-mcp = ["dep:rmcp", "dep:schemars", "dep:base64"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:base64", "dep:tokio"]
 
 # Streamable HTTP: for agents that want a URL instead of a child
 # process, and — since an editor can't hand an agent its stdio — the only
@@ -100,17 +100,23 @@ rayon = "1.10"
 noise = "0.9"
 rand = "0.8"
 
-# AI integration: HTTP client for remote 3D-gen APIs (fal.ai, etc.),
-# tokio runtime to run them off the winit main thread, keyring for
-# storing API keys in the OS keychain instead of plaintext prefs.
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-keyring = "3"
-# GLB → voxel conversion for AI output: gltf parses the binary glTF
-# the provider returns; image decodes the PBR base-color texture so we
-# can sample colors at triangle UVs (Hunyuan3D V3 doesn't ship vertex
-# colors, only textures).
+# Reading glTF: `io::voxelize` parses an incoming `.glb` so File ▸ Import
+# can turn a mesh into voxels. Export is unrelated and needs nothing from
+# here — `io::gltf` is this crate's own module and writes the format by
+# hand.
 gltf = "1"
+
+# Async runtime. Owned by `mcp`, which is the only thing that needs one:
+# the stdio/HTTP servers, and — because `gui` implies `mcp-http` — the
+# editor's background runtime that the in-editor agent bridge runs on.
+# A build with neither (`bake` / `exec` / `inspect` / `render` / `eval`)
+# has no async anything.
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# PNG encodes `voxelith render` / `render_views` — an agent's eyes, which
+# work in a container with no display, so this is neither GUI nor AI.
+# JPEG decodes whatever base-color texture an imported GLB happens to
+# carry.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [profile.dev]

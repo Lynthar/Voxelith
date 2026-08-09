@@ -1,12 +1,12 @@
 //! Procedural generation algorithms.
 //!
-//! This module hosts the unified entry point for both algorithmic
-//! generators (noise, WFC, L-System, ...) and, eventually, AI
-//! generators. They all implement [`VoxelGenerator`] and emit a
-//! [`VoxelPatch`] — a list of voxel writes — rather than mutating a
-//! `World` directly. Decoupling the output lets callers route the
-//! result through [`CommandHistory`] (for undo), AI format converters,
-//! or preview/scratch worlds without changing the generator.
+//! Every generator (noise, WFC, L-System, ...) implements
+//! [`VoxelGenerator`] and emits a [`VoxelPatch`] — a list of voxel
+//! writes — rather than mutating a `World` directly. Decoupling the
+//! output lets callers route the same patch through
+//! [`CommandHistory`] (for undo) or into a preview/scratch world
+//! without the generator knowing which happened. `io::voxelize_glb`
+//! produces the same type for the same reason.
 //!
 //! [`CommandHistory`]: crate::editor::CommandHistory
 
@@ -54,26 +54,21 @@ pub enum GeneratorCategory {
     General,
 }
 
-/// How the generator runs. AI variants are stubs today; the current
-/// generators are all `Algorithmic`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeneratorBackend {
-    Algorithmic,
-    LocalModel,
-    RemoteAPI,
-    Hybrid,
-}
-
 /// Static metadata describing a generator. Concrete generators return
 /// their own (usually compile-time-constant) metadata from
 /// [`VoxelGenerator::metadata`].
+///
+/// This used to carry a `backend` field (`Algorithmic` / `LocalModel` /
+/// `RemoteAPI` / `Hybrid`) for a future where a generator might be a
+/// model rather than an algorithm. Every generator ever written set it
+/// to `Algorithmic`, nothing ever read it, and the remote-generation
+/// path it anticipated has since been removed — so it went too.
 #[derive(Debug, Clone, Copy)]
 pub struct GeneratorMeta {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
     pub category: GeneratorCategory,
-    pub backend: GeneratorBackend,
 }
 
 /// A bundle of voxel writes produced by a generator.
@@ -162,7 +157,7 @@ impl VoxelPatch {
 /// [`generate`](VoxelGenerator::generate) without any glue.
 ///
 /// `Send + Sync` is required so generators can be moved to a worker
-/// thread (algorithmic ones are pure CPU; AI ones may block on I/O).
+/// thread — the preview path evaluates them off the main thread.
 pub trait VoxelGenerator: Send + Sync {
     fn metadata(&self) -> GeneratorMeta;
 

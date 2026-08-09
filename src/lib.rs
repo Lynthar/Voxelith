@@ -26,7 +26,6 @@
 //! ```
 
 pub mod agent_ops;
-pub mod ai;
 pub mod bake;
 pub mod eval;
 pub mod exec;

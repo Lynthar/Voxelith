@@ -4,12 +4,19 @@
 //! - Native project format (.vxlt) - compressed binary with metadata
 //! - MagicaVoxel (.vox) - import/export
 //! - Wavefront OBJ (.obj) - export (geometry + vertex colors)
-//! - glTF Binary (.glb) - export (single-file, native vertex colors)
+//! - glTF Binary (.glb) - export (single-file, native vertex colors),
+//!   and import by voxelizing the mesh ([`voxelize_glb`])
+//!
+//! The two glTF halves are deliberately separate modules: `gltf` writes
+//! the format by hand and needs nothing from the `gltf` crate, while
+//! `voxelize` parses an arbitrary incoming file and does need it. They
+//! share a container and nothing else.
 
 mod gltf;
 mod obj;
 mod project;
 mod vox;
+mod voxelize;
 
 pub use gltf::{
     export_glb, export_glb_smoothed, export_glb_smoothed_with_transform,
@@ -25,6 +32,7 @@ pub use vox::{
     VoxError, VoxModel, default_palette,
     export_vox, import_vox,
 };
+pub use voxelize::voxelize_glb;
 
 use std::io::{self, Read};
 use std::path::Path;

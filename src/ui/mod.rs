@@ -6,7 +6,6 @@ mod panels;
 pub use hud::HudState;
 pub use panels::{ConfirmPrompt, ExportReport, UiAction, UiState};
 
-use crate::ai::AiJobState;
 use crate::editor::{Axis, Editor, Quarter, Tool};
 use crate::mcp::bridge::{Approval, DEFAULT_PORT};
 use crate::procgen::{
@@ -124,10 +123,6 @@ pub struct Ui {
     /// App syncs this whenever the prefs version changes (touch_recent
     /// + initial load).
     pub recent_files: Vec<std::path::PathBuf>,
-    /// Recent AI prompts MRU mirrored from
-    /// `prefs::Prefs::recent_ai_prompts`. App syncs it on submit and at
-    /// initial load. Surfaced as a History dropdown in the AI panel.
-    pub recent_ai_prompts: Vec<String>,
     /// Mirror of `App::clipboard.is_some()` so the Tools panel can
     /// gray out the Paste button without `App::clipboard` leaking
     /// across the UI layer boundary. App syncs it before each frame.
@@ -141,22 +136,10 @@ pub struct Ui {
     /// App syncs it before each frame.
     pub wireframe_supported: bool,
 
-    /// User-edited prompt for the AI panel. Owned by the UI (rather
-    /// than App) so the input field's state lives next to its widget;
-    /// `App::start_ai_job` reads from `self.ui.ai_prompt` when
-    /// dispatching `UiAction::AiGenerate`.
-    pub ai_prompt: String,
-    /// Voxelization resolution along the longest axis (32 / 64 / 128).
-    /// The panel's slider binds to this; `AiRequest::resolution`
-    /// reads from it at submit time.
-    pub ai_resolution: u32,
-    /// Mirror of `App::ai_job` so the panel can render the active
-    /// stage (Submitting / Polling / Voxelizing / Done / Failed)
-    /// without needing a reference to the App. App syncs each frame.
-    pub ai_job: AiJobState,
-    /// Mirror of `App::ai_has_key` for the same reason. Refreshed by
-    /// the App after every Save / Clear API key action.
-    pub ai_has_key: bool,
+    /// Voxelization resolution along the longest axis (32 / 64 / 128)
+    /// for `File ▸ Import` of a GLB. Owned by the UI so the control's
+    /// state lives next to its widget.
+    pub import_resolution: u32,
 
     /// Whether `.vox` import/export converts between MagicaVoxel's Z-up
     /// convention and Voxelith's Y-up one (default on). Owned by the UI
@@ -167,7 +150,7 @@ pub struct Ui {
     pub convert_vox_axes: bool,
 
     /// Mirror of the in-editor MCP bridge's state, synced each frame the
-    /// same way `ai_job` is.
+    /// same way `has_clipboard` is.
     pub agent: AgentView,
 }
 
@@ -176,7 +159,7 @@ pub struct Ui {
 /// The bridge itself lives on `App` — a listening socket, a channel and
 /// possibly a batch parked mid-call — and none of that belongs on the UI
 /// side of the line. This is the display-ready summary App mirrors
-/// across each frame, the same shape `ai_job` and `has_clipboard` take.
+/// across each frame, the same shape `has_clipboard` takes.
 #[derive(Debug, Clone, Default)]
 pub struct AgentView {
     /// The URL to hand a client, while the bridge is listening.
@@ -200,13 +183,9 @@ impl Ui {
             selected_node: None,
             dragging_wire: None,
             recent_files: Vec::new(),
-            recent_ai_prompts: Vec::new(),
             has_clipboard: false,
             wireframe_supported: false,
-            ai_prompt: String::new(),
-            ai_resolution: 64,
-            ai_job: AiJobState::Idle,
-            ai_has_key: false,
+            import_resolution: 64,
             convert_vox_axes: true,
             agent: AgentView::default(),
         }
@@ -269,11 +248,6 @@ impl Ui {
         // Pipeline graph panel
         if self.state.panels.show_graph {
             self.show_graph_panel(ctx);
-        }
-
-        // AI generation panel
-        if self.state.panels.show_ai {
-            self.show_ai_panel(ctx);
         }
 
         // Agent bridge panel
@@ -427,7 +401,7 @@ impl Ui {
     /// and decide whether its batches land as they arrive or wait for a
     /// yes.
     fn show_agent_panel(&mut self, ctx: &Context) {
-        // Deferred-action pattern (same as `show_ai_panel`): `.open(...)`
+        // Deferred-action pattern (same as `show_graph_panel`): `.open(...)`
         // borrows `self.state.panels.show_agent` and the closure borrows
         // other `self.*` fields, so intents are collected into a local
         // and dispatched after the closure releases the borrow.
@@ -776,6 +750,43 @@ impl Ui {
                             self.state.request(UiAction::ImportVox);
                             ui.close_menu();
                         }
+                        if ui
+                            .button("glTF mesh (.glb)...")
+                            .on_hover_text(
+                                "Voxelize a triangle mesh into the open scene. \
+                                 Adds to what's there and is undoable, unlike \
+                                 .vox import which replaces the document.",
+                            )
+                            .clicked()
+                        {
+                            self.state.request(UiAction::ImportGlb);
+                            ui.close_menu();
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Mesh resolution");
+                            // 32 / 64 / 128 rather than a free slider:
+                            // each step is roughly 8× the voxel count and
+                            // the values between aren't useful in practice.
+                            egui::ComboBox::from_id_salt("import_resolution")
+                                .selected_text(format!("{}³", self.import_resolution))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.import_resolution,
+                                        32,
+                                        "32³ (icon)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.import_resolution,
+                                        64,
+                                        "64³ (default)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.import_resolution,
+                                        128,
+                                        "128³ (detail)",
+                                    );
+                                });
+                        });
                         ui.separator();
                         ui.checkbox(&mut self.convert_vox_axes, "Convert Z-up ↔ Y-up")
                             .on_hover_text(
@@ -1062,7 +1073,6 @@ impl Ui {
                     ui.checkbox(&mut self.state.panels.show_viewport_settings, "Viewport Settings");
                     ui.checkbox(&mut self.state.panels.show_procgen, "Procedural Generation");
                     ui.checkbox(&mut self.state.panels.show_graph, "Pipeline Graph");
-                    ui.checkbox(&mut self.state.panels.show_ai, "AI Generation");
                     ui.checkbox(&mut self.state.panels.show_agent, "Agent Bridge");
                     ui.separator();
                     ui.checkbox(&mut self.viewport.show_grid, "Show Grid");
@@ -2015,185 +2025,6 @@ impl Ui {
         }
         if run {
             self.state.request(UiAction::RunGraph);
-        }
-    }
-
-    fn show_ai_panel(&mut self, ctx: &Context) {
-        // Deferred-action pattern (same as `show_procgen_panel`):
-        // `.open(...)` borrows `self.state.panels.show_ai` and the closure
-        // borrows several other `self.*` fields, so we can't request
-        // a `UiAction` (which mutates `self.state`) inside the closure.
-        // Instead, collect intents into local flags and dispatch after
-        // the closure releases the borrow.
-        //
-        // The panel is provider-agnostic by construction: it only
-        // reads the mirrored `self.ai_*` fields and emits
-        // `UiAction::Ai*`, so which provider App holds (today
-        // `FalHunyuanProvider`) never shows up here.
-        // Truncate a long prompt for the History menu label; the full
-        // text is restored on click and shown on hover.
-        fn truncate_prompt(s: &str, max: usize) -> String {
-            if s.chars().count() <= max {
-                s.to_string()
-            } else {
-                let head: String = s.chars().take(max.saturating_sub(1)).collect();
-                format!("{head}…")
-            }
-        }
-
-        let mut click_clear_key = false;
-        let mut click_save_key: Option<String> = None;
-        let mut click_generate = false;
-        let mut click_cancel = false;
-
-        // Cloned before the `&mut self.ai_prompt` borrow so the History
-        // menu can refill the prompt without aliasing `self`.
-        let recent_prompts = self.recent_ai_prompts.clone();
-        let prompt = &mut self.ai_prompt;
-        let resolution = &mut self.ai_resolution;
-        let key_input = &mut self.state.ai_key_input;
-        let job = &self.ai_job;
-        let has_key = self.ai_has_key;
-
-        egui::Window::new("AI Generation")
-            .default_pos([ctx.screen_rect().width() / 2.0 - 200.0, 100.0])
-            .default_width(400.0)
-            .open(&mut self.state.panels.show_ai)
-            .show(ctx, |ui| {
-                let job_idle = job.is_idle();
-                let job_running = job.is_running();
-
-                // --- Provider info ---
-                ui.label(egui::RichText::new("Provider").strong());
-                ui.label("fal.ai · Hunyuan3D V3");
-
-                // --- API key section ---
-                ui.separator();
-                ui.label(egui::RichText::new("API Key").strong());
-                if has_key {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(80, 200, 120),
-                            "✓ saved in OS keychain",
-                        );
-                        if ui.button("Clear").clicked() {
-                            click_clear_key = true;
-                        }
-                    });
-                } else {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 180, 80),
-                        "Not set — Generate is disabled",
-                    );
-                    ui.horizontal(|ui| {
-                        // Password-masked single-line edit; on Save the
-                        // value is moved out into the action queue and
-                        // the buffer is cleared so the key doesn't
-                        // linger in UI state.
-                        ui.add(
-                            egui::TextEdit::singleline(key_input)
-                                .password(true)
-                                .hint_text("Paste fal.ai API key…"),
-                        );
-                        if ui
-                            .add_enabled(!key_input.is_empty(), egui::Button::new("Save"))
-                            .clicked()
-                        {
-                            click_save_key = Some(std::mem::take(key_input));
-                        }
-                    });
-                }
-
-                // --- Prompt + parameters ---
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Prompt").strong());
-                    // History MRU: refill the box from a past prompt.
-                    if !recent_prompts.is_empty() {
-                        ui.menu_button("History ▾", |ui| {
-                            for entry in &recent_prompts {
-                                if ui
-                                    .button(truncate_prompt(entry, 56))
-                                    .on_hover_text(entry.as_str())
-                                    .clicked()
-                                {
-                                    *prompt = entry.clone();
-                                    ui.close_menu();
-                                }
-                            }
-                        });
-                    }
-                });
-                ui.add(
-                    egui::TextEdit::multiline(prompt)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("e.g. a small wooden treasure chest"),
-                );
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Voxel resolution");
-                    // 32 / 64 / 128 — three reasonable defaults rather
-                    // than a free slider, since each step roughly 8×s
-                    // the voxel count and intermediate values aren't
-                    // useful in practice.
-                    egui::ComboBox::from_id_salt("ai_resolution")
-                        .selected_text(format!("{}³", *resolution))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(resolution, 32, "32³ (icon)");
-                            ui.selectable_value(resolution, 64, "64³ (default)");
-                            ui.selectable_value(resolution, 128, "128³ (detail)");
-                        });
-                });
-
-                // --- Action buttons ---
-                ui.separator();
-                let can_generate = job_idle && has_key && !prompt.trim().is_empty();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(can_generate, egui::Button::new("Generate"))
-                        .clicked()
-                    {
-                        click_generate = true;
-                    }
-                    if ui
-                        .add_enabled(job_running, egui::Button::new("Cancel"))
-                        .clicked()
-                    {
-                        click_cancel = true;
-                    }
-                });
-
-                // --- Status / progress ---
-                ui.separator();
-                ui.label(egui::RichText::new(job.label()).strong());
-                if let Some(progress) = job.progress() {
-                    ui.add(egui::ProgressBar::new(progress).show_percentage());
-                }
-                match job {
-                    AiJobState::Done { summary } => {
-                        ui.label(summary);
-                    }
-                    AiJobState::Failed { message } => {
-                        ui.colored_label(egui::Color32::from_rgb(220, 80, 80), message);
-                    }
-                    _ => {}
-                }
-            });
-
-        // Closure released; safe to mutate `self.state` now.
-        if click_clear_key {
-            self.state.request(UiAction::AiClearKey);
-        }
-        if let Some(key) = click_save_key {
-            self.state.request(UiAction::AiSaveKey(key));
-        }
-        if click_generate {
-            self.state.request(UiAction::AiGenerate);
-        }
-        if click_cancel {
-            self.state.request(UiAction::AiCancel);
         }
     }
 

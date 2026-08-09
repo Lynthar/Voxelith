@@ -9,10 +9,10 @@ Two tiers, graded the same way:
 - **`cases/`** — six everyday objects. A sword, a crate, a chair. This
   tier answers "is the interface usable at all"; a capable agent with
   the docs in front of it clears all six.
-- **`advanced/`** — five that push on what a cube grid is worst at:
+- **`advanced/`** — six that push on what a cube grid is worst at:
   overhangs and curves, repetition-with-rotation, two-axis symmetry at
   a scale that forces hollowing, a height range one generator cannot
-  reach, and a five-part assembly.
+  reach, a five-part assembly, and one organic shape.
 
 ```bash
 # grade one finished project against one case
@@ -39,6 +39,28 @@ is exactly what this layer exists to replace.
 An agent can run the same command on its own work. That is the point of
 grading on the numbers it already reads while building — "check your own
 work" and "did it pass" can't drift apart.
+
+## What the numbers cannot reach
+
+They answer "is it assembled correctly", not "does it look like the
+thing". Every metric here is a count or a bound: pieces, floating
+parts, sealed air, ground contact, extent, density. **None of them sees
+surface quality.** A tapered fish and a fish-shaped stack of slabs
+score identically.
+
+`organic-fish` is where this stops being theoretical, and it is the one
+case whose real bar is the rendered view. Its first attempt passed
+6/6 with rectangular slab fins — exactly what its task text forbids,
+and no number moved. The only arithmetic that helps is negative: cap
+`voxel_count` below the volume of the smallest legal bounding box, so a
+solid block cannot pass at any legal size. That stops the laziest
+cheat and nothing subtler.
+
+So: **passing is necessary, never sufficient.** Render the result and
+look at it. That rule holds for every case here — a correct shape has
+also been failed by a wrong bar twice (see the `notes` in
+`arched-bridge` and `castle-keep`) — but for an organic shape the
+picture is not a double-check, it is the primary judge.
 
 ## Writing a case
 

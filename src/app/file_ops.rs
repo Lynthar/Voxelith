@@ -1,10 +1,14 @@
-//! File operations: project new/save/open and VOX import/export, plus
-//! the poll that notices somebody else writing the open project.
+//! File operations: project new/save/open, VOX and GLB import, VOX
+//! export, plus the poll that notices somebody else writing the open
+//! project.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use voxelith::{core::Voxel, editor::Socket, io, procgen::PipelineGraph, ui::ExportReport};
+use voxelith::{
+    core::Voxel, editor::Command, editor::Socket, io, procgen::PipelineGraph,
+    ui::ExportReport,
+};
 
 use super::App;
 
@@ -485,6 +489,79 @@ impl App {
                 self.ui.set_status(format!("Import failed: {}", e));
             }
         }
+    }
+
+    /// Import a `.glb` / `.gltf` by voxelizing its mesh.
+    ///
+    /// Unlike `.vox` import this **adds to** the open document instead of
+    /// replacing it, and lands as one undoable `SetVoxels` — the same
+    /// path a generator's patch takes. That's why it needs no unsaved-
+    /// changes guard: nothing is thrown away, and Ctrl+Z puts it back.
+    ///
+    /// The file is untrusted the way any opened file is, so this goes
+    /// through `io::voxelize_glb`, which bounds what a GLB can make it
+    /// allocate (see that module).
+    pub(super) fn import_glb(&mut self) {
+        let resolution = self.ui.import_resolution;
+        let dialog = self
+            .file_dialog(DialogStart::Import)
+            .add_filter("glTF Binary", &["glb", "gltf"])
+            .set_title("Import glTF Mesh");
+
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::error!("Failed to read {:?}: {}", path, e);
+                let detail = format!(
+                    "Couldn't open \"{}\" — {}.\n\nCheck the file still exists \
+                     and isn't locked by another app.",
+                    file_label(&path),
+                    e
+                );
+                self.show_error_dialog("Import failed", &detail);
+                self.ui.set_status(format!("Import failed: {}", e));
+                return;
+            }
+        };
+
+        let patch = match io::voxelize_glb(&bytes, resolution) {
+            Ok(patch) => patch,
+            Err(e) => {
+                log::error!("Failed to voxelize {:?}: {:#}", path, e);
+                let detail = format!(
+                    "Couldn't turn \"{}\" into voxels — {:#}.\n\nThe file has to \
+                     be a glTF binary containing at least one triangle mesh.",
+                    file_label(&path),
+                    e
+                );
+                self.show_error_dialog("Import failed", &detail);
+                self.ui.set_status("Import failed: not a usable mesh");
+                return;
+            }
+        };
+
+        let changes = self.patch_to_changes(&patch);
+        if changes.is_empty() {
+            self.ui
+                .set_status("Import: no changes (mesh matches existing voxels)");
+            return;
+        }
+
+        let count = changes.len();
+        self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
+        self.editor
+            .history
+            .execute(Command::set_voxels(changes), &mut self.world);
+        self.rebuild_all_meshes();
+        self.recenter_camera_on_scene();
+        self.prefs.remember_import_dir(&path);
+        self.ui
+            .set_status(format!("Imported {} voxels from {}", count, file_label(&path)));
+        self.invalidate_preview();
     }
 
     /// Remember the open project file's modification time, so the disk

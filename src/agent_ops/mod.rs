@@ -35,7 +35,7 @@
 //! the loop an agent iterates on.
 //!
 //! Dependency direction is one-way — `agent_ops → editor / procgen /
-//! core` — the same discipline `ai → procgen` follows. Nothing here
+//! core` — one-way, never the inverse. Nothing here
 //! knows about `app`, winit, or egui; file dialogs and other UI-bound
 //! side effects are deliberately absent (an agent-triggered `rfd`
 //! dialog would block the main thread with no one to click it).

@@ -24,9 +24,6 @@ pub use legacy_graph::LegacyGraph;
 /// Maximum entries kept in the recent-files MRU.
 pub const MAX_RECENT_FILES: usize = 10;
 
-/// Maximum entries kept in the recent AI-prompts MRU.
-pub const MAX_RECENT_PROMPTS: usize = 10;
-
 /// True if `path` names a Voxelith project (`.vxlt`, case-insensitive
 /// so a `.VXLT` typed into a save dialog still counts).
 fn is_project_file(path: &Path) -> bool {
@@ -57,9 +54,6 @@ pub struct Prefs {
     pub graph_migrated: bool,
     pub editor: EditorPrefs,
     pub recent_files: Vec<PathBuf>,
-    /// Recent AI-generation prompts, most-recent first. Surfaced as a
-    /// History dropdown in the AI panel.
-    pub recent_ai_prompts: Vec<String>,
     /// Directory of the last successful export. Seeds the next export
     /// dialog so an export-heavy workflow doesn't re-navigate to the
     /// asset folder every time. Exports deliberately do NOT go into
@@ -81,7 +75,6 @@ impl Default for Prefs {
             graph_migrated: false,
             editor: EditorPrefs::default(),
             recent_files: Vec::new(),
-            recent_ai_prompts: Vec::new(),
             last_export_dir: None,
             last_import_dir: None,
         }
@@ -107,8 +100,10 @@ impl Default for WindowPrefs {
 /// Which workspace panels are open. `ui::UiState` holds one of these
 /// directly (rather than its own parallel set of booleans), so loading
 /// and saving are whole-struct assignments and a newly added panel
-/// can't be persisted at one end only — `show_ai` used to be exactly
-/// that: a toggle the save path never saw. Transient windows (help,
+/// can't be persisted at one end only. That failure has actually
+/// happened here: the since-removed AI panel's toggle was written at
+/// load and never at save, because it was a loose `bool` on `UiState`
+/// instead of a field in this struct. Transient windows (help,
 /// about, crash-recovery prompt) deliberately stay off this struct;
 /// they aren't part of a saved layout.
 ///
@@ -123,7 +118,6 @@ pub struct PanelVisibility {
     pub show_viewport_settings: bool,
     pub show_procgen: bool,
     pub show_graph: bool,
-    pub show_ai: bool,
     pub show_agent: bool,
 }
 
@@ -136,7 +130,6 @@ impl Default for PanelVisibility {
             show_viewport_settings: false,
             show_procgen: false,
             show_graph: false,
-            show_ai: false,
             show_agent: false,
         }
     }
@@ -270,18 +263,6 @@ impl Prefs {
         }
     }
 
-    /// Insert `prompt` at the head of `recent_ai_prompts`, dedup, cap at
-    /// `MAX_RECENT_PROMPTS`. Blank prompts are ignored. Same MRU shape as
-    /// `touch_recent`, for AI generation prompts.
-    pub fn touch_recent_prompt(&mut self, prompt: &str) {
-        let prompt = prompt.trim();
-        if prompt.is_empty() {
-            return;
-        }
-        self.recent_ai_prompts.retain(|p| p != prompt);
-        self.recent_ai_prompts.insert(0, prompt.to_string());
-        self.recent_ai_prompts.truncate(MAX_RECENT_PROMPTS);
-    }
 }
 
 /// The pipeline graph as it was stored in `prefs.ron` before graphs
@@ -522,23 +503,6 @@ mod tests {
         assert!(!p.panels.show_stats);
         // show_tools should default to true.
         assert!(p.panels.show_tools);
-    }
-
-    #[test]
-    fn test_touch_recent_prompt_dedup_cap_and_blank() {
-        let mut p = Prefs::default();
-        p.touch_recent_prompt("   ");
-        assert!(p.recent_ai_prompts.is_empty(), "blank prompt is ignored");
-        for i in 0..15 {
-            p.touch_recent_prompt(&format!("prompt {}", i));
-        }
-        assert_eq!(p.recent_ai_prompts.len(), MAX_RECENT_PROMPTS);
-        // Most recent is at the head.
-        assert_eq!(p.recent_ai_prompts[0], "prompt 14");
-        // Re-touching an existing prompt promotes it without duplicating.
-        p.touch_recent_prompt("prompt 10");
-        assert_eq!(p.recent_ai_prompts.len(), MAX_RECENT_PROMPTS);
-        assert_eq!(p.recent_ai_prompts[0], "prompt 10");
     }
 
     #[test]

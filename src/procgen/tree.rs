@@ -14,7 +14,7 @@ use rand::{Rng, SeedableRng};
 use crate::core::Voxel;
 
 use super::{
-    GenError, GenResult, GeneratorBackend, GeneratorCategory, GeneratorMeta,
+    GenError, GenResult, GeneratorCategory, GeneratorMeta,
     VoxelGenerator, VoxelPatch,
 };
 
@@ -220,7 +220,6 @@ impl VoxelGenerator for LSystemTree {
             name: "L-System Tree",
             description: "Plant grown via L-system rewrite + 3D turtle",
             category: GeneratorCategory::Vegetation,
-            backend: GeneratorBackend::Algorithmic,
         }
     }
 

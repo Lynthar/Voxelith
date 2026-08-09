@@ -25,6 +25,10 @@ pub enum UiAction {
     /// Raised by the disk-conflict strip, behind its confirm dialog.
     ReloadFromDisk,
     ImportVox,
+    /// Voxelize a glTF mesh into the open document. Adds rather than
+    /// replaces, and is undoable, so unlike `ImportVox` it needs no
+    /// unsaved-changes guard.
+    ImportGlb,
     ExportVox,
     ExportObj,
     /// MC smoothed OBJ, no blur — preserves thin features
@@ -109,20 +113,6 @@ pub enum UiAction {
     RecoverAutosave,
     /// Discard the on-disk autosave and keep the fresh default scene.
     DiscardAutosave,
-
-    // AI operations
-    /// Submit a new AI generation job using the current `ai_prompt` /
-    /// `ai_resolution` from `App`. No-op when one is already running.
-    AiGenerate,
-    /// Cooperative cancel of the active job; the worker will emit a
-    /// terminal `Failed { "Cancelled" }` event before stopping.
-    AiCancel,
-    /// Save the carried API key to the OS keychain. The key is moved
-    /// out of the UI state immediately after saving so it doesn't
-    /// linger in memory longer than necessary.
-    AiSaveKey(String),
-    /// Remove the stored API key.
-    AiClearKey,
 
     // --- Agent bridge ---
     /// Start serving MCP on the given loopback port. `0` asks the OS for
@@ -277,13 +267,6 @@ pub struct UiState {
 
     // Status message for user feedback
     pub status_message: Option<(String, std::time::Instant)>,
-
-    /// Buffer for the API key entry box in the AI panel. Held in UI
-    /// state (not `App`) so it never crosses the main-thread boundary
-    /// into a worker — once the user clicks "Save", the value is
-    /// moved out into a `UiAction::AiSaveKey(_)` and the buffer is
-    /// cleared.
-    pub ai_key_input: String,
 
     /// Port the Agent panel will ask for when the bridge is started.
     /// A string rather than a `u16` because it is a text field, and an

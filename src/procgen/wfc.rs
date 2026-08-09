@@ -24,7 +24,7 @@ use rand::{Rng, SeedableRng};
 use crate::core::Voxel;
 
 use super::{
-    GenError, GenResult, GeneratorBackend, GeneratorCategory, GeneratorMeta,
+    GenError, GenResult, GeneratorCategory, GeneratorMeta,
     VoxelGenerator, VoxelPatch,
 };
 
@@ -564,7 +564,6 @@ impl VoxelGenerator for WfcGenerator {
             name: "WFC Tile Layout",
             description: "Wave Function Collapse on a tile grid",
             category: GeneratorCategory::Building,
-            backend: GeneratorBackend::Algorithmic,
         }
     }
 

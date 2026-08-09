@@ -412,7 +412,6 @@ impl ApplicationHandler for App {
                 }
 
                 self.tick_preview();
-                self.tick_ai_job();
                 // Before the mesh rebuild below, so a batch that lands
                 // this frame is on screen in the same frame the agent is
                 // told it landed.

@@ -7,7 +7,7 @@ use noise::{NoiseFn, Perlin};
 use crate::core::Voxel;
 
 use super::{
-    GenError, GenResult, GeneratorBackend, GeneratorCategory, GeneratorMeta,
+    GenError, GenResult, GeneratorCategory, GeneratorMeta,
     VoxelGenerator, VoxelPatch,
 };
 
@@ -69,7 +69,6 @@ impl VoxelGenerator for PerlinTerrain {
             name: "Perlin Terrain",
             description: "Heightmap terrain via fractal Perlin noise",
             category: GeneratorCategory::Terrain,
-            backend: GeneratorBackend::Algorithmic,
         }
     }
 

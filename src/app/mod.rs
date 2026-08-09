@@ -14,13 +14,13 @@
 //! - `handler`  — winit `ApplicationHandler`
 
 mod agent_bridge;
-mod ai_actions;
 mod file_ops;
 mod handler;
 mod hud;
 mod input;
 mod preview;
 mod render;
+mod runtime;
 mod shapes;
 mod ui_actions;
 
@@ -35,7 +35,6 @@ use winit::{keyboard::ModifiersState, window::Window};
 use std::collections::HashSet;
 
 use voxelith::{
-    ai::{AiJobState, AiProvider, AiRuntime, FalHunyuanProvider, JobEvent, JobHandle},
     core::{Voxel, World},
     editor::{
         box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Clipboard, Editor,
@@ -231,28 +230,10 @@ pub struct App {
     prefs: Prefs,
 
     /// Tokio multi-thread runtime running on its own background OS
-    /// thread. AI jobs run there to keep the winit main thread free.
-    /// Lives the entire app lifetime; no shutdown path needed.
-    pub(super) ai_runtime: AiRuntime,
-    /// Active provider — `FalHunyuanProvider` (fal.ai Hunyuan3D).
-    /// Behind the trait so the job pipeline stays provider-agnostic;
-    /// `MockProvider` still implements it but nothing constructs one.
-    pub(super) ai_provider: Arc<dyn AiProvider>,
-    /// Latest job state. Mirrored into `Ui` each frame so the panel
-    /// can render it. Mutated only by `tick_ai_job` (drained from
-    /// the channel) and the action dispatcher (UI button → submit /
-    /// cancel).
-    pub(super) ai_job: AiJobState,
-    /// Receiver half of the worker → main-thread event channel. Set
-    /// when a job is in flight, cleared on terminal event.
-    pub(super) ai_event_rx: Option<std::sync::mpsc::Receiver<JobEvent>>,
-    /// Cancel token for the current job. Held alongside `ai_event_rx`;
-    /// dropping it doesn't cancel — the worker checks the AtomicBool
-    /// at safe points (see `MockProvider`).
-    pub(super) ai_handle: Option<JobHandle>,
-    /// Cached "is an API key in the keychain?" so the UI doesn't hit
-    /// the keyring every frame. Refreshed by save / clear actions.
-    pub(super) ai_has_key: bool,
+    /// thread, so the winit main thread never awaits. The agent
+    /// bridge's HTTP server runs there. Lives the entire app lifetime;
+    /// no shutdown path needed.
+    pub(super) async_runtime: runtime::AsyncRuntime,
 
     /// Voxel data changed since the last time the user's *own* file was
     /// written. Set from `rebuild_all_meshes` (dirty chunks ⟺ a voxel
@@ -291,7 +272,7 @@ pub struct App {
     pub(super) exit_requested: bool,
 
     /// World-space AABB (inclusive cell coords) of the most recent
-    /// procgen / graph / AI generation, powering the "Frame Generated"
+    /// procgen / graph generation or GLB import, powering the "Frame Generated"
     /// camera action. `None` until something is generated this session;
     /// set at each generation chokepoint. Not cleared on undo — framing
     /// stale bounds just frames where the geometry was, and the action
@@ -389,7 +370,6 @@ impl App {
             );
         }
         ui.recent_files = prefs.recent_files.clone();
-        ui.recent_ai_prompts = prefs.recent_ai_prompts.clone();
 
         let last_grid_size = ui.viewport.grid_size;
         let last_grid_spacing = ui.viewport.grid_spacing;
@@ -428,12 +408,7 @@ impl App {
             stroke_plane: None,
             clipboard: None,
             prefs,
-            ai_runtime: AiRuntime::new(),
-            ai_provider: Arc::new(FalHunyuanProvider::new()),
-            ai_job: AiJobState::Idle,
-            ai_event_rx: None,
-            ai_handle: None,
-            ai_has_key: voxelith::ai::has_api_key("fal_ai"),
+            async_runtime: runtime::AsyncRuntime::new(),
             unsaved_changes: false,
             autosave_pending: false,
             last_autosave: Instant::now(),
@@ -474,14 +449,6 @@ impl App {
     pub(super) fn touch_recent(&mut self, path: &std::path::Path) {
         self.prefs.touch_recent(path);
         self.ui.recent_files = self.prefs.recent_files.clone();
-    }
-
-    /// Push a prompt to the AI-prompts MRU and mirror it to the UI so
-    /// the AI panel's History dropdown reflects it next frame. Mirrors
-    /// `touch_recent` for the recent-files list.
-    pub(super) fn touch_recent_prompt(&mut self, prompt: &str) {
-        self.prefs.touch_recent_prompt(prompt);
-        self.ui.recent_ai_prompts = self.prefs.recent_ai_prompts.clone();
     }
 
     /// Snapshot live UI/editor/window state into `self.prefs`, then
@@ -1015,7 +982,7 @@ impl App {
 
         // Dirty chunks this frame ⟺ voxel data changed (a write marks its
         // chunk dirty; boundary writes also mark neighbors). This is the
-        // single chokepoint every edit / generation / AI / paste funnels
+        // single chokepoint every edit / generation / import / paste funnels
         // through, so it's where we flag the document as modified. The
         // load / new / initial-scene paths clear the flags again after
         // their own rebuild.

@@ -1,7 +1,7 @@
 //! The editor's half of the agent bridge: serve an MCP client from the
 //! world the user is looking at.
 //!
-//! Shape is `tick_ai_job`'s — a background task produces messages, the
+//! Shape is `tick_preview`'s — a background task produces messages, the
 //! frame loop drains them and does the mutating — with one addition: an
 //! agent's tool call is waiting for an answer, so every message carries
 //! a line back. The world, the selection and the undo stack never leave
@@ -163,7 +163,7 @@ impl App {
         let address = listener.local_addr().unwrap_or(address);
 
         let (handle, receiver) = bridge::channel();
-        let task = self.ai_runtime.handle().spawn(async move {
+        let task = self.async_runtime.handle().spawn(async move {
             if let Err(e) = bridge::serve_http_bridged(handle, listener).await {
                 // The socket is already bound by the time we get here, so
                 // this is the transport itself failing rather than a port
@@ -279,7 +279,7 @@ impl App {
     }
 
     /// The panel's per-frame snapshot, mirrored across the UI boundary
-    /// the same way `ai_job` is.
+    /// so the panel reads it off `Ui` without borrowing `App` back.
     pub(super) fn agent_view(&self) -> AgentView {
         AgentView {
             url: self.agent.server.as_ref().map(RunningBridge::url),
