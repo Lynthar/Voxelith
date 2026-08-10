@@ -1,8 +1,10 @@
 /target
 
 
-# ai
-.claude
+# Workspace-local agent settings. The modeling skill under .claude/skills/
+# is deliberately tracked: it ships with the tool, so a fresh clone has it.
+.claude/*
+!.claude/skills/
 CLAUDE.md
 # Eval run artifacts: the cases are the asset, a given run is not.
 /evals/runs
