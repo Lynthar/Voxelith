@@ -18,12 +18,51 @@
 // Set _PrimaryColor/_SecondaryColor per faction at runtime (e.g. via
 // MaterialPropertyBlock) to recolor the same mesh for different teams.
 //
-// IMPORTANT (§3.2 open risk): glTFast prunes UV channels that no material
-// samples. This shader SAMPLES TEXCOORD_0, but it must be assigned to the
-// mesh *before/while* importing (set it as the import material, or use a
-// glTFast import callback) so the channel is kept. If the zone arrives as
-// all-zero, the UV0 channel was pruned — see roadmap §3.2 for the Blender-
-// bridge fallback. Verified working as of: <fill in glTFast version>.
+// Scene layout: a plain export puts the mesh and socket nodes at the scene
+// root. A *placed* export (`voxelith bake` with any non-identity pivot,
+// up-axis or unit-scale) wraps them in one extra node named
+// "Voxelith_root" carrying the placement transform; children keep their
+// own transforms and vertex data is never rewritten, so an identity
+// placement is byte-identical to a plain export. Three consequences:
+//   - Instantiate the whole scene, not a hand-picked node. Reading "the
+//     first mesh node" skips the wrapper and puts the asset at the wrong
+//     scale and origin. glTFast, Godot and Blender all apply it when the
+//     scene is imported as a whole.
+//   - A socket's world position comes from the full parent chain, wrapper
+//     included. Compose ancestor transforms (or read the engine's world
+//     matrix); a socket's local translation is not model space.
+//   - The wrapper's presence is not a stable signal — it appears only when
+//     a placement was requested. Key on the name if you must find it;
+//     "Voxelith_root" is reserved and never used for geometry or sockets.
+//
+// IMPORTANT — the one unverified link in this contract: glTFast prunes UV
+// channels that no material samples, and the tint zone rides in TEXCOORD_0
+// precisely because glTFast also drops custom attributes like _TINTZONE.
+// This shader SAMPLES TEXCOORD_0, but it must be assigned to the mesh
+// *before/while* importing (set it as the import material, or use a
+// glTFast import callback) so the channel survives. If every zone arrives
+// as 0, UV0 was pruned.
+//
+// Verifying it (needs a running Unity editor, so it cannot be automated):
+//   1. In Voxelith, place voxels in tint zone 1 and zone 2, save a .vxlt,
+//      and bake it headless with "optimize": "none" — see
+//      docs/reference/bake-spec.example.json. Keeping gltfpack out of the
+//      run stops a compression bug from being mistaken for an import bug.
+//   2. Import the .glb into a Unity 6 URP project with
+//      com.unity.cloud.gltfast installed.
+//   3. Assign this shader to the imported submeshes; set _PrimaryColor red
+//      and _SecondaryColor blue.
+//   4. PASS: zone-1 voxels render red, zone-2 blue — the mirror survived.
+//      Record the glTFast version below.
+//   5. FAIL (all one colour): UV0 was pruned. In preference order — assign
+//      the material *at import* (import material remap, or an
+//      IMaterialGenerator callback) so a material samples UV0 and the
+//      channel is kept; or a thin import callback copying UV0 into a
+//      second vertex-colour channel before pruning; or route through
+//      Blender, which preserves all attributes.
+// Until step 4 passes in your glTFast version, treat per-zone tint as
+// unproven — whole-model _BaseColor tint always works.
+// Verified working as of: <fill in glTFast version>.
 //
 // Targets URP 12–17 (Unity 2022 LTS .. Unity 6). Stable URP HLSL APIs only.
 

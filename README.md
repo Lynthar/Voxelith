@@ -79,7 +79,10 @@ container or CI runner that has no GPU. Add `--features mcp` to keep the
 plain `--no-default-features` build doesn't have it.
 Run `voxelith exec --help` for the flags and `voxelith generators` for
 the generator catalog; the ops schema itself is documented on the types
-in `src/agent_ops/schema.rs`.
+in `src/agent_ops/schema.rs`. If you are pointing an agent at this repo,
+`.claude/skills/voxelith-modeling/` is the guide it should read — which
+of the three paths to drive, the whole op vocabulary, and the modeling
+technique that keeps a first attempt from being wrong.
 
 ## Keyboard Shortcuts
 

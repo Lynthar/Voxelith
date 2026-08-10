@@ -13,8 +13,9 @@
 //! 1. load `.vxlt` → `World` + `EditorState` ([`crate::io::load_world_with_state`]);
 //! 2. export `.glb` (greedy, or Marching Cubes when `smoothing` is set)
 //!    with a deterministic placement transform (pivot / up-axis /
-//!    unit-scale, §3.5);
-//! 3. optional geometry compression via `gltfpack` (meshopt, §3.4);
+//!    unit-scale), applied as a lossless root node so vertex data is
+//!    never rewritten;
+//! 3. optional geometry compression via `gltfpack` (meshopt);
 //! 4. write a per-item JSON report next to the output.
 //!
 //! ## Spec schema
@@ -101,7 +102,8 @@ pub struct Settings {
     pub optimize: Option<String>,
     /// Escape hatch: explicit `gltfpack` args replacing the safe default
     /// set. Use to enable quantization when you don't rely on faction
-    /// tint (quantizing the zone UV can corrupt it — see §3.4).
+    /// tint: quantizing `TEXCOORD_0` can shift the integer tint zone it
+    /// carries, which corrupts faction recolor (see [`run_gltfpack`]).
     pub optimize_args: Option<Vec<String>>,
 }
 
@@ -686,7 +688,7 @@ fn write_item_report(out: &Path, report: &ItemReport) {
 }
 
 // ===========================================================================
-// Optimize (gltfpack / meshopt, §3.4)
+// Optimize (gltfpack / meshopt)
 // ===========================================================================
 
 #[derive(Debug)]
@@ -711,7 +713,18 @@ impl std::fmt::Display for OptimizeError {
 
 /// Compress `glb` in place via meshoptimizer's `gltfpack`.
 ///
-/// Default args are correctness-first for the Voxelith format (§3.4):
+/// A Voxelith `.glb` is vertex-coloured and carries two channels no
+/// material samples, which rules most of a stock glTF optimization chain
+/// out: **texture compression** has nothing to compress (there is no
+/// `baseColorTexture` — the only "UV" is the tint-zone mirror, not a
+/// sampled texture); **Draco** quantizes attributes, and quantizing that
+/// UV shifts the integer zone index; and a naive **prune** deletes
+/// `COLOR_0` / `_TINTZONE` / `TEXCOORD_0` precisely because nothing
+/// samples them. What is left — and what is actually worth doing here —
+/// is meshopt geometry compression. The win is transmission and GPU
+/// upload weight, never triangle count: greedy meshing already set that.
+///
+/// Default args are correctness-first for this format:
 /// - `-cc` : `EXT_meshopt_compression` — the main win (vertex-cache
 ///   reorder + vertex/index buffer compression).
 /// - `-noq`: no quantization — protects the **integer tint-zone** carried

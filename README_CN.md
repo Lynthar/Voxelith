@@ -77,7 +77,9 @@ cargo run --release -- --agent-port 8737
 里面保留 `mcp` 子命令要加 `--features mcp`:它跟着自己的 feature 走,
 纯 `--no-default-features` 的构建里没有这个子命令。参数见 `voxelith exec --help`,生成器目录见
 `voxelith generators`,ops 协议本身的说明写在 `src/agent_ops/schema.rs`
-的类型文档上。
+的类型文档上。若要让 AI agent 来驱动这个仓库,该读的是
+`.claude/skills/voxelith-modeling/`:三条驱动路径怎么选、完整 op 词表,
+以及那些能让第一次尝试就不出错的建模技法。
 
 ## 快捷键
 

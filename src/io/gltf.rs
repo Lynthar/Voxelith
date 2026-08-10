@@ -501,7 +501,7 @@ fn write_glb_groups(
         }));
     }
 
-    // Deterministic placement (§3.5): for a non-identity transform, wrap
+    // Deterministic placement: for a non-identity transform, wrap
     // every scene root (mesh + sockets) under one parent node carrying the
     // pivot offset, up-axis rotation, and uniform scale, so geometry and
     // sockets move together and the asset's local origin becomes the chosen
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_export_chunk_alignment() {
-        // Spec §3.4: every chunk's length is a multiple of 4. Confirm
+        // glTF 2.0 spec §3.4: every chunk's length is a multiple of 4. Confirm
         // by checking the JSON chunk length (recorded in the chunk
         // header) is 4-aligned.
         let mut world = World::new();
