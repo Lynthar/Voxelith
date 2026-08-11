@@ -327,7 +327,21 @@ impl From<GraphError> for GenError {
 pub const MAX_GRAPH_NODES: usize = 64;
 
 /// A pipeline of generator / transform / combine nodes.
+///
+/// Struct-level `#[serde(default)]`, not just the field-level ones
+/// below: this is document data embedded in the `.vxlt`, so the next
+/// field added here without its own default would make every project
+/// file already on disk fail to load — not a workspace setting the user
+/// can rebuild, but the model they made. The same reason `prefs.ron` and
+/// `EditorState` carry it.
+///
+/// It costs one refusal an agent used to get: a `graph` op sending `{}`
+/// now reads as the empty graph instead of "missing field `nodes`".
+/// That input was already legal spelled `{"nodes": []}`, a misspelled
+/// `nodes` is still caught by `agent_ops`' unknown-key check, and
+/// evaluating an empty graph still fails cleanly with `NoOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PipelineGraph {
     pub nodes: Vec<GraphNode>,
     /// Next id to hand out. Monotonic per graph instance — ids are
@@ -759,8 +773,17 @@ impl PipelineGraph {
 }
 
 /// Set or clear a specific input slot, dispatching by node kind. Slot
-/// 0/1 distinguishes Combine's two inputs; single-input nodes
-/// (`Translate`/`Filter`/`Output`) ignore `slot`.
+/// 0/1 distinguishes `Combine`'s and `Mask`'s two inputs.
+///
+/// **This does not validate `slot`, and it isn't the place to.** Both
+/// call sites are inside [`PipelineGraph::set_input`], which rejects an
+/// out-of-range slot through `get_input` before reaching here (and the
+/// second call is the revert, re-using a slot already accepted). So the
+/// arms below that appear to shrug at a bad slot — the single-input
+/// kinds ignoring it, the `_ => {}` on the two-input kinds — are
+/// unreachable, *not* the graph quietly accepting "slot 7 means slot 0".
+/// That was the old behavior; `out_of_range_slot_reports_invalid_slot_
+/// not_a_missing_node` pins the current one.
 fn apply_input_slot(kind: &mut NodeKind, slot: usize, new_input: Option<NodeId>) {
     match kind {
         NodeKind::Translate { input, .. }
@@ -1127,6 +1150,17 @@ mod tests {
         ]}"#;
         let g: PipelineGraph = serde_json::from_str(json).unwrap();
         assert!(matches!(g.validate(), Err(GraphError::DuplicateId(0))));
+    }
+
+    #[test]
+    fn a_graph_missing_every_field_still_parses() {
+        // The struct-level `#[serde(default)]` this pins is what keeps a
+        // future added field from making every `.vxlt` already on disk
+        // unopenable. Deleting the attribute fails here, not months later
+        // on a user's project.
+        let g: PipelineGraph = serde_json::from_str("{}").expect("an empty object is a graph");
+        assert_eq!(g, PipelineGraph::default());
+        assert!(matches!(g.evaluate(), Err(e) if e.to_string().contains("Output")));
     }
 
     #[test]

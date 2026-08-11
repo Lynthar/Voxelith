@@ -225,4 +225,38 @@ mod tests {
         assert_eq!(ao_to_f32(0), 0.0);
         assert_eq!(ao_to_f32(3), 1.0);
     }
+
+    #[test]
+    fn face_vertex_signs_walk_all_four_corners_with_opposite_diagonals() {
+        // Two properties, both load-bearing and neither obvious from
+        // reading six rows of sign pairs:
+        //
+        // 1. every face visits all four corners of {-1,+1}² — a typo
+        //    that repeats one corner silently drops a quad corner onto
+        //    another, which reads as a sliver rather than an error;
+        // 2. vertices 0/2 and 1/3 are opposite corners. That is the
+        //    diagonal `should_flip_diagonal` picks between, so if it
+        //    stopped holding the AO flip would choose the wrong split
+        //    and interpolate occlusion across the wrong pair.
+        for face in Face::ALL {
+            let signs = face_vertex_signs(face);
+            let mut corners = signs;
+            corners.sort_unstable();
+            assert_eq!(
+                corners,
+                [(-1, -1), (-1, 1), (1, -1), (1, 1)],
+                "{face:?}: the four vertices must be the four corners"
+            );
+            assert_eq!(
+                (signs[0].0 + signs[2].0, signs[0].1 + signs[2].1),
+                (0, 0),
+                "{face:?}: vertices 0 and 2 must be opposite corners"
+            );
+            assert_eq!(
+                (signs[1].0 + signs[3].0, signs[1].1 + signs[3].1),
+                (0, 0),
+                "{face:?}: vertices 1 and 3 must be opposite corners"
+            );
+        }
+    }
 }

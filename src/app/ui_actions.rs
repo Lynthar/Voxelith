@@ -94,26 +94,12 @@ impl App {
                 UiAction::FrameAll => self.frame_all(),
                 UiAction::FrameSelected => self.frame_selected(),
                 UiAction::FrameGenerated => self.frame_generated(),
+                // Recovery replaces the scene, so it goes through the
+                // unsaved-changes guard like New / Open — the prompt it
+                // came from is non-modal, and edits made behind it are
+                // real work the user never agreed to lose.
                 UiAction::RecoverAutosave => {
-                    if let Some(path) = Self::autosave_path() {
-                        if self.recover_from_autosave(&path) {
-                            // Recovered work has no file of its own
-                            // (`project_path` stays None), so relative to
-                            // anything on disk it *is* unsaved — say so,
-                            // or the guard would wave a clean exit
-                            // through and the exit would then delete the
-                            // autosave that held the only copy.
-                            self.unsaved_changes = true;
-                            self.autosave_pending = false;
-                            self.last_autosave = std::time::Instant::now();
-                        } else {
-                            // Corrupt / unreadable: drop it, keep the
-                            // default scene already on screen.
-                            self.delete_autosave();
-                            self.ui
-                                .set_status("Couldn't recover autosave — starting fresh");
-                        }
-                    }
+                    self.guard_then(PendingAction::RecoverAutosave);
                 }
                 UiAction::DiscardAutosave => {
                     self.delete_autosave();
@@ -153,7 +139,7 @@ impl App {
                     // out of the Save As picker — either way, don't go
                     // ahead and destroy the scene.
                     if self.unsaved_changes {
-                        self.pending_guarded = None;
+                        self.drop_pending_guarded();
                         self.ui.set_status("Not saved — your work is still open");
                     } else if let Some(action) = self.pending_guarded.take() {
                         self.run_guarded(action);
@@ -165,7 +151,7 @@ impl App {
                     }
                 }
                 UiAction::UnsavedCancel => {
-                    self.pending_guarded = None;
+                    self.drop_pending_guarded();
                 }
             }
         }

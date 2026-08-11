@@ -186,14 +186,19 @@ pub fn cylinder_voxels(
     for z in z0..=z1 {
         for y in y0..=y1 {
             for x in x0..=x1 {
-                // Always at least 1.0 so a 1-cell-thick cross-section
-                // doesn't divide by zero — every cell counts as inside.
+                // No zero-divide guard on the radii, and none is needed:
+                // the AABB was normalized above, so every extent is at
+                // least 1 cell and every radius therefore at least 0.5.
+                // A `.max(0.5)` used to sit here reading as if that
+                // weren't guaranteed — it could never fire, and a dead
+                // guard is worse than none because it invites the next
+                // reader to widen it instead of checking the invariant.
                 let inside = match axis {
                     0 => {
                         let cy = (y0 as f32 + y1 as f32 + 1.0) * 0.5;
                         let cz = (z0 as f32 + z1 as f32 + 1.0) * 0.5;
-                        let ry = (((y1 - y0) as f32 + 1.0) * 0.5).max(0.5);
-                        let rz = (((z1 - z0) as f32 + 1.0) * 0.5).max(0.5);
+                        let ry = ((y1 - y0) as f32 + 1.0) * 0.5;
+                        let rz = ((z1 - z0) as f32 + 1.0) * 0.5;
                         let dy = (y as f32 + 0.5 - cy) / ry;
                         let dz = (z as f32 + 0.5 - cz) / rz;
                         dy * dy + dz * dz <= 1.0
@@ -201,8 +206,8 @@ pub fn cylinder_voxels(
                     1 => {
                         let cx = (x0 as f32 + x1 as f32 + 1.0) * 0.5;
                         let cz = (z0 as f32 + z1 as f32 + 1.0) * 0.5;
-                        let rx = (((x1 - x0) as f32 + 1.0) * 0.5).max(0.5);
-                        let rz = (((z1 - z0) as f32 + 1.0) * 0.5).max(0.5);
+                        let rx = ((x1 - x0) as f32 + 1.0) * 0.5;
+                        let rz = ((z1 - z0) as f32 + 1.0) * 0.5;
                         let dx = (x as f32 + 0.5 - cx) / rx;
                         let dz = (z as f32 + 0.5 - cz) / rz;
                         dx * dx + dz * dz <= 1.0
@@ -210,8 +215,8 @@ pub fn cylinder_voxels(
                     _ => {
                         let cx = (x0 as f32 + x1 as f32 + 1.0) * 0.5;
                         let cy = (y0 as f32 + y1 as f32 + 1.0) * 0.5;
-                        let rx = (((x1 - x0) as f32 + 1.0) * 0.5).max(0.5);
-                        let ry = (((y1 - y0) as f32 + 1.0) * 0.5).max(0.5);
+                        let rx = ((x1 - x0) as f32 + 1.0) * 0.5;
+                        let ry = ((y1 - y0) as f32 + 1.0) * 0.5;
                         let dx = (x as f32 + 0.5 - cx) / rx;
                         let dy = (y as f32 + 0.5 - cy) / ry;
                         dx * dx + dy * dy <= 1.0
@@ -339,6 +344,12 @@ mod tests {
         for y in 0..=5 {
             assert!(v.contains(&(0, y, 0)), "missing y={}", y);
         }
+
+        // The extreme of the same case: a single cell, every extent 1.
+        // Normalizing the AABB is what keeps each radius at 0.5 here
+        // rather than 0 — the invariant that lets `cylinder_voxels`
+        // carry no zero-divide guard at all.
+        assert_eq!(cylinder_voxels((3, 3, 3), (3, 3, 3), None), vec![(3, 3, 3)]);
     }
 
     #[test]

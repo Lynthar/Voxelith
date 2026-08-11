@@ -64,6 +64,34 @@ pub(crate) fn neighbor_arcs(world: &World, chunk_pos: ChunkPos) -> NeighborArcs 
 /// Read-lock all 26 neighbor chunks. Returns `None` per slot for
 /// missing chunks. Caller must keep `arcs` alive for the guards'
 /// borrow.
+///
+/// # Every chunk write must stay on the thread that drives meshing
+///
+/// This is hold-and-wait across 27 locks in no global order: the caller
+/// already holds the center chunk's read guard, and these 26 are taken
+/// on top of it while meshers run in parallel on the rayon pool.
+///
+/// That is safe today for one reason only — the sole writer is the
+/// thread that calls `App::rebuild_all_meshes`, and its
+/// `par_iter().collect()` blocks until every worker has finished, so no
+/// write can be *queued* while any of these guards is alive.
+///
+/// It matters because `parking_lot::RwLock` is writer-preferring:
+/// "readers trying to acquire the lock will block even if the lock is
+/// unlocked when there are writers waiting". Move a write path off this
+/// thread — a background autosave, an agent patch applied outside the
+/// frame loop — and the hold-and-wait becomes deadlock-capable:
+///
+/// - two workers meshing chunks that are Moore-neighbors of each other,
+///   each holding its own center read guard and blocking on the other's
+///   behind a queued writer; or
+/// - one writer holding chunk A's write guard while reaching for B,
+///   against a worker holding B and reaching for A.
+///
+/// Neither needs a writer to be doing anything unusual. `World::set_voxel`
+/// happens to hold only one write guard at a time (both are statement-
+/// level temporaries), which is what rules out the second shape *for the
+/// current writer* — not a property anything enforces.
 pub(crate) fn lock_neighbors<'a>(arcs: &'a NeighborArcs) -> NeighborGuards<'a> {
     std::array::from_fn(|i| arcs[i].as_ref().map(|a| a.read()))
 }

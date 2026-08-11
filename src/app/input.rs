@@ -8,8 +8,8 @@ use voxelith::editor::{
     box_voxels, build_clear_changes, build_move_changes, build_paste_changes,
     copy_selection_to_clipboard, cylinder_voxels, eyedrop, flood_fill, flood_fill_multi,
     line_voxels, mirror_selection_changes, rotate_selection_changes, sphere_voxels, Axis,
-    BrushTool, Command, EditorTool, Quarter, Ray, RaycastHit, Selection, Tool, ToolContext,
-    VoxelChange, VoxelRaycast,
+    BrushTool, Command, EditorTool, FillOutcome, Quarter, Ray, RaycastHit, Selection, Tool,
+    ToolContext, VoxelChange, VoxelRaycast,
 };
 
 use super::{
@@ -354,7 +354,7 @@ impl App {
                     return;
                 }
                 let symmetry = self.editor.symmetry;
-                if symmetry.any() {
+                let outcome = if symmetry.any() {
                     // Combine all mirrored fills into one undo entry —
                     // a single click should be a single undo, even at
                     // 8-fold symmetry.
@@ -365,7 +365,7 @@ impl App {
                         &starts,
                         self.editor.brush_color,
                         10000,
-                    );
+                    )
                 } else {
                     flood_fill(
                         &mut self.world,
@@ -373,8 +373,9 @@ impl App {
                         hit.voxel_pos,
                         self.editor.brush_color,
                         10000,
-                    );
-                }
+                    )
+                };
+                self.report_fill(outcome);
             }
             Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder => {
                 // Shape press is two-phase:
@@ -628,6 +629,28 @@ impl App {
         } else {
             self.ui.set_status(format!("{} ({} cells)", label, count));
         }
+    }
+
+    /// Report what a Fill click did, the way delete / cut / rotate
+    /// already report. Fill was the one destructive tool that said
+    /// nothing at all, so a click that hit a cap — or that changed
+    /// nothing because the region was already the brush color — was
+    /// indistinguishable from a click that missed.
+    fn report_fill(&mut self, outcome: FillOutcome) {
+        let msg = if outcome.truncated {
+            // Deliberately ahead of the zero case: a fill that stopped
+            // at a cap has *more region out there*, which "already that
+            // color" would flatly contradict.
+            format!(
+                "Filled {} voxels (stopped at the fill limit)",
+                outcome.written
+            )
+        } else if outcome.written == 0 {
+            "Filled 0 voxels (already that color)".to_string()
+        } else {
+            format!("Filled {} voxels", outcome.written)
+        };
+        self.ui.set_status(msg);
     }
 
     /// Mirror the active selection's contents across the midplane

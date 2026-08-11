@@ -26,7 +26,7 @@ pub use shapes::{box_voxels, cylinder_voxels, line_voxels, sphere_voxels};
 pub use socket::{next_socket_name, Socket};
 pub use tools::{
     compute_flood_fill_changes, eyedrop, flood_fill, flood_fill_multi, BrushTool, EditorTool,
-    Tool, ToolContext,
+    FillOutcome, Tool, ToolContext,
 };
 pub use transform::{
     build_remap_changes, mirror_pos, mirror_selection_changes, rotate_pos,

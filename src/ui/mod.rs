@@ -92,7 +92,13 @@ impl Default for GeneratorChoice {
 /// the second for the pipeline graph's output. Both share the renderer's
 /// preview slot; when both are on, the graph wins on the slot since
 /// its tick runs second.
+/// Struct-level `#[serde(default)]`, not just field-level: this rides in
+/// `prefs.ron`, and without it the *next* field added here without its
+/// own default makes every existing prefs file fail to parse — which
+/// `Prefs::load` handles by logging a warning and silently discarding
+/// the user's whole workspace (window, palette, MRU).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ProcgenSettings {
     pub selected: GeneratorChoice,
     pub terrain: PerlinTerrain,
@@ -1116,6 +1122,13 @@ impl Ui {
                     }
                     ui.separator();
                     if ui.button("Procedural Terrain...").clicked() {
+                        // Select the generator the menu item names, not
+                        // just the panel that hosts it. Opening the
+                        // panel alone left it on whatever was last used
+                        // — click "Procedural Terrain" and get the WFC
+                        // or Tree parameters, which reads as the wrong
+                        // panel rather than a stale selection.
+                        self.procgen.selected = GeneratorChoice::Terrain;
                         self.state.panels.show_procgen = true;
                         ui.close_menu();
                     }
@@ -3460,5 +3473,18 @@ mod graph_layout_tests {
         let (canvas, sidebar) = graph_split_widths(520.0, 8.0);
         assert!(canvas >= GRAPH_CANVAS_MIN_W, "canvas collapsed to {canvas}");
         assert!(sidebar >= GRAPH_SIDEBAR_MIN_W, "sidebar collapsed to {sidebar}");
+    }
+
+    #[test]
+    fn procgen_settings_parse_with_fields_missing() {
+        // Read in the format it actually ships in. Without the
+        // struct-level `#[serde(default)]`, adding one field here
+        // without its own default makes every existing `prefs.ron`
+        // fail to parse — and `Prefs::load` answers a parse failure by
+        // discarding the user's whole workspace.
+        let s: ProcgenSettings =
+            ron::from_str("(preview_enabled: true)").expect("a partial struct is still settings");
+        assert!(s.preview_enabled);
+        assert!(!s.graph_preview_enabled, "the rest fall back to Default");
     }
 }

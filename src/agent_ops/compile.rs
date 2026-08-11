@@ -1483,6 +1483,29 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_nodes_key_is_still_refused() {
+        // `PipelineGraph` carries a struct-level `#[serde(default)]` so
+        // that a field added to it later can't lock users out of the
+        // `.vxlt` files they already have. The price is that serde no
+        // longer refuses a graph object with no `nodes` at all, which
+        // used to be what caught this typo ("missing field `nodes`").
+        // The protocol's own unknown-key check has to cover it instead.
+        let mut session = AgentSession::new();
+        let error = refuse(
+            &mut session,
+            r#"{"version":1,"ops":[{"op":"graph","graph":{"noeds":[
+                {"id":0,"kind":"output"}
+            ]}}]}"#,
+        );
+        assert_eq!(error.code, ErrorCode::InvalidGraph);
+        assert!(
+            error.message.contains("noeds"),
+            "the message should name the bad key, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
     fn a_malformed_graph_is_refused_with_a_code_the_agent_can_branch_on() {
         let mut session = AgentSession::new();
         let duplicate = refuse(

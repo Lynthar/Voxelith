@@ -291,6 +291,12 @@ pub(super) enum PendingAction {
     ImportVox,
     Exit,
     Generate(GenerateKind),
+    /// Load the crash-recovery autosave over the current scene.
+    ///
+    /// Guarded like the rest because the recovery prompt is *non-modal*:
+    /// the default scene is live behind it, so a few edits made there
+    /// and then a click on Recover used to discard them without a word.
+    RecoverAutosave,
 }
 
 impl PendingAction {
@@ -305,6 +311,7 @@ impl PendingAction {
             PendingAction::ImportVox => "import a .vox model",
             PendingAction::Exit => "quit",
             PendingAction::Generate(_) => "replace the scene",
+            PendingAction::RecoverAutosave => "recover the auto-saved work",
         }
     }
 }
@@ -885,6 +892,21 @@ impl App {
             PendingAction::ImportVox => self.import_vox(),
             PendingAction::Exit => self.exit_requested = true,
             PendingAction::Generate(kind) => self.generate_scene(kind),
+            PendingAction::RecoverAutosave => self.recover_autosave(),
+        }
+    }
+
+    /// Give up on the parked action — the user cancelled, or the save
+    /// they asked for first didn't happen.
+    ///
+    /// Recovery is the one action whose entry point closes behind it:
+    /// `Ui::show_recovery_prompt` clears its own flag the moment it
+    /// dispatches, so dropping the action silently would leave the
+    /// autosave on disk with no way back to it this session — and a
+    /// clean exit later deletes it. Put the prompt back instead.
+    pub(super) fn drop_pending_guarded(&mut self) {
+        if let Some(PendingAction::RecoverAutosave) = self.pending_guarded.take() {
+            self.ui.state.show_recovery_prompt = true;
         }
     }
 

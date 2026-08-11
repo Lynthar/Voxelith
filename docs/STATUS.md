@@ -10,7 +10,7 @@ For a user-facing intro and the full keyboard map, see [`README.md`](../README.m
 
 | | |
 |---|---|
-| **Tests** | 548 (`cargo test`) · 459 headless (`cargo test --no-default-features`) |
+| **Tests** | 555 (`cargo test`) · 465 headless (`cargo test --no-default-features`) |
 | **Build** | `cargo build --release` clean on Windows + Vulkan. Features: `default = ["gui", "mcp"]`; `--no-default-features` builds the headless half with no winit / wgpu / egui / rfd in the tree; `mcp-http` adds the Streamable HTTP transport (and axum), and `gui` turns it on because the editor hosts an MCP server of its own. `tokio` belongs to `mcp` — the servers need it, and so does the editor's background runtime, which `gui` reaches through `mcp-http`; a build with neither has no async anything. CI builds four configurations: default, headless, headless + `mcp`, headless + `mcp-http`. |
 | **Entry** | `src/main.rs` → GUI (`src/app/`, winit `ApplicationHandler`, `--agent-port <P>` to open its agent bridge at launch) or headless `voxelith bake <spec.json>` (`src/bake.rs`) / `exec` / `inspect` / `generators` / `render` (`src/exec.rs`) / `mcp` (`src/mcp/`) / `eval` (`src/eval.rs`) |
 | **Stack** | Rust · wgpu 22 · egui 0.29 · winit 0.30 · rayon · noise · gltf + image (GLB import) · rmcp 3.1 + schemars + tokio (MCP). Full list in `Cargo.toml` |

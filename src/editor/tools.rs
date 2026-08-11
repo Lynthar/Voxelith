@@ -326,44 +326,77 @@ pub fn eyedrop(world: &World, hit: &RaycastHit) -> Option<Voxel> {
     }
 }
 
+/// What a flood fill did.
+///
+/// `truncated` is the half a bare count can't express: a fill that
+/// wrote every cell of its region and one that hit a cap with more to
+/// go report the same number, and Fill is a destructive edit the user
+/// is entitled to be told about. It is set only when a cell that would
+/// *genuinely have been written* was turned away by one of the two
+/// caps — a flood running into air at the radius is the region ending
+/// on its own, not a cap biting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FillOutcome {
+    /// Cells actually written. A cell already equal to the brush voxel
+    /// is traversed (to keep the region connected) but not counted.
+    pub written: usize,
+    /// A cell belonging to the region was left unfilled by the cell
+    /// budget or by [`MAX_FILL_DIST`].
+    pub truncated: bool,
+}
+
+/// The voxel at `pos` if it belongs to the seed's region, else `None`.
+///
+/// Membership is decided by RGBA only: cells that share the seed's
+/// color belong to one region even when their emissive / metallic /
+/// tint-zone bits differ, and each is rewritten with the brush's full
+/// voxel (color + material bits). Matching on the whole 8-byte voxel
+/// used to stop a fill at a same-colored-but-differently-flagged
+/// neighbor and made the result depend on which cell was seeded.
+///
+/// Air is never part of a region, whatever its color. `Voxel::AIR
+/// .color()` is `[0, 0, 0, 0]` — and so is a *solid* voxel built from a
+/// fully-transparent palette entry, which `.vox` import can produce.
+/// Without that guard, filling such a voxel matched every neighboring
+/// air cell and flooded the empty space around it with solid geometry.
+///
+/// One function decides this so the caps' "was anything actually left
+/// out?" test can't drift from the fill's own notion of the region.
+fn region_voxel(world: &World, pos: (i32, i32, i32), target_rgba: [u8; 4]) -> Option<Voxel> {
+    let v = world.get_voxel(pos.0, pos.1, pos.2);
+    (!v.is_air() && v.color() == target_rgba).then_some(v)
+}
+
 /// Compute the changes a flood-fill would make from `start`, without
 /// applying them. Pulled out of `flood_fill` so callers that need to
 /// batch multiple fills into a single undo entry (notably the symmetric
 /// fill path in `app::input::apply_tool`) can collect changes from
 /// several seeds and submit one combined `Command`.
 ///
-/// Region membership is decided by RGBA alone (see the body), so a
-/// cell whose color already equals `new_voxel`'s but whose material
-/// flags or tint zone differ is still rewritten — "same color" is not
-/// "no change" here. The result is empty only when the seed's region
-/// yields no writes at all.
+/// Region membership is decided by RGBA alone (see [`region_voxel`]),
+/// so a cell whose color already equals `new_voxel`'s but whose
+/// material flags or tint zone differ is still rewritten — "same color"
+/// is not "no change" here. The result is empty only when the seed's
+/// region yields no writes at all.
+///
+/// The returned flag is `truncated` in the [`FillOutcome`] sense: a
+/// cell of the region was left out by a cap.
 pub fn compute_flood_fill_changes(
     world: &World,
     start: (i32, i32, i32),
     new_voxel: Voxel,
     max_voxels: usize,
-) -> Vec<VoxelChange> {
-    // Region membership is decided by RGBA only: cells that share the
-    // seed's color belong to one region even when their emissive /
-    // metallic / tint-zone bits differ, and each is rewritten with the
-    // brush's full voxel (color + material bits). Matching on the whole
-    // 8-byte voxel used to stop a fill at a same-colored-but-differently-
-    // flagged neighbor and made the result depend on which cell was seeded.
+) -> (Vec<VoxelChange>, bool) {
     let target_rgba = world.get_voxel(start.0, start.1, start.2).color();
 
     let mut changes = Vec::new();
     let mut visited = HashSet::new();
     let mut stack = vec![start];
+    let mut truncated = false;
 
     while let Some(pos) = stack.pop() {
         if visited.contains(&pos) {
             continue;
-        }
-        // Cap on cells *explored*, not writes emitted: a region already
-        // holding `new_voxel` still needs bounding so the flood can't run
-        // away in an unbounded world.
-        if visited.len() >= max_voxels {
-            break;
         }
         // Spatial cap: skip cells outside the chebyshev radius around
         // `start`. Prevents runaway fills in unbounded worlds where
@@ -373,18 +406,27 @@ pub fn compute_flood_fill_changes(
             || (pos.1 - start.1).abs() > MAX_FILL_DIST
             || (pos.2 - start.2).abs() > MAX_FILL_DIST
         {
+            if region_voxel(world, pos, target_rgba).is_some() {
+                truncated = true;
+            }
             continue;
         }
 
-        let current = world.get_voxel(pos.0, pos.1, pos.2);
-        // Air is never part of a fillable region, whatever its color.
-        // `Voxel::AIR.color()` is `[0, 0, 0, 0]` — and so is a *solid*
-        // voxel built from a fully-transparent palette entry, which
-        // `.vox` import can produce. Without this guard, filling such a
-        // voxel matched every neighboring air cell and flooded the
-        // empty space around it with solid geometry.
-        if current.is_air() || current.color() != target_rgba {
+        let Some(current) = region_voxel(world, pos, target_rgba) else {
             continue;
+        };
+
+        // Cap on cells *matched*, not writes emitted: a region already
+        // holding `new_voxel` still needs bounding so the flood can't run
+        // away in an unbounded world.
+        //
+        // Tested here rather than at the top of the loop so `truncated`
+        // means "a real cell was left out". At the top it also fired on
+        // the air neighbors still queued when a region ends exactly on
+        // the budget, reporting a truncation that never happened.
+        if visited.len() >= max_voxels {
+            truncated = true;
+            break;
         }
 
         visited.insert(pos);
@@ -415,26 +457,26 @@ pub fn compute_flood_fill_changes(
         }
     }
 
-    changes
+    (changes, truncated)
 }
 
 /// Flood fill from a single seed: thin wrapper that computes the
 /// changes via `compute_flood_fill_changes` and pushes one `Command`
-/// onto `history`. Returns the number of voxels written.
+/// onto `history`.
 pub fn flood_fill(
     world: &mut World,
     history: &mut CommandHistory,
     start: (i32, i32, i32),
     new_voxel: Voxel,
     max_voxels: usize,
-) -> usize {
-    let changes = compute_flood_fill_changes(world, start, new_voxel, max_voxels);
-    let count = changes.len();
+) -> FillOutcome {
+    let (changes, truncated) = compute_flood_fill_changes(world, start, new_voxel, max_voxels);
+    let written = changes.len();
     if !changes.is_empty() {
         let cmd = Command::set_voxels(changes);
         history.execute(cmd, world);
     }
-    count
+    FillOutcome { written, truncated }
 }
 
 /// Flood fill from multiple seeds, batching all resulting writes into
@@ -444,29 +486,35 @@ pub fn flood_fill(
 /// region won't surprise each other; the per-position dedup keeps the
 /// first occurrence (any later mirror writing the same cell would
 /// produce the same `new_voxel` anyway, so the choice is benign).
+/// Each seed carries its own caps, so `truncated` is true when *any*
+/// mirror hit one — the stroke as a whole came up short.
 pub fn flood_fill_multi(
     world: &mut World,
     history: &mut CommandHistory,
     starts: &[(i32, i32, i32)],
     new_voxel: Voxel,
     max_voxels: usize,
-) -> usize {
+) -> FillOutcome {
     let mut combined: HashMap<(i32, i32, i32), VoxelChange> = HashMap::new();
+    let mut truncated = false;
     for &start in starts {
         // Skip air seeds defensively — Fill semantics don't extend air.
         if world.get_voxel(start.0, start.1, start.2).is_air() {
             continue;
         }
-        for change in compute_flood_fill_changes(world, start, new_voxel, max_voxels) {
+        let (changes, seed_truncated) =
+            compute_flood_fill_changes(world, start, new_voxel, max_voxels);
+        truncated |= seed_truncated;
+        for change in changes {
             combined.entry(change.pos).or_insert(change);
         }
     }
-    let count = combined.len();
-    if count > 0 {
+    let written = combined.len();
+    if written > 0 {
         let cmd = Command::set_voxels(combined.into_values().collect());
         history.execute(cmd, world);
     }
-    count
+    FillOutcome { written, truncated }
 }
 
 #[cfg(test)]
@@ -497,7 +545,7 @@ mod tests {
         world.clear_dirty_flags();
 
         // Flood fill with new color
-        let count = flood_fill(
+        let outcome = flood_fill(
             &mut world,
             &mut history,
             (1, 0, 1),
@@ -505,7 +553,8 @@ mod tests {
             1000,
         );
 
-        assert_eq!(count, 9);
+        assert_eq!(outcome.written, 9);
+        assert!(!outcome.truncated, "the whole region fit");
         assert_eq!(world.get_voxel(0, 0, 0).r, 255);
     }
 
@@ -526,7 +575,7 @@ mod tests {
         world.set_voxel(0, 0, 0, transparent);
         world.clear_dirty_flags();
 
-        let count = flood_fill(
+        let outcome = flood_fill(
             &mut world,
             &mut history,
             (0, 0, 0),
@@ -534,7 +583,11 @@ mod tests {
             10_000,
         );
 
-        assert_eq!(count, 1, "only the seed voxel itself is filled");
+        assert_eq!(outcome.written, 1, "only the seed voxel itself is filled");
+        assert!(
+            !outcome.truncated,
+            "the region is one cell — the air around it isn't a truncation"
+        );
         for neighbor in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)] {
             assert!(
                 world.get_voxel(neighbor.0, neighbor.1, neighbor.2).is_air(),
@@ -558,7 +611,7 @@ mod tests {
         }
         world.clear_dirty_flags();
 
-        let count = flood_fill(
+        let outcome = flood_fill(
             &mut world,
             &mut history,
             (0, 0, 0),
@@ -568,7 +621,11 @@ mod tests {
 
         // From start (0,0,0), reachable along +X is x ∈ [0, MAX_FILL_DIST].
         // -X is blocked at the world's edge (0 was the start).
-        assert_eq!(count as i32, MAX_FILL_DIST + 1);
+        assert_eq!(outcome.written as i32, MAX_FILL_DIST + 1);
+        assert!(
+            outcome.truncated,
+            "the strip continues past the radius — the user must be told"
+        );
 
         // The cell just past the cap must not have been touched.
         assert_eq!(
@@ -647,9 +704,12 @@ mod tests {
         world.clear_dirty_flags();
 
         let brush = Voxel::from_rgb(255, 0, 0);
-        let count = flood_fill(&mut world, &mut history, (0, 0, 0), brush, 1000);
+        let outcome = flood_fill(&mut world, &mut history, (0, 0, 0), brush, 1000);
 
-        assert_eq!(count, 2, "the same-RGBA neighbor must join the region");
+        assert_eq!(
+            outcome.written, 2,
+            "the same-RGBA neighbor must join the region"
+        );
         assert_eq!(world.get_voxel(0, 0, 0), brush);
         assert_eq!(world.get_voxel(1, 0, 0), brush, "emissive neighbor recolored, flags reset");
     }
@@ -665,10 +725,60 @@ mod tests {
         world.set_voxel(2, 0, 0, a); // same color as seed but unreachable past the wall
         world.clear_dirty_flags();
 
-        let count = flood_fill(&mut world, &mut history, (0, 0, 0), Voxel::from_rgb(255, 0, 0), 1000);
+        let outcome = flood_fill(&mut world, &mut history, (0, 0, 0), Voxel::from_rgb(255, 0, 0), 1000);
 
-        assert_eq!(count, 1, "fill can't cross a different-colored cell");
+        assert_eq!(
+            outcome.written, 1,
+            "fill can't cross a different-colored cell"
+        );
         assert_eq!(world.get_voxel(1, 0, 0), wall, "wall untouched");
         assert_eq!(world.get_voxel(2, 0, 0), a, "cell beyond the wall untouched");
+    }
+
+    #[test]
+    fn flood_fill_budget_reports_truncation_only_when_it_bites() {
+        // A 4-cell strip filled under a budget of exactly 4. The region
+        // ends on the budget, so nothing was left out — but the air
+        // neighbors of the last cell are still queued when the cap is
+        // reached. Testing the cap before deciding those cells aren't
+        // part of the region reported a truncation that never happened.
+        let mut world = World::new();
+        let mut history = CommandHistory::new(100);
+        let target = Voxel::from_rgb(100, 100, 100);
+        for x in 0..4 {
+            world.set_voxel(x, 0, 0, target);
+        }
+        world.clear_dirty_flags();
+
+        let exact = flood_fill(
+            &mut world,
+            &mut history,
+            (0, 0, 0),
+            Voxel::from_rgb(255, 0, 0),
+            4,
+        );
+        assert_eq!(exact.written, 4);
+        assert!(
+            !exact.truncated,
+            "the region ended on the budget — nothing was left out"
+        );
+
+        // One cell short: now the cap really does leave a cell behind.
+        let mut world = World::new();
+        let mut history = CommandHistory::new(100);
+        for x in 0..4 {
+            world.set_voxel(x, 0, 0, target);
+        }
+        world.clear_dirty_flags();
+
+        let short = flood_fill(
+            &mut world,
+            &mut history,
+            (0, 0, 0),
+            Voxel::from_rgb(255, 0, 0),
+            3,
+        );
+        assert_eq!(short.written, 3);
+        assert!(short.truncated, "a cell of the region was refused");
     }
 }

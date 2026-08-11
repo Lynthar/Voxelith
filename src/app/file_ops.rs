@@ -240,6 +240,31 @@ impl App {
             .collect()
     }
 
+    /// Answer the recovery prompt's Recover button, once the
+    /// unsaved-changes guard has cleared it (see
+    /// `PendingAction::RecoverAutosave`).
+    pub(super) fn recover_autosave(&mut self) {
+        let Some(path) = Self::autosave_path() else {
+            return;
+        };
+        if self.recover_from_autosave(&path) {
+            // Recovered work has no file of its own (`project_path`
+            // stays None), so relative to anything on disk it *is*
+            // unsaved — say so, or the guard would wave a clean exit
+            // through and the exit would then delete the autosave that
+            // held the only copy.
+            self.unsaved_changes = true;
+            self.autosave_pending = false;
+            self.last_autosave = std::time::Instant::now();
+        } else {
+            // Corrupt / unreadable: drop it, keep the default scene
+            // already on screen.
+            self.delete_autosave();
+            self.ui
+                .set_status("Couldn't recover autosave — starting fresh");
+        }
+    }
+
     /// Load a crash-recovery autosave into the editor. Mirrors
     /// `do_open_project`'s restore, but leaves `project_path` None (the
     /// recovery copy isn't the user's real file, so the next Save prompts

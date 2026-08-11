@@ -78,9 +78,15 @@ impl Mesher for GreedyMesher {
         let arcs: NeighborArcs = neighbor_arcs(world, chunk_pos);
         let neighbors: NeighborGuards = lock_neighbors(&arcs);
 
-        // Capacity hint: greedy generally emits far fewer quads than
-        // `solid_count`, but allocating up to that cap costs nothing
-        // and avoids worst-case re-allocation on jagged scenes.
+        // Capacity hint sized to the worst case — one visible quad per
+        // solid voxel — to buy the absence of re-allocation on jagged
+        // scenes. Greedy normally emits far fewer, so most of the
+        // reservation goes unused, and that is a real cost rather than
+        // a free one: a fully solid chunk asks for 32768 × 4 vertices ×
+        // 48 B ≈ 6 MiB, plus 0.75 MiB of `u32` indices. `App::
+        // rebuild_all_meshes` meshes dirty chunks on the rayon pool, so
+        // the momentary commit is that figure times the number of
+        // workers, not per chunk in sequence.
         let estimated_faces = chunk.solid_count() as usize;
         let mut mesh = ChunkMesh::with_capacity(
             chunk_pos,
@@ -523,6 +529,54 @@ mod tests {
         let mesh = GreedyMesher::new().generate(&world, ChunkPos::ZERO);
         for v in &mesh.vertices {
             assert_eq!(v.ao, 1.0, "expected full AO for isolated voxel");
+        }
+    }
+
+    #[test]
+    fn cell_for_puts_d_on_the_normal_and_u_v_on_the_face_axes() {
+        // `cell_for` and `ao::face_axes` describe the same per-face
+        // frame from two sides, and nothing makes them agree except
+        // that both were written to. A permutation in either — the kind
+        // that shows up as AO sampled from the wrong neighbor, not as a
+        // crash — is what this catches.
+        let axis_of = |v: [i32; 3]| v.iter().position(|c| *c != 0).expect("an axis");
+        for face in Face::ALL {
+            let (n, u, v) = crate::mesh::ao::face_axes(face);
+            let cell = cell_for(face, 1, 2, 3);
+            let cell = [cell.0, cell.1, cell.2];
+            assert_eq!(cell[axis_of(n)], 1, "{face:?}: d belongs on the normal");
+            assert_eq!(cell[axis_of(u)], 2, "{face:?}: u belongs on the U axis");
+            assert_eq!(cell[axis_of(v)], 3, "{face:?}: v belongs on the V axis");
+        }
+    }
+
+    #[test]
+    fn per_material_split_still_culls_against_the_other_group() {
+        // Two neighbors in *different* material groups. Culling is
+        // computed against all solid voxels, so the face they share is
+        // hidden in both meshes — a plain voxel occludes an emissive
+        // one. Split the culling per group instead and each cube emits
+        // its full six faces, leaving a wall of invisible geometry
+        // inside every export that mixes materials.
+        let mut world = World::new();
+        let plain = Voxel::from_rgb(200, 200, 200);
+        let mut emissive = Voxel::from_rgb(200, 100, 0);
+        emissive.flags = 0b01;
+        world.set_voxel(1, 1, 1, plain);
+        world.set_voxel(2, 1, 1, emissive);
+
+        let groups = mesh_chunk_by_material(&world, ChunkPos::ZERO);
+        assert_eq!(groups.len(), 2, "one mesh per material present");
+        let mut keys: Vec<u8> = groups.iter().map(|(m, _)| *m).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec![0, 1], "plain and emissive");
+        for (material, mesh) in &groups {
+            assert_eq!(
+                mesh.vertices.len(),
+                5 * 4,
+                "material {material}: five visible faces, not six"
+            );
+            assert_eq!(mesh.indices.len(), 5 * 6);
         }
     }
 }

@@ -219,7 +219,12 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // RENDER_ATTACHMENT only. Nothing samples this — the main
+            // pass writes it and the egui overlay pass runs without a
+            // depth attachment at all — and a `TEXTURE_BINDING` a
+            // texture never needs can cost the driver's compression
+            // paths for it.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
 
