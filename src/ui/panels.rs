@@ -31,6 +31,50 @@ pub enum ExportKind {
     Glb(Surface),
 }
 
+/// The format half of the Export… dialog's choice. A separate enum
+/// rather than `ExportKind` itself because the dialog keeps a surface
+/// selection alive even while `.vox` has it grayed out — switching
+/// back to a mesh format finds the choice where the user left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    Vox,
+    Obj,
+    Glb,
+}
+
+/// The Export… dialog's in-progress format × surface choice. Lives on
+/// `UiState` beside the dialog's visibility flag (not inside an
+/// `Option` with it) so closing the dialog doesn't reset it — the
+/// common loop is re-exporting with the same settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportChoice {
+    pub format: ExportFormat,
+    pub surface: Surface,
+}
+
+impl Default for ExportChoice {
+    /// glTF Binary, blocky: the designated game-asset path.
+    fn default() -> Self {
+        Self {
+            format: ExportFormat::Glb,
+            surface: Surface::Blocky,
+        }
+    }
+}
+
+impl ExportChoice {
+    /// The request this choice stands for. `.vox` ignores the surface
+    /// half — which is why the dialog grays it out rather than hiding
+    /// it: the selection is kept, it just doesn't apply.
+    pub fn kind(self) -> ExportKind {
+        match self.format {
+            ExportFormat::Vox => ExportKind::Vox,
+            ExportFormat::Obj => ExportKind::Obj(self.surface),
+            ExportFormat::Glb => ExportKind::Glb(self.surface),
+        }
+    }
+}
+
 /// One-shot UI actions that need to be processed by the application.
 ///
 /// Not `Copy` because `OpenRecent` carries a `PathBuf`. Actions are
@@ -53,7 +97,8 @@ pub enum UiAction {
     /// unsaved-changes guard.
     ImportGlb,
     /// Export the scene as `kind`. One action for every format ×
-    /// surface pairing — the menu's seven entries all funnel here.
+    /// surface pairing — raised by the Export… dialog (which replaced
+    /// the menu's seven entries) with the `ExportKind` it built.
     Export(ExportKind),
     Exit,
 
@@ -264,6 +309,11 @@ pub struct UiState {
     pub show_help: bool,
     pub show_about: bool,
 
+    /// Export… dialog (File ▸ Export…). The choice sits in its own
+    /// field so it survives the dialog closing; see `ExportChoice`.
+    pub show_export_dialog: bool,
+    pub export_choice: ExportChoice,
+
     /// Crash-recovery prompt: an in-app egui dialog (NOT a native rfd
     /// modal — `rfd::MessageDialog` exits the process on this winit+wgpu
     /// setup). Set true at startup when an autosave is on disk; cleared
@@ -337,7 +387,42 @@ impl UiState {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, group_thousands};
+    use super::{format_bytes, group_thousands, ExportChoice, ExportFormat, ExportKind, Surface};
+
+    /// The Export… dialog replaced seven menu entries; this pins that
+    /// its format × surface grid still reaches every one of the seven
+    /// `ExportKind`s and nothing else — `.vox` collapses its (grayed
+    /// out) surface column into the single surfaceless kind.
+    #[test]
+    fn export_dialog_choices_cover_exactly_the_seven_kinds() {
+        let formats = [ExportFormat::Vox, ExportFormat::Obj, ExportFormat::Glb];
+        let surfaces = [Surface::Blocky, Surface::SmoothLight, Surface::SmoothHeavy];
+        let mut kinds: Vec<ExportKind> = formats
+            .iter()
+            .flat_map(|&format| {
+                surfaces
+                    .iter()
+                    .map(move |&surface| ExportChoice { format, surface }.kind())
+            })
+            .collect();
+        kinds.dedup(); // the three Vox rows collapse to one
+        kinds.sort_by_key(|k| format!("{:?}", k));
+        kinds.dedup();
+        assert_eq!(
+            kinds.len(),
+            7,
+            "format × surface must span all seven exports"
+        );
+    }
+
+    /// The dialog opens on the designated game-asset path.
+    #[test]
+    fn export_choice_defaults_to_blocky_glb() {
+        assert_eq!(
+            ExportChoice::default().kind(),
+            ExportKind::Glb(Surface::Blocky)
+        );
+    }
 
     #[test]
     fn format_bytes_scales_binary_units() {

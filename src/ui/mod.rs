@@ -5,7 +5,9 @@ pub mod keymap;
 mod panels;
 
 pub use hud::HudState;
-pub use panels::{ConfirmPrompt, ExportKind, ExportReport, Surface, UiAction, UiState};
+pub use panels::{
+    ConfirmPrompt, ExportChoice, ExportFormat, ExportKind, ExportReport, Surface, UiAction, UiState,
+};
 
 use crate::editor::{Axis, Editor, Quarter, Socket, Tool};
 use crate::mcp::bridge::{Approval, DEFAULT_PORT};
@@ -286,6 +288,12 @@ impl Ui {
         // frame), so the recovery flow can't use it.
         if self.state.show_recovery_prompt {
             self.show_recovery_prompt(ctx);
+        }
+
+        // Export… dialog — a working window, so it renders under the
+        // error / report / guard dialogs that may have to interrupt it.
+        if self.state.show_export_dialog {
+            self.show_export_dialog(ctx);
         }
 
         // File-operation error dialog (also in-app egui, not native rfd
@@ -674,6 +682,91 @@ impl Ui {
         }
     }
 
+    /// The Export… dialog (2026-08 convergence ⑤): one dialog instead
+    /// of seven menu entries. Format × surface, with the pairing that
+    /// doesn't exist grayed out rather than hidden — `ExportChoice`
+    /// keeps the surface selection alive across a trip through `.vox`.
+    /// Export hands the built `ExportKind` to the same
+    /// `UiAction::Export` funnel the menu entries used, so the save
+    /// picker, the io call and the report are untouched.
+    fn show_export_dialog(&mut self, ctx: &Context) {
+        // Copied out and written back after the closure: the buttons
+        // need `self.state` while `choice` is being edited.
+        let mut choice = self.state.export_choice;
+        let mut export = false;
+        let mut close = false;
+        egui::Window::new("Export")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label("Format");
+                ui.radio_value(&mut choice.format, ExportFormat::Glb, "glTF Binary (.glb)")
+                    .on_hover_text(
+                        "The game-asset path: bakes per-vertex AO, carries \
+                     emissive / metallic, tint zones and sockets.",
+                    );
+                ui.radio_value(
+                    &mut choice.format,
+                    ExportFormat::Obj,
+                    "Wavefront OBJ (.obj)",
+                );
+                ui.radio_value(&mut choice.format, ExportFormat::Vox, "MagicaVoxel (.vox)")
+                    .on_hover_text(
+                        "Voxel data rather than a mesh — stays editable in MagicaVoxel.",
+                    );
+
+                ui.add_space(6.0);
+                ui.label("Surface");
+                let no_surface = ".vox stores voxels, so there is no smoothed variant to ask for.";
+                ui.add_enabled_ui(choice.format != ExportFormat::Vox, |ui| {
+                    ui.radio_value(&mut choice.surface, Surface::Blocky, "Blocky")
+                        .on_hover_text("Greedy mesh — the voxels as they render.")
+                        .on_disabled_hover_text(no_surface);
+                    ui.radio_value(
+                        &mut choice.surface,
+                        Surface::SmoothLight,
+                        "Smoothed — light",
+                    )
+                    .on_hover_text(
+                        "Marching Cubes over raw voxel density: voxel \
+                         surfaces with rounded edges. Preserves thin \
+                         features (tree branches, sparse detail).",
+                    )
+                    .on_disabled_hover_text(no_surface);
+                    ui.radio_value(
+                        &mut choice.surface,
+                        Surface::SmoothHeavy,
+                        "Smoothed — heavy",
+                    )
+                    .on_hover_text(
+                        "Marching Cubes after a 3×3×3 density blur: \
+                         clay-like blobs. Best for terrain / large solid \
+                         masses; thin features may dissolve.",
+                    )
+                    .on_disabled_hover_text(no_surface);
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    if ui.button("Export...").clicked() {
+                        export = true;
+                        close = true;
+                    }
+                });
+            });
+        self.state.export_choice = choice;
+        if export {
+            self.state.request(UiAction::Export(choice.kind()));
+        }
+        if close {
+            self.state.show_export_dialog = false;
+        }
+    }
+
     /// In-app crash-recovery prompt: a centered, non-closable window with
     /// Recover / Discard. Both dispatch a `UiAction` and clear the flag.
     fn show_recovery_prompt(&mut self, ctx: &Context) {
@@ -792,75 +885,10 @@ impl Ui {
                                  authored Y-up.",
                             );
                     });
-                    ui.menu_button("Export", |ui| {
-                        if ui.button("MagicaVoxel (.vox)...").clicked() {
-                            self.state.request(UiAction::Export(ExportKind::Vox));
-                            ui.close_menu();
-                        }
-                        if ui.button("Wavefront OBJ (.obj)...").clicked() {
-                            self.state
-                                .request(UiAction::Export(ExportKind::Obj(Surface::Blocky)));
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button("Wavefront OBJ — smoothed, light (.obj)...")
-                            .on_hover_text(
-                                "Marching Cubes over raw voxel density: \
-                                 voxel surfaces with rounded edges. \
-                                 Preserves thin features (tree branches, \
-                                 sparse detail).",
-                            )
-                            .clicked()
-                        {
-                            self.state
-                                .request(UiAction::Export(ExportKind::Obj(Surface::SmoothLight)));
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button("Wavefront OBJ — smoothed, heavy (.obj)...")
-                            .on_hover_text(
-                                "Marching Cubes after a 3×3×3 density \
-                                 blur: clay-like blobs. Best for terrain \
-                                 / large solid masses; thin features may \
-                                 dissolve.",
-                            )
-                            .clicked()
-                        {
-                            self.state
-                                .request(UiAction::Export(ExportKind::Obj(Surface::SmoothHeavy)));
-                            ui.close_menu();
-                        }
-                        if ui.button("glTF Binary (.glb)...").clicked() {
-                            self.state
-                                .request(UiAction::Export(ExportKind::Glb(Surface::Blocky)));
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button("glTF Binary — smoothed, light (.glb)...")
-                            .on_hover_text(
-                                "Marching Cubes over raw voxel density: \
-                                 voxel surfaces with rounded edges. \
-                                 Preserves thin features.",
-                            )
-                            .clicked()
-                        {
-                            self.state
-                                .request(UiAction::Export(ExportKind::Glb(Surface::SmoothLight)));
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button("glTF Binary — smoothed, heavy (.glb)...")
-                            .on_hover_text(
-                                "Marching Cubes after a 3×3×3 density \
-                                 blur: clay-like blobs. Best for terrain.",
-                            )
-                            .clicked()
-                        {
-                            self.state
-                                .request(UiAction::Export(ExportKind::Glb(Surface::SmoothHeavy)));
-                            ui.close_menu();
-                        }
-                    });
+                    if ui.button("Export...").clicked() {
+                        self.state.show_export_dialog = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         self.state.request(UiAction::Exit);
