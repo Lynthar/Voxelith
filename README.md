@@ -37,7 +37,7 @@
 | 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC tilesets (Dungeon + City) — add one from the Generate menu as a ready-made graph node, then compose with Translate / Filter / Mask / Combine nodes in the visual graph editor. The graph is saved with the project, and an agent can write one for you to keep tuning |
 | ✨ **Live preview** | Debounced translucent overlay shows generator output before you commit |
 | 📁 **File I/O** | Native `.vxlt` (gzip + state), MagicaVoxel `.vox` import (v150 + v200 multi-model + scene graph) / export (v150), Wavefront `.obj` and glTF Binary `.glb` export. OBJ / GLB also have Marching Cubes "smoothed" variants (light: rounded cubes / heavy: clay-like) for organic exports |
-| 💾 **Persistent state** | Window layout, panel toggles, generator params, recent files all survive restarts |
+| 💾 **Persistent state** | Window layout, panel toggles, brush and palette, recent files all survive restarts; generator parameters ride in the pipeline graph, so they travel with the project rather than the machine |
 | 🖥️ **Viewport** | Orbit / pan / zoom camera (with auto-resync on every orbit), grid, axes, optional wireframe |
 | 💡 **Per-vertex AO** | Minecraft-style ambient occlusion baked into the greedy mesh — corners and crevices darken, open faces stay bright. Adds visible block-by-block depth without runtime cost |
 

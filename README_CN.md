@@ -37,7 +37,7 @@
 | 🌱 **程序化生成** | Perlin 地形、L-System 树、WFC 多套 tileset(Dungeon + City)—— 从 Generate 菜单一键加为现成的图节点,再在可视化节点图里用 Translate / Filter / Mask / Combine 组合。节点图随工程保存,agent 也能直接产出一张图交给你继续调 |
 | ✨ **实时预览** | 防抖半透明叠加,生成结果落世界前可见 |
 | 📁 **文件支持** | 原生 `.vxlt`(gzip+状态)、MagicaVoxel `.vox` 导入(v150 + v200 多模型场景图)/导出(v150),Wavefront `.obj` 和 glTF Binary `.glb` 导出。OBJ/GLB 还有 Marching Cubes "smoothed" 变体(light: 圆角方块 / heavy: 黏土感)支持有机模型导出 |
-| 💾 **状态持久化** | 窗口布局、面板状态、生成器参数、最近文件跨重启保留 |
+| 💾 **状态持久化** | 窗口布局、面板状态、笔刷与调色板、最近文件跨重启保留;生成器参数住在节点图里,随工程走而不是随机器走 |
 | 🖥️ **视口控制** | 轨道相机(每次开始 orbit 自动从相机当前状态同步)、网格、坐标轴、线框模式 |
 | 💡 **逐顶点 AO** | Minecraft 风格的环境光遮蔽烘焙到 greedy mesh — 角落和凹陷自动变暗,开阔面保持明亮。视觉立体感显著提升,运行时零成本 |
 
