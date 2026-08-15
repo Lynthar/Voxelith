@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use voxelith::{
-    editor::Command, editor::Socket, io, procgen::PipelineGraph, ui::ExportReport,
+    editor::Command, editor::Socket, io, procgen::PipelineGraph,
+    ui::{ExportKind, ExportReport, Surface},
 };
 
 use super::App;
@@ -805,46 +806,72 @@ impl App {
         }
     }
 
-    /// OBJ export with Marching Cubes smoothing. `blur` selects the
-    /// strength: `false` keeps thin features by running MC on the
-    /// raw 0/1 density (rounded-cube look); `true` runs a 3×3×3 blur
-    /// first for clay-like terrain output but dissolves sparse
-    /// 1-cell features.
-    pub(super) fn export_obj_smoothed(&mut self, blur: bool) {
-        let title = if blur {
-            "Export Smoothed OBJ (heavy / clay)"
-        } else {
-            "Export Smoothed OBJ (light / preserve detail)"
-        };
+    /// Run one export request. The dialog, the io call and the report
+    /// all key off `kind`, so a new format (or surface) is one arm here
+    /// instead of a fourth near-copy of a hundred-line function — and
+    /// `.vox`-with-smoothing isn't a case anyone can even ask for.
+    pub(super) fn do_export(&mut self, kind: ExportKind) {
         let dialog = self
             .file_dialog(DialogStart::Export)
-            .add_filter("Wavefront OBJ", &["obj"])
-            .set_title(title);
-
+            .add_filter(kind_filter_name(kind), &[kind_extension(kind)])
+            .set_title(kind_dialog_title(kind));
         let Some(path) = dialog.save_file() else {
             return;
         };
+        match kind {
+            ExportKind::Vox => self.export_vox_to(&path),
+            ExportKind::Obj(surface) => self.export_obj_to(&path, surface),
+            ExportKind::Glb(surface) => self.export_glb_to(&path, surface),
+        }
+    }
 
-        match io::export_obj_smoothed(&self.document.world, &path, blur) {
+    /// Status-bar line for a mesh export, shared by OBJ and GLB. An
+    /// empty scene says so instead of reporting a 0-triangle success.
+    fn export_status(
+        surface: Surface,
+        filename: &str,
+        triangles: usize,
+        detail: &str,
+    ) -> String {
+        if triangles == 0 {
+            return format!("Exported: {} (empty — no geometry)", filename);
+        }
+        match surface {
+            Surface::Blocky => format!("Exported: {} ({})", filename, detail),
+            Surface::SmoothLight => {
+                format!("Exported (smoothed, light): {} ({})", filename, detail)
+            }
+            Surface::SmoothHeavy => {
+                format!("Exported (smoothed, heavy): {} ({})", filename, detail)
+            }
+        }
+    }
+
+    fn export_obj_to(&mut self, path: &Path, surface: Surface) {
+        let result = match surface {
+            Surface::Blocky => io::export_obj(&self.document.world, path),
+            Surface::SmoothLight => io::export_obj_smoothed(&self.document.world, path, false),
+            Surface::SmoothHeavy => io::export_obj_smoothed(&self.document.world, path, true),
+        };
+        match result {
             Ok(stats) => {
-                self.prefs.remember_export_dir(&path);
-                let filename = file_label(&path);
-                let mode = if blur { "heavy" } else { "light" };
-                let msg = if stats.triangle_count == 0 {
-                    format!("Exported: {} (empty — no geometry)", filename)
-                } else {
-                    format!(
-                        "Exported (smoothed, {}): {} ({} tris)",
-                        mode, filename, stats.triangle_count
-                    )
-                };
-                self.ui.set_status(msg);
+                self.prefs.remember_export_dir(path);
+                let detail = format!(
+                    "{} tris, {} chunks",
+                    stats.triangle_count, stats.chunk_count
+                );
+                self.ui.set_status(Self::export_status(
+                    surface,
+                    &file_label(path),
+                    stats.triangle_count,
+                    &detail,
+                ));
                 if stats.triangle_count > 0 {
                     self.set_export_report(
-                        &path,
+                        path,
                         ExportReport {
                             format: "Wavefront OBJ (.obj)".into(),
-                            mesh_source: smoothed_mesh_source(blur).into(),
+                            mesh_source: mesh_source_label(surface).into(),
                             triangles: Some(stats.triangle_count),
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
@@ -855,110 +882,57 @@ impl App {
                 }
             }
             Err(e) => {
-                log::error!("Failed to export smoothed OBJ: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::ObjError::Io(_)));
+                log::error!("Failed to export OBJ: {}", e);
+                self.show_write_error(
+                    "Export failed",
+                    path,
+                    "export",
+                    &e,
+                    matches!(e, io::ObjError::Io(_)),
+                );
                 self.ui
-                    .set_status(format!("Export failed: {}", file_label(&path)));
+                    .set_status(format!("Export failed: {}", file_label(path)));
             }
         }
     }
 
-    /// GLB export with Marching Cubes smoothing. `blur` matches
-    /// `export_obj_smoothed`: light (no blur) preserves detail,
-    /// heavy (3×3×3 blur) is clay-like and best for terrain.
-    pub(super) fn export_glb_smoothed(&mut self, blur: bool) {
-        let title = if blur {
-            "Export Smoothed glTF Binary (heavy / clay)"
-        } else {
-            "Export Smoothed glTF Binary (light / preserve detail)"
-        };
-        let dialog = self
-            .file_dialog(DialogStart::Export)
-            .add_filter("glTF Binary", &["glb"])
-            .set_title(title);
-
-        let Some(path) = dialog.save_file() else {
-            return;
-        };
-
+    fn export_glb_to(&mut self, path: &Path, surface: Surface) {
         let sockets = self.socket_export_nodes();
-        match io::export_glb_smoothed(&self.document.world, &sockets, &path, blur) {
+        let result = match surface {
+            Surface::Blocky => io::export_glb(&self.document.world, &sockets, path),
+            Surface::SmoothLight => {
+                io::export_glb_smoothed(&self.document.world, &sockets, path, false)
+            }
+            Surface::SmoothHeavy => {
+                io::export_glb_smoothed(&self.document.world, &sockets, path, true)
+            }
+        };
+        match result {
             Ok(stats) => {
-                self.prefs.remember_export_dir(&path);
-                let filename = file_label(&path);
-                let mode = if blur { "heavy" } else { "light" };
-                let msg = if stats.triangle_count == 0 {
-                    format!("Exported: {} (empty — no geometry)", filename)
-                } else {
-                    let kib = (stats.byte_size as f32) / 1024.0;
-                    format!(
-                        "Exported (smoothed, {}): {} ({} tris, {:.1} KiB)",
-                        mode, filename, stats.triangle_count, kib
-                    )
+                self.prefs.remember_export_dir(path);
+                let kib = (stats.byte_size as f32) / 1024.0;
+                let detail = match surface {
+                    // The blocky line reports chunks, the smoothed ones
+                    // don't (an MC mesh isn't per-chunk) — kept as the
+                    // per-variant messages always were.
+                    Surface::Blocky => format!(
+                        "{} tris, {} chunks, {:.1} KiB",
+                        stats.triangle_count, stats.chunk_count, kib
+                    ),
+                    _ => format!("{} tris, {:.1} KiB", stats.triangle_count, kib),
                 };
-                self.ui.set_status(msg);
+                self.ui.set_status(Self::export_status(
+                    surface,
+                    &file_label(path),
+                    stats.triangle_count,
+                    &detail,
+                ));
                 if stats.triangle_count > 0 {
                     self.set_export_report(
-                        &path,
+                        path,
                         ExportReport {
                             format: "glTF Binary (.glb)".into(),
-                            mesh_source: smoothed_mesh_source(blur).into(),
-                            triangles: Some(stats.triangle_count),
-                            vertices: Some(stats.vertex_count),
-                            chunks: Some(stats.chunk_count),
-                            color_model: "Per-vertex RGBA".into(),
-                            notes: socket_note(sockets.len()),
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to export smoothed GLB: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::GlbError::Io(_)));
-                self.ui
-                    .set_status(format!("Export failed: {}", file_label(&path)));
-            }
-        }
-    }
-
-    /// Prompt for a path and export to glTF Binary (.glb). Same
-    /// mesh-collection path as OBJ (greedy meshing across all
-    /// chunks), but writes a single self-contained .glb that imports
-    /// directly into Unity / Unreal / Godot / Blender. Status bar
-    /// reports vertex / triangle / chunk counts and the resulting
-    /// file size so the user can sanity-check large exports.
-    pub(super) fn export_glb(&mut self) {
-        let dialog = self
-            .file_dialog(DialogStart::Export)
-            .add_filter("glTF Binary", &["glb"])
-            .set_title("Export as glTF Binary");
-
-        let Some(path) = dialog.save_file() else {
-            return;
-        };
-
-        let sockets = self.socket_export_nodes();
-        match io::export_glb(&self.document.world, &sockets, &path) {
-            Ok(stats) => {
-                self.prefs.remember_export_dir(&path);
-                let filename = file_label(&path);
-                let msg = if stats.triangle_count == 0 {
-                    format!("Exported: {} (empty — no geometry)", filename)
-                } else {
-                    let kib = (stats.byte_size as f32) / 1024.0;
-                    format!(
-                        "Exported: {} ({} tris, {} chunks, {:.1} KiB)",
-                        filename, stats.triangle_count, stats.chunk_count, kib
-                    )
-                };
-                self.ui.set_status(msg);
-                if stats.triangle_count > 0 {
-                    self.set_export_report(
-                        &path,
-                        ExportReport {
-                            format: "glTF Binary (.glb)".into(),
-                            mesh_source: "Greedy mesh".into(),
+                            mesh_source: mesh_source_label(surface).into(),
                             triangles: Some(stats.triangle_count),
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
@@ -971,126 +945,124 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to export GLB: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::GlbError::Io(_)));
+                self.show_write_error(
+                    "Export failed",
+                    path,
+                    "export",
+                    &e,
+                    matches!(e, io::GlbError::Io(_)),
+                );
                 self.ui
-                    .set_status(format!("Export failed: {}", file_label(&path)));
+                    .set_status(format!("Export failed: {}", file_label(path)));
             }
         }
     }
 
-    /// Prompt for a path and export to OBJ. Walks every chunk, runs
-    /// the greedy mesher to capture currently-visible geometry, and
-    /// writes a single .obj with vertex colors. Touches the recent-
-    /// files MRU on success and surfaces triangle counts in the status
-    /// bar so the user knows the export wasn't silently empty.
-    pub(super) fn export_obj(&mut self) {
-        let dialog = self
-            .file_dialog(DialogStart::Export)
-            .add_filter("Wavefront OBJ", &["obj"])
-            .set_title("Export as Wavefront OBJ");
-
-        let Some(path) = dialog.save_file() else {
-            return;
-        };
-
-        match io::export_obj(&self.document.world, &path) {
-            Ok(stats) => {
-                self.prefs.remember_export_dir(&path);
-                let filename = file_label(&path);
-                let msg = if stats.triangle_count == 0 {
-                    format!("Exported: {} (empty — no geometry)", filename)
-                } else {
-                    format!(
-                        "Exported: {} ({} tris, {} chunks)",
-                        filename, stats.triangle_count, stats.chunk_count
-                    )
-                };
-                self.ui.set_status(msg);
-                if stats.triangle_count > 0 {
-                    self.set_export_report(
-                        &path,
-                        ExportReport {
-                            format: "Wavefront OBJ (.obj)".into(),
-                            mesh_source: "Greedy mesh".into(),
-                            triangles: Some(stats.triangle_count),
-                            vertices: Some(stats.vertex_count),
-                            chunks: Some(stats.chunk_count),
-                            color_model: "Per-vertex RGBA".into(),
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to export OBJ: {}", e);
-                self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::ObjError::Io(_)));
-                self.ui
-                    .set_status(format!("Export failed: {}", file_label(&path)));
-            }
-        }
-    }
-
-    /// Prompt for a path and export to VOX.
-    pub(super) fn export_vox(&mut self) {
+    fn export_vox_to(&mut self, path: &Path) {
         // Mirror the import convention on the way out (default on) so a
         // model exported to .vox opens upright in MagicaVoxel.
         let convert_axes = self.ui.convert_vox_axes;
-        let dialog = self
-            .file_dialog(DialogStart::Export)
-            .add_filter("MagicaVoxel", &["vox"])
-            .set_title("Export as MagicaVoxel");
-
-        let Some(path) = dialog.save_file() else {
-            return;
-        };
-
-        match std::fs::File::create(&path) {
-            Ok(mut file) => match io::export_vox(&self.document.world, &mut file, convert_axes) {
-                Ok(overflow) => {
-                    self.prefs.remember_export_dir(&path);
-                    let filename = file_label(&path);
-                    let msg = if overflow > 0 {
-                        format!(
-                            "Exported: {} ({} colors quantized — the VOX palette \
-                             holds 254)",
-                            filename, overflow
-                        )
-                    } else {
-                        format!("Exported: {}", filename)
-                    };
-                    self.ui.set_status(msg);
-                    let mut notes = Vec::new();
-                    if overflow > 0 {
-                        notes.push(format!(
-                            "{} colors quantized to the nearest of 254 \
-                             palette slots",
-                            overflow
-                        ));
+        match std::fs::File::create(path) {
+            Ok(mut file) => {
+                match io::export_vox(&self.document.world, &mut file, convert_axes) {
+                    Ok(overflow) => {
+                        self.prefs.remember_export_dir(path);
+                        let filename = file_label(path);
+                        let msg = if overflow > 0 {
+                            format!(
+                                "Exported: {} ({} colors quantized — the VOX palette \
+                                 holds 254)",
+                                filename, overflow
+                            )
+                        } else {
+                            format!("Exported: {}", filename)
+                        };
+                        self.ui.set_status(msg);
+                        let mut notes = Vec::new();
+                        if overflow > 0 {
+                            notes.push(format!(
+                                "{} colors quantized to the nearest of 254 \
+                                 palette slots",
+                                overflow
+                            ));
+                        }
+                        self.set_export_report(
+                            path,
+                            ExportReport {
+                                format: "MagicaVoxel (.vox)".into(),
+                                color_model: "254-color palette".into(),
+                                notes,
+                                ..Default::default()
+                            },
+                        );
                     }
-                    self.set_export_report(
-                        &path,
-                        ExportReport {
-                            format: "MagicaVoxel (.vox)".into(),
-                            color_model: "254-color palette".into(),
-                            notes,
-                            ..Default::default()
-                        },
-                    );
+                    Err(e) => {
+                        log::error!("Failed to export VOX: {}", e);
+                        self.show_write_error(
+                            "Export failed",
+                            path,
+                            "export",
+                            &e,
+                            matches!(e, io::VoxError::Io(_)),
+                        );
+                        self.ui
+                            .set_status(format!("Export failed: {}", file_label(path)));
+                    }
                 }
-                Err(e) => {
-                    log::error!("Failed to export VOX: {}", e);
-                    self.show_write_error("Export failed", &path, "export", &e, matches!(e, io::VoxError::Io(_)));
-                    self.ui
-                        .set_status(format!("Export failed: {}", file_label(&path)));
-                }
-            },
+            }
             Err(e) => {
                 log::error!("Failed to create file {:?}: {}", path, e);
-                self.show_write_error("Export failed", &path, "create", &e, true);
+                self.show_write_error("Export failed", path, "create", &e, true);
                 self.ui
-                    .set_status(format!("Export failed: {}", file_label(&path)));
+                    .set_status(format!("Export failed: {}", file_label(path)));
             }
         }
+    }
+}
+
+/// The save dialog's title for an export request.
+fn kind_dialog_title(kind: ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Vox => "Export as MagicaVoxel",
+        ExportKind::Obj(Surface::Blocky) => "Export as Wavefront OBJ",
+        ExportKind::Obj(Surface::SmoothLight) => {
+            "Export Smoothed OBJ (light / preserve detail)"
+        }
+        ExportKind::Obj(Surface::SmoothHeavy) => "Export Smoothed OBJ (heavy / clay)",
+        ExportKind::Glb(Surface::Blocky) => "Export as glTF Binary",
+        ExportKind::Glb(Surface::SmoothLight) => {
+            "Export Smoothed glTF Binary (light / preserve detail)"
+        }
+        ExportKind::Glb(Surface::SmoothHeavy) => {
+            "Export Smoothed glTF Binary (heavy / clay)"
+        }
+    }
+}
+
+/// The save dialog's file-type filter name.
+fn kind_filter_name(kind: ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Vox => "MagicaVoxel",
+        ExportKind::Obj(_) => "Wavefront OBJ",
+        ExportKind::Glb(_) => "glTF Binary",
+    }
+}
+
+/// The format's file extension.
+fn kind_extension(kind: ExportKind) -> &'static str {
+    match kind {
+        ExportKind::Vox => "vox",
+        ExportKind::Obj(_) => "obj",
+        ExportKind::Glb(_) => "glb",
+    }
+}
+
+/// Geometry-source label for the export report.
+fn mesh_source_label(surface: Surface) -> &'static str {
+    match surface {
+        Surface::Blocky => "Greedy mesh",
+        Surface::SmoothLight => "Marching Cubes (light)",
+        Surface::SmoothHeavy => "Marching Cubes (heavy)",
     }
 }
 
@@ -1107,16 +1079,6 @@ fn socket_note(count: usize) -> Vec<String> {
             if count == 1 { "" } else { "s" },
             if count == 1 { "" } else { "s" },
         )]
-    }
-}
-
-/// Geometry-source label for the export report's smoothed (Marching
-/// Cubes) variants; `blur` is the heavy-vs-light flag the menu passes.
-fn smoothed_mesh_source(blur: bool) -> &'static str {
-    if blur {
-        "Marching Cubes (heavy)"
-    } else {
-        "Marching Cubes (light)"
     }
 }
 

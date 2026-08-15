@@ -1,10 +1,11 @@
 //! User interface components using egui.
 
 pub mod hud;
+pub mod keymap;
 mod panels;
 
 pub use hud::HudState;
-pub use panels::{ConfirmPrompt, ExportReport, UiAction, UiState};
+pub use panels::{ConfirmPrompt, ExportKind, ExportReport, Surface, UiAction, UiState};
 
 use crate::editor::{Axis, Editor, Quarter, Socket, Tool};
 use crate::mcp::bridge::{Approval, DEFAULT_PORT};
@@ -803,11 +804,11 @@ impl Ui {
                     });
                     ui.menu_button("Export", |ui| {
                         if ui.button("MagicaVoxel (.vox)...").clicked() {
-                            self.state.request(UiAction::ExportVox);
+                            self.state.request(UiAction::Export(ExportKind::Vox));
                             ui.close_menu();
                         }
                         if ui.button("Wavefront OBJ (.obj)...").clicked() {
-                            self.state.request(UiAction::ExportObj);
+                            self.state.request(UiAction::Export(ExportKind::Obj(Surface::Blocky)));
                             ui.close_menu();
                         }
                         if ui
@@ -820,7 +821,7 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::ExportObjSmoothedLight);
+                            self.state.request(UiAction::Export(ExportKind::Obj(Surface::SmoothLight)));
                             ui.close_menu();
                         }
                         if ui
@@ -833,11 +834,11 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::ExportObjSmoothedHeavy);
+                            self.state.request(UiAction::Export(ExportKind::Obj(Surface::SmoothHeavy)));
                             ui.close_menu();
                         }
                         if ui.button("glTF Binary (.glb)...").clicked() {
-                            self.state.request(UiAction::ExportGlb);
+                            self.state.request(UiAction::Export(ExportKind::Glb(Surface::Blocky)));
                             ui.close_menu();
                         }
                         if ui
@@ -849,7 +850,7 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::ExportGlbSmoothedLight);
+                            self.state.request(UiAction::Export(ExportKind::Glb(Surface::SmoothLight)));
                             ui.close_menu();
                         }
                         if ui
@@ -860,7 +861,7 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::ExportGlbSmoothedHeavy);
+                            self.state.request(UiAction::Export(ExportKind::Glb(Surface::SmoothHeavy)));
                             ui.close_menu();
                         }
                     });
@@ -902,7 +903,7 @@ impl Ui {
                         .add_enabled(can_paste, egui::Button::new("Paste  Ctrl+V"))
                         .clicked()
                     {
-                        self.state.request(UiAction::PasteClipboard);
+                        self.state.request(UiAction::PasteClipboard { at_cursor: false });
                         ui.close_menu();
                     }
                     if ui
@@ -1173,69 +1174,24 @@ impl Ui {
                         .clicked()
                     };
 
-                    if tool_button(ui, Tool::Place, editor.current_tool, "+", "") {
-                        editor.select_tool(Tool::Place);
-                    }
-                    if tool_button(ui, Tool::Remove, editor.current_tool, "-", "") {
-                        editor.select_tool(Tool::Remove);
-                    }
-                    if tool_button(ui, Tool::Paint, editor.current_tool, "P", "") {
-                        editor.select_tool(Tool::Paint);
-                    }
-                    if tool_button(ui, Tool::Eyedropper, editor.current_tool, "E", "") {
-                        editor.select_tool(Tool::Eyedropper);
-                    }
-                    if tool_button(ui, Tool::Fill, editor.current_tool, "F", "") {
-                        editor.select_tool(Tool::Fill);
-                    }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    // Shape tools — click-anchor / drag / release.
-                    if tool_button(ui, Tool::Line, editor.current_tool, "L", "") {
-                        editor.select_tool(Tool::Line);
-                    }
-                    if tool_button(ui, Tool::Box, editor.current_tool, "▢", "") {
-                        editor.select_tool(Tool::Box);
-                    }
-                    if tool_button(ui, Tool::Sphere, editor.current_tool, "○", "") {
-                        editor.select_tool(Tool::Sphere);
-                    }
-                    if tool_button(ui, Tool::Cylinder, editor.current_tool, "⌭", "") {
-                        editor.select_tool(Tool::Cylinder);
-                    }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    // Selection — drag an AABB; Esc / Ctrl+D to clear.
-                    if tool_button(
-                        ui,
-                        Tool::Select,
-                        editor.current_tool,
-                        "▭",
-                        "Drag to mark an AABB. Esc or Ctrl+D deselects.",
-                    ) {
-                        editor.select_tool(Tool::Select);
-                    }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    // Socket — drop a named attachment point on a face.
-                    if tool_button(
-                        ui,
-                        Tool::Socket,
-                        editor.current_tool,
-                        "⚓",
-                        "Click a voxel face (or the ground) to drop a named \
-                         attachment point. Exports to glTF as an empty node.",
-                    ) {
-                        editor.select_tool(Tool::Socket);
+                    // One loop over the descriptor table — the same
+                    // rows the Tools panel and help window print, so a
+                    // new tool is one `ToolSpec` entry everywhere.
+                    for spec in keymap::TOOL_SPECS {
+                        if spec.separator_before {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                        }
+                        if tool_button(
+                            ui,
+                            spec.tool,
+                            editor.current_tool,
+                            spec.icon,
+                            spec.note,
+                        ) {
+                            editor.select_tool(spec.tool);
+                        }
                     }
 
                     ui.add_space(16.0);
@@ -1331,21 +1287,21 @@ impl Ui {
                     .num_columns(3)
                     .spacing([4.0, 4.0])
                     .show(ui, |ui| {
-                        if ui.selectable_label(editor.current_tool == Tool::Place, "Place").clicked() {
+                        if ui.selectable_label(editor.current_tool == Tool::Place, Tool::Place.name()).clicked() {
                             editor.select_tool(Tool::Place);
                         }
-                        if ui.selectable_label(editor.current_tool == Tool::Remove, "Remove").clicked() {
+                        if ui.selectable_label(editor.current_tool == Tool::Remove, Tool::Remove.name()).clicked() {
                             editor.select_tool(Tool::Remove);
                         }
-                        if ui.selectable_label(editor.current_tool == Tool::Paint, "Paint").clicked() {
+                        if ui.selectable_label(editor.current_tool == Tool::Paint, Tool::Paint.name()).clicked() {
                             editor.select_tool(Tool::Paint);
                         }
                         ui.end_row();
 
-                        if ui.selectable_label(editor.current_tool == Tool::Eyedropper, "Pick").clicked() {
+                        if ui.selectable_label(editor.current_tool == Tool::Eyedropper, Tool::Eyedropper.name()).clicked() {
                             editor.select_tool(Tool::Eyedropper);
                         }
-                        if ui.selectable_label(editor.current_tool == Tool::Fill, "Fill").clicked() {
+                        if ui.selectable_label(editor.current_tool == Tool::Fill, Tool::Fill.name()).clicked() {
                             editor.select_tool(Tool::Fill);
                         }
                         ui.end_row();
@@ -1358,21 +1314,21 @@ impl Ui {
                     .spacing([4.0, 4.0])
                     .show(ui, |ui| {
                         if ui
-                            .selectable_label(editor.current_tool == Tool::Line, "Line")
+                            .selectable_label(editor.current_tool == Tool::Line, Tool::Line.name())
                             .on_hover_text("Drag from anchor to end (3D Bresenham line)")
                             .clicked()
                         {
                             editor.select_tool(Tool::Line);
                         }
                         if ui
-                            .selectable_label(editor.current_tool == Tool::Box, "Box")
+                            .selectable_label(editor.current_tool == Tool::Box, Tool::Box.name())
                             .on_hover_text("Drag corner to corner (filled AABB)")
                             .clicked()
                         {
                             editor.select_tool(Tool::Box);
                         }
                         if ui
-                            .selectable_label(editor.current_tool == Tool::Sphere, "Sphere")
+                            .selectable_label(editor.current_tool == Tool::Sphere, Tool::Sphere.name())
                             .on_hover_text("Drag bbox; ellipsoid fits in it")
                             .clicked()
                         {
@@ -1381,7 +1337,7 @@ impl Ui {
                         ui.end_row();
 
                         if ui
-                            .selectable_label(editor.current_tool == Tool::Cylinder, "Cylinder")
+                            .selectable_label(editor.current_tool == Tool::Cylinder, Tool::Cylinder.name())
                             .on_hover_text(
                                 "Drag a footprint, then pull up — the cylinder \
                                  stands along the height direction (the locked \
@@ -1445,7 +1401,7 @@ impl Ui {
                         )
                         .clicked()
                     {
-                        self.state.request(UiAction::PasteClipboard);
+                        self.state.request(UiAction::PasteClipboard { at_cursor: false });
                     }
                 });
                 ui.horizontal(|ui| {
@@ -2115,52 +2071,22 @@ impl Ui {
                         ui.heading("Tools");
                         ui.end_row();
 
-                        ui.label("1");
-                        ui.label("Place tool");
-                        ui.end_row();
-
-                        ui.label("2");
-                        ui.label("Remove tool");
-                        ui.end_row();
-
-                        ui.label("3");
-                        ui.label("Paint tool");
-                        ui.end_row();
-
-                        ui.label("4");
-                        ui.label("Eyedropper");
-                        ui.end_row();
-
-                        ui.label("5");
-                        ui.label("Fill tool");
-                        ui.end_row();
-
-                        ui.label("6");
-                        ui.label("Line shape");
-                        ui.end_row();
-
-                        ui.label("7");
-                        ui.label("Box shape");
-                        ui.end_row();
-
-                        ui.label("8");
-                        ui.label("Sphere shape");
-                        ui.end_row();
-
-                        ui.label("9");
-                        ui.label("Cylinder shape");
-                        ui.end_row();
-
-                        ui.label("0");
-                        ui.label("Box select tool");
-                        ui.end_row();
+                        // From the descriptor table — the same rows
+                        // the toolbar renders, so this list can't
+                        // promise a tool the toolbar doesn't have.
+                        for spec in keymap::TOOL_SPECS {
+                            let shortcut = spec.tool.shortcut();
+                            if shortcut.is_empty() {
+                                ui.label("(toolbar only)");
+                            } else {
+                                ui.label(shortcut);
+                            }
+                            ui.label(spec.tool.name());
+                            ui.end_row();
+                        }
 
                         ui.label("Alt (hold)");
                         ui.label("Temporary eyedropper — restores on release");
-                        ui.end_row();
-
-                        ui.label("(toolbar only)");
-                        ui.label("Socket tool — drop a named attach point");
                         ui.end_row();
 
                         ui.end_row();
@@ -2199,17 +2125,7 @@ impl Ui {
                         ui.heading("Edit");
                         ui.end_row();
 
-                        ui.label("Ctrl+Z");
-                        ui.label("Undo");
-                        ui.end_row();
-
-                        ui.label("Ctrl+Y");
-                        ui.label("Redo");
-                        ui.end_row();
-
-                        ui.label("Ctrl+Shift+Z");
-                        ui.label("Redo");
-                        ui.end_row();
+                        chord_rows(ui, keymap::HelpSection::Edit);
 
                         ui.end_row();
                         ui.heading("Selection");
@@ -2223,28 +2139,10 @@ impl Ui {
                         ui.label("Create new selection");
                         ui.end_row();
 
-                        ui.label("Ctrl+C / Ctrl+X");
-                        ui.label("Copy / Cut non-air voxels");
-                        ui.end_row();
-
-                        ui.label("Ctrl+V");
-                        ui.label("Paste at selection origin (or cursor)");
-                        ui.end_row();
-
-                        ui.label("Ctrl+Shift+V");
-                        ui.label("Paste at cursor cell");
-                        ui.end_row();
+                        chord_rows(ui, keymap::HelpSection::Selection);
 
                         ui.label("Del");
                         ui.label("Delete non-air voxels in selection");
-                        ui.end_row();
-
-                        ui.label("Ctrl+A");
-                        ui.label("Select all (AABB of all solid voxels)");
-                        ui.end_row();
-
-                        ui.label("Esc / Ctrl+D");
-                        ui.label("Deselect");
                         ui.end_row();
 
                         ui.label("Arrows");
@@ -2307,21 +2205,7 @@ impl Ui {
                         ui.heading("File");
                         ui.end_row();
 
-                        ui.label("Ctrl+N");
-                        ui.label("New project");
-                        ui.end_row();
-
-                        ui.label("Ctrl+O");
-                        ui.label("Open project");
-                        ui.end_row();
-
-                        ui.label("Ctrl+S");
-                        ui.label("Save project");
-                        ui.end_row();
-
-                        ui.label("Ctrl+Shift+S");
-                        ui.label("Save as...");
-                        ui.end_row();
+                        chord_rows(ui, keymap::HelpSection::File);
 
                         ui.end_row();
                         ui.heading("Actions");
@@ -2896,6 +2780,16 @@ fn paint_wire(
 /// click-select, body-drag, and socket-drag wire creation. Mutations
 /// to the graph (input slot changes, deletion) are deferred via the
 /// out-params so the caller can apply them outside of the borrow.
+/// Render one help-window row per chord in `section`, from the same
+/// table the keyboard dispatch reads.
+fn chord_rows(ui: &mut egui::Ui, section: keymap::HelpSection) {
+    for chord in keymap::CHORDS.iter().filter(|c| c.section == section) {
+        ui.label(chord.chord_label);
+        ui.label(chord.help);
+        ui.end_row();
+    }
+}
+
 fn graph_canvas(
     ui: &mut egui::Ui,
     graph: &mut PipelineGraph,

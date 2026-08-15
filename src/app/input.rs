@@ -12,7 +12,7 @@ use voxelith::editor::{
     ToolContext, VoxelChange, VoxelRaycast,
 };
 
-use super::{build_stroke_plane, App, EditInteraction, PendingAction, StrokePlane};
+use super::{build_stroke_plane, App, EditInteraction, StrokePlane};
 
 /// Maximum distance (in voxel units) the editor's mouse-hover ray
 /// will travel through the world looking for a hit. Caps DDA work
@@ -1071,6 +1071,20 @@ impl App {
     /// Handle keyboard shortcuts (tools, undo/redo, file ops,
     /// selection).
     pub(super) fn handle_tool_shortcut(&mut self, key: KeyCode) {
+        // Pure command chords dispatch from the descriptor table — the
+        // same rows the help window prints, so the two can't drift.
+        // The action goes through the UiAction queue like a menu click
+        // (drained later this same frame). Everything below the table
+        // is deliberately hand-written: number keys mirror `Tool`'s
+        // order, and R / M / F / arrows / Esc / Delete depend on state
+        // a table row can't express.
+        if self.primary_modifier() {
+            if let Some(spec) = voxelith::ui::keymap::find_chord(key, self.modifiers.shift_key())
+            {
+                self.ui.state.request((spec.make)());
+                return;
+            }
+        }
         match key {
             KeyCode::Digit1 => self.editor.select_tool(Tool::Place),
             KeyCode::Digit2 => self.editor.select_tool(Tool::Remove),
@@ -1082,41 +1096,6 @@ impl App {
             KeyCode::Digit8 => self.editor.select_tool(Tool::Sphere),
             KeyCode::Digit9 => self.editor.select_tool(Tool::Cylinder),
             KeyCode::Digit0 => self.editor.select_tool(Tool::Select),
-            KeyCode::KeyZ if self.primary_modifier() => {
-                let stepped = if self.modifiers.shift_key() {
-                    self.editor.redo(&mut self.document.world, &mut self.document.graph)
-                } else {
-                    self.editor.undo(&mut self.document.world, &mut self.document.graph)
-                };
-                if stepped {
-                    // Voxel entries are flagged by the mesh rebuild; a
-                    // graph-only transition reaches no chunk, so the
-                    // step has to say so itself.
-                    self.document.bump();
-                }
-            }
-            KeyCode::KeyY if self.primary_modifier() => {
-                if self.editor.redo(&mut self.document.world, &mut self.document.graph) {
-                    self.document.bump();
-                }
-            }
-            KeyCode::KeyS if self.primary_modifier() => {
-                if self.modifiers.shift_key() {
-                    self.save_project_as();
-                } else {
-                    self.save_project();
-                }
-            }
-            // Both go through the unsaved-changes guard, same as the
-            // File menu — the guard lives on `App` precisely because
-            // these two reach the file ops without passing the UiAction
-            // queue.
-            KeyCode::KeyO if self.primary_modifier() => {
-                self.guard_then(PendingAction::OpenPicker);
-            }
-            KeyCode::KeyN if self.primary_modifier() => {
-                self.guard_then(PendingAction::NewProject);
-            }
             // Esc: cancel the modal interaction first — an in-progress
             // shape gesture — and only deselect when there is none.
             // Doing both at once meant bailing out of a shape also
@@ -1136,29 +1115,8 @@ impl App {
                     self.deselect();
                 }
             }
-            KeyCode::KeyD if self.primary_modifier() => {
-                self.deselect();
-            }
-            // Selection clipboard ops. Ctrl+Shift+V forces "paste
-            // at cursor" (vengi-style two-channel paste); plain
-            // Ctrl+V uses the selection's origin if one exists.
-            KeyCode::KeyC if self.primary_modifier() => {
-                self.copy_selection();
-            }
-            KeyCode::KeyX if self.primary_modifier() => {
-                self.cut_selection();
-            }
-            KeyCode::KeyV if self.primary_modifier() => {
-                let prefer_cursor = self.modifiers.shift_key();
-                self.paste_clipboard(prefer_cursor);
-            }
             KeyCode::Delete => {
                 self.delete_selection();
-            }
-            // Ctrl+A / ⌘A = select-all-solid: AABB of every non-air
-            // voxel in the world. Standard image-editor convention.
-            KeyCode::KeyA if self.primary_modifier() => {
-                self.select_all_solid();
             }
             // Rotate / mirror the active selection (no-op with a status
             // hint if there's none). R spins around Y — the common

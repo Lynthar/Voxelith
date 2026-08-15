@@ -8,6 +8,30 @@ use crate::prefs::PanelVisibility;
 
 use super::CameraView;
 
+/// How the exported mesh is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Surface {
+    /// Greedy mesh — the voxels as they render.
+    Blocky,
+    /// Marching Cubes on the raw 0/1 density — rounded, keeps thin
+    /// features.
+    SmoothLight,
+    /// Marching Cubes after a 3×3×3 blur — clay-like, may dissolve
+    /// 1-cell features.
+    SmoothHeavy,
+}
+
+/// One export request: format × surface, with the pairings that don't
+/// exist unrepresentable — `.vox` stores voxels, so there is no
+/// smoothed variant to ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExportKind {
+    Vox,
+    Obj(Surface),
+    Glb(Surface),
+}
+
+
 /// One-shot UI actions that need to be processed by the application.
 ///
 /// Not `Copy` because `OpenRecent` carries a `PathBuf`. Actions are
@@ -29,17 +53,9 @@ pub enum UiAction {
     /// replaces, and is undoable, so unlike `ImportVox` it needs no
     /// unsaved-changes guard.
     ImportGlb,
-    ExportVox,
-    ExportObj,
-    /// MC smoothed OBJ, no blur — preserves thin features
-    ExportObjSmoothedLight,
-    /// MC smoothed OBJ, 3×3×3 blur — clay-like, may dissolve thin features
-    ExportObjSmoothedHeavy,
-    ExportGlb,
-    /// MC smoothed GLB, no blur
-    ExportGlbSmoothedLight,
-    /// MC smoothed GLB, 3×3×3 blur
-    ExportGlbSmoothedHeavy,
+    /// Export the scene as `kind`. One action for every format ×
+    /// surface pairing — the menu's seven entries all funnel here.
+    Export(ExportKind),
     Exit,
 
     /// Unsaved-changes prompt: save the project, then run the action
@@ -65,7 +81,9 @@ pub enum UiAction {
     /// Paste at the selection's origin (or hovered cell when no
     /// selection exists). Ctrl+Shift+V's "always paste at cursor"
     /// is keyboard-only — UI buttons go through this default path.
-    PasteClipboard,
+    /// `at_cursor` pastes at the hovered cell (Ctrl+Shift+V) instead
+    /// of the selection origin.
+    PasteClipboard { at_cursor: bool },
     DeleteSelection,
     /// Set the selection to the AABB of every non-air voxel in
     /// the world.
