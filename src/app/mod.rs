@@ -367,28 +367,11 @@ impl App {
                 .collect();
         }
 
-        let mut document = Document::new();
+        let document = Document::new();
         let mut ui = Ui::new();
         ui.state.panels = prefs.panels.clone();
         ui.viewport = prefs.viewport.clone();
         ui.procgen = prefs.procgen.clone();
-        // The graph belongs to the project now, so a fresh session opens
-        // with an empty one — except the first time a build that stores
-        // it there meets a prefs file that still holds the user's graph.
-        // That one gets carried in front of them, once: re-running the
-        // migration every launch would drop the old graph on top of
-        // whatever they had been editing since.
-        if !prefs.graph_migrated && !prefs.graph.is_empty() {
-            document.graph = prefs.graph.to_graph();
-            // Pre-position-field prefs deserialize every node at [0, 0].
-            if document.graph.all_at_origin() {
-                document.graph.relayout();
-            }
-            prefs.graph_migrated = true;
-            ui.set_status(
-                "Your pipeline graph now travels with the project — save this one to keep it",
-            );
-        }
         ui.recent_files = prefs.recent_files.clone();
 
         let last_grid_size = ui.viewport.grid_size;
@@ -470,10 +453,6 @@ impl App {
         self.prefs.panels = self.ui.state.panels.clone();
         self.prefs.viewport = self.ui.viewport.clone();
         self.prefs.procgen = self.ui.procgen.clone();
-        // `prefs.graph` is deliberately *not* written back: the live
-        // graph goes into the project file now, and the copy in prefs is
-        // a one-time migration source that keeps its old contents until
-        // the field is removed a version from now. Only the flag moves.
         self.prefs.editor = EditorPrefs {
             brush_color: [
                 self.editor.brush_color.r,
