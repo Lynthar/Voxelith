@@ -23,13 +23,17 @@ use crate::editor::Tool;
 
 use super::panels::UiAction;
 
-/// One toolbar / panel / help entry for a tool. Name and shortcut come
-/// from [`Tool`] itself — this row adds only what the type doesn't
-/// carry: the button glyph and the long-form hover note.
+/// One toolbar / inspector / help entry for a tool. Name and shortcut
+/// come from [`Tool`] itself, the icon from `icons::paint_tool_icon`
+/// (a match total over `Tool`, so a new tool can't reach the toolbar
+/// without one) — this row adds only what neither carries: the
+/// long-form usage note and the toolbar grouping.
 pub struct ToolSpec {
     pub tool: Tool,
-    pub icon: &'static str,
-    /// Extra hover detail; empty for tools whose name says it all.
+    /// How the tool is used. The toolbar shows it on hover and the
+    /// Inspector prints it as the tool's hint line — one string for
+    /// both, so they can't disagree. Empty for tools whose name says
+    /// it all.
     pub note: &'static str,
     /// Draw a group separator above this button (brush / shape /
     /// select / socket sections).
@@ -39,29 +43,61 @@ pub struct ToolSpec {
 /// Every tool, in toolbar order.
 #[rustfmt::skip] // one row per tool — the table reads as a table
 pub const TOOL_SPECS: &[ToolSpec] = &[
-    ToolSpec { tool: Tool::Place, icon: "+", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Remove, icon: "-", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Paint, icon: "P", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Eyedropper, icon: "E", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Fill, icon: "F", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Line, icon: "L", note: "", separator_before: true },
-    ToolSpec { tool: Tool::Box, icon: "▢", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Sphere, icon: "○", note: "", separator_before: false },
-    ToolSpec { tool: Tool::Cylinder, icon: "⌭", note: "", separator_before: false },
+    ToolSpec { tool: Tool::Place, note: "", separator_before: false },
+    ToolSpec { tool: Tool::Remove, note: "", separator_before: false },
+    ToolSpec { tool: Tool::Paint, note: "", separator_before: false },
+    ToolSpec {
+        tool: Tool::Eyedropper,
+        note: "Click a voxel to pick its color and material into the brush.",
+        separator_before: false,
+    },
+    ToolSpec {
+        tool: Tool::Fill,
+        note: "Click a solid voxel to recolor its contiguous same-color region.",
+        separator_before: false,
+    },
+    ToolSpec {
+        tool: Tool::Line,
+        note: "Drag from anchor to end (3D Bresenham line).",
+        separator_before: true,
+    },
+    ToolSpec {
+        tool: Tool::Box,
+        note: "Drag corner to corner (filled AABB).",
+        separator_before: false,
+    },
+    ToolSpec {
+        tool: Tool::Sphere,
+        note: "Drag a bounding box; the ellipsoid fits inside it.",
+        separator_before: false,
+    },
+    ToolSpec {
+        tool: Tool::Cylinder,
+        note: "Drag a footprint, then pull up — the cylinder stands \
+               along the locked face's normal.",
+        separator_before: false,
+    },
     ToolSpec {
         tool: Tool::Select,
-        icon: "▭",
         note: "Drag to mark an AABB. Esc or Ctrl+D deselects.",
         separator_before: true,
     },
     ToolSpec {
         tool: Tool::Socket,
-        icon: "⚓",
         note: "Click a voxel face (or the ground) to drop a named \
                attachment point. Exports to glTF as an empty node.",
         separator_before: true,
     },
 ];
+
+/// The descriptor row for `tool` — the Inspector's way in. The
+/// toolbar and help window iterate instead.
+pub fn spec_of(tool: Tool) -> &'static ToolSpec {
+    TOOL_SPECS
+        .iter()
+        .find(|s| s.tool == tool)
+        .expect("every tool has a spec row; a test pins this")
+}
 
 /// Which help-window section a chord row renders under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

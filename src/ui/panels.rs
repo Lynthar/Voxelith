@@ -135,7 +135,7 @@ pub enum UiAction {
     /// the world.
     SelectAllSolid,
     /// Clear the active selection (Esc / Ctrl+D / Edit menu →
-    /// Deselect / Tools panel button). Every entry point must route
+    /// Deselect / Inspector button). Every entry point must route
     /// here, including ones holding `&mut Editor`: the selection also
     /// owns drag/move anchors and the translucent move ghost, which
     /// live on `App`. Writing `editor.selection = None` directly

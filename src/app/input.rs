@@ -474,7 +474,7 @@ impl App {
                 // Drop a named attachment point at the center of the
                 // clicked face, oriented along its outward normal.
                 // Single click — no drag, no release-commit, not
-                // undoable (managed via the Tools panel, like the
+                // undoable (managed via the Inspector, like the
                 // selection). `drag_eligible` in `handler.rs` excludes
                 // Socket, so a held-drag never spams duplicates.
                 let (nx, ny, nz) = hit.normal;

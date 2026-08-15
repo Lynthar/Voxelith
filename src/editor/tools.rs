@@ -99,7 +99,7 @@ impl Tool {
             Tool::Sphere => "8",
             Tool::Cylinder => "9",
             Tool::Select => "0",
-            // No digit free; placed from the toolbar / Tools panel.
+            // No digit free; picked from the toolbar.
             Tool::Socket => "",
         }
     }

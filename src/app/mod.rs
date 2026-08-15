@@ -1133,7 +1133,7 @@ impl App {
         // Per-frame reconciliation of gesture vs. tool — the "tool
         // switch cancels the gesture it orphans" rule, checked here
         // because tool switches arrive through several doors (number
-        // keys, toolbar, Tools panel, Alt release). A shape gesture
+        // keys, toolbar, Alt release). A shape gesture
         // survives switches *within* the shape family (Box → Sphere
         // mid-drag re-previews and commits as the new shape — long-
         // standing behavior); a Select drag dies with the Select tool

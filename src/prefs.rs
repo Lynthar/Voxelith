@@ -82,7 +82,10 @@ impl Default for WindowPrefs {
 #[serde(default)]
 pub struct PanelVisibility {
     pub show_stats: bool,
-    pub show_tools: bool,
+    /// The context Inspector (the Tools float's successor; renamed
+    /// from `show_tools`, so an older prefs file's value for that key
+    /// is ignored and this starts from its default once).
+    pub show_inspector: bool,
     pub show_palette: bool,
     pub show_viewport_settings: bool,
     pub show_procgen: bool,
@@ -93,14 +96,14 @@ pub struct PanelVisibility {
 impl Default for PanelVisibility {
     /// The lean default workspace (a 2026-08 product decision): the
     /// always-on surfaces are the left toolbar, the status bar and the
-    /// palette; everything else is opt-in via the View menu, same as
-    /// the stats overlays. Only a fresh install (or a deleted
-    /// `prefs.ron`) sees these values — an existing file's own panel
-    /// set wins.
+    /// palette, plus the Inspector tracking the active tool; everything
+    /// else is opt-in via the View menu, same as the stats overlays.
+    /// Only a fresh install (or a deleted `prefs.ron`) sees these
+    /// values — an existing file's own panel set wins.
     fn default() -> Self {
         Self {
             show_stats: false,
-            show_tools: false,
+            show_inspector: true,
             show_palette: true,
             show_viewport_settings: false,
             show_procgen: false,

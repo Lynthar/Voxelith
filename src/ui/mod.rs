@@ -1,6 +1,7 @@
 //! User interface components using egui.
 
 pub mod hud;
+mod icons;
 pub mod keymap;
 mod panels;
 
@@ -123,7 +124,7 @@ pub struct Ui {
     /// App syncs this whenever the prefs version changes (touch_recent
     /// + initial load).
     pub recent_files: Vec<std::path::PathBuf>,
-    /// Mirror of `App::clipboard.is_some()` so the Tools panel can
+    /// Mirror of `App::clipboard.is_some()` so the Inspector can
     /// gray out the Paste button without `App::clipboard` leaking
     /// across the UI layer boundary. App syncs it before each frame.
     pub has_clipboard: bool,
@@ -226,9 +227,9 @@ impl Ui {
             self.show_stats_panel(ctx, stats, editor);
         }
 
-        // Tools panel
-        if self.state.panels.show_tools {
-            self.show_tools_panel(ctx, editor, sockets);
+        // Inspector (the active tool's context panel)
+        if self.state.panels.show_inspector {
+            self.show_inspector_panel(ctx, editor, sockets);
         }
 
         // Color palette panel
@@ -1092,7 +1093,7 @@ impl Ui {
                 let wireframe_supported = self.wireframe_supported;
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.state.panels.show_stats, "Statistics");
-                    ui.checkbox(&mut self.state.panels.show_tools, "Tools Panel");
+                    ui.checkbox(&mut self.state.panels.show_inspector, "Inspector");
                     ui.checkbox(&mut self.state.panels.show_palette, "Color Palette");
                     ui.checkbox(
                         &mut self.state.panels.show_viewport_settings,
@@ -1173,40 +1174,50 @@ impl Ui {
                     // meant eleven copies of the key map drifting away
                     // from the one the keyboard handler actually uses.
                     // `note` adds per-button detail where there is any.
-                    let tool_button = |ui: &mut egui::Ui,
-                                       tool: Tool,
-                                       current: Tool,
-                                       icon: &str,
-                                       note: &str|
-                     -> bool {
-                        let mut tooltip = tool.name().to_string();
-                        if !tool.shortcut().is_empty() {
-                            tooltip.push_str(&format!(" ({})", tool.shortcut()));
-                        }
-                        if !note.is_empty() {
-                            tooltip.push('\n');
-                            tooltip.push_str(note);
-                        }
-                        let selected = tool == current;
-                        ui.add(
-                            egui::Button::new(icon)
-                                .min_size(egui::vec2(36.0, 36.0))
-                                .selected(selected),
-                        )
-                        .on_hover_text(tooltip)
-                        .clicked()
-                    };
+                    // The icon is painted (`icons::paint_tool_icon`) in
+                    // whatever text color the widget state calls for,
+                    // over the same frame a selectable Button would draw.
+                    let tool_button =
+                        |ui: &mut egui::Ui, tool: Tool, current: Tool, note: &str| -> bool {
+                            let mut tooltip = tool.name().to_string();
+                            if !tool.shortcut().is_empty() {
+                                tooltip.push_str(&format!(" ({})", tool.shortcut()));
+                            }
+                            if !note.is_empty() {
+                                tooltip.push('\n');
+                                tooltip.push_str(note);
+                            }
+                            let selected = tool == current;
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                let visuals = ui.style().interact_selectable(&response, selected);
+                                ui.painter().rect(
+                                    rect,
+                                    visuals.rounding,
+                                    visuals.weak_bg_fill,
+                                    visuals.bg_stroke,
+                                );
+                                icons::paint_tool_icon(
+                                    ui.painter(),
+                                    rect.shrink(9.0),
+                                    tool,
+                                    visuals.text_color(),
+                                );
+                            }
+                            response.on_hover_text(tooltip).clicked()
+                        };
 
                     // One loop over the descriptor table — the same
-                    // rows the Tools panel and help window print, so a
-                    // new tool is one `ToolSpec` entry everywhere.
+                    // rows the help window prints, so a new tool is one
+                    // `ToolSpec` entry everywhere.
                     for spec in keymap::TOOL_SPECS {
                         if spec.separator_before {
                             ui.add_space(8.0);
                             ui.separator();
                             ui.add_space(8.0);
                         }
-                        if tool_button(ui, spec.tool, editor.current_tool, spec.icon, spec.note) {
+                        if tool_button(ui, spec.tool, editor.current_tool, spec.note) {
                             editor.select_tool(spec.tool);
                         }
                     }
@@ -1283,401 +1294,94 @@ impl Ui {
             });
     }
 
-    fn show_tools_panel(&mut self, ctx: &Context, editor: &mut Editor, sockets: &mut Vec<Socket>) {
+    /// The Inspector (2026-08 convergence ①): what the Tools float
+    /// used to be, minus the tool pickers — the toolbar is the one
+    /// place a tool is chosen now — and showing only what the active
+    /// tool actually consumes. `editor/tools.rs` is the authority on
+    /// that: brush size reaches Place / Remove / Paint only, symmetry
+    /// everything but Eyedropper / Select / Socket, and the brush
+    /// color every tool that writes voxels. Sections a tool doesn't
+    /// use aren't grayed out, they're absent — an Inspector's claim is
+    /// "this is what this tool has".
+    fn show_inspector_panel(
+        &mut self,
+        ctx: &Context,
+        editor: &mut Editor,
+        sockets: &mut Vec<Socket>,
+    ) {
         // The close button's flag rides a local: `.open()` would borrow
         // `self.state.panels` for the whole window, while the closure
         // needs `self.state` for `request(...)`. Written back once both
         // borrows are released. Same shape in `show_viewport_panel`.
-        let mut open = self.state.panels.show_tools;
-        egui::Window::new("Tools")
+        let mut open = self.state.panels.show_inspector;
+        let tool = editor.current_tool;
+        // One fixed window title: per-tool titles would give every tool
+        // its own egui window id, and with it its own remembered
+        // position — the panel would jump around as tools change.
+        egui::Window::new("Inspector")
             .default_pos([60.0, 200.0])
             .resizable(true)
             .collapsible(true)
-            // This panel's content runs ~750px — taller than the whole
-            // 1280x720 default window. Without its own scrollbar egui
-            // clamps the window to the screen and everything below
-            // Symmetry is simply unreachable.
             .vscroll(true)
             .open(&mut open)
             .show(ctx, |ui| {
-                // Tool selection — split into Brush (cell-by-cell) and
-                // Shape (click-anchor / drag / release) groups so the
-                // distinct interaction model is visually clear.
-                ui.heading("Brush");
-                egui::Grid::new("brush_tool_grid")
-                    .num_columns(3)
-                    .spacing([4.0, 4.0])
-                    .show(ui, |ui| {
-                        if ui
-                            .selectable_label(
-                                editor.current_tool == Tool::Place,
-                                Tool::Place.name(),
-                            )
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Place);
-                        }
-                        if ui
-                            .selectable_label(
-                                editor.current_tool == Tool::Remove,
-                                Tool::Remove.name(),
-                            )
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Remove);
-                        }
-                        if ui
-                            .selectable_label(
-                                editor.current_tool == Tool::Paint,
-                                Tool::Paint.name(),
-                            )
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Paint);
-                        }
-                        ui.end_row();
-
-                        if ui
-                            .selectable_label(
-                                editor.current_tool == Tool::Eyedropper,
-                                Tool::Eyedropper.name(),
-                            )
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Eyedropper);
-                        }
-                        if ui
-                            .selectable_label(editor.current_tool == Tool::Fill, Tool::Fill.name())
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Fill);
-                        }
-                        ui.end_row();
-                    });
-
-                ui.add_space(4.0);
-                ui.heading("Shape");
-                egui::Grid::new("shape_tool_grid")
-                    .num_columns(3)
-                    .spacing([4.0, 4.0])
-                    .show(ui, |ui| {
-                        if ui
-                            .selectable_label(editor.current_tool == Tool::Line, Tool::Line.name())
-                            .on_hover_text("Drag from anchor to end (3D Bresenham line)")
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Line);
-                        }
-                        if ui
-                            .selectable_label(editor.current_tool == Tool::Box, Tool::Box.name())
-                            .on_hover_text("Drag corner to corner (filled AABB)")
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Box);
-                        }
-                        if ui
-                            .selectable_label(
-                                editor.current_tool == Tool::Sphere,
-                                Tool::Sphere.name(),
-                            )
-                            .on_hover_text("Drag bbox; ellipsoid fits in it")
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Sphere);
-                        }
-                        ui.end_row();
-
-                        if ui
-                            .selectable_label(
-                                editor.current_tool == Tool::Cylinder,
-                                Tool::Cylinder.name(),
-                            )
-                            .on_hover_text(
-                                "Drag a footprint, then pull up — the cylinder \
-                                 stands along the height direction (the locked \
-                                 face's normal)",
-                            )
-                            .clicked()
-                        {
-                            editor.select_tool(Tool::Cylinder);
-                        }
-                        ui.end_row();
-                    });
-
-                ui.add_space(4.0);
-                ui.heading("Selection");
-                if ui
-                    .selectable_label(editor.current_tool == Tool::Select, "Box Select")
-                    .on_hover_text(
-                        "Drag corner-to-corner to mark an AABB region for batch \
-                         operations. Esc or Ctrl+D deselects.",
-                    )
-                    .clicked()
-                {
-                    editor.select_tool(Tool::Select);
-                }
-                if let Some(sel) = editor.selection {
-                    let (w, h, d) = sel.size();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Active: {}×{}×{} ({} cells)",
-                            w,
-                            h,
-                            d,
-                            sel.cell_count()
-                        ))
-                        .small()
-                        .weak(),
-                    );
-                }
-                let has_sel = editor.selection.is_some();
+                // Which tool this inspects, from the same descriptor
+                // row the toolbar tooltip prints.
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Copy"))
-                        .on_hover_text("Ctrl+C — copy non-air voxels into the clipboard")
-                        .clicked()
-                    {
-                        self.state.request(UiAction::CopySelection);
-                    }
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Cut"))
-                        .on_hover_text("Ctrl+X — copy then clear in one undoable Command")
-                        .clicked()
-                    {
-                        self.state.request(UiAction::CutSelection);
-                    }
-                    let can_paste = self.has_clipboard;
-                    if ui
-                        .add_enabled(can_paste, egui::Button::new("Paste"))
-                        .on_hover_text(
-                            "Ctrl+V — paste at selection origin (or cursor cell if no \
-                             selection). Ctrl+Shift+V always pastes at cursor.",
-                        )
-                        .clicked()
-                    {
-                        self.state
-                            .request(UiAction::PasteClipboard { at_cursor: false });
+                    ui.heading(tool.name());
+                    if !tool.shortcut().is_empty() {
+                        ui.label(egui::RichText::new(tool.shortcut()).weak());
                     }
                 });
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Delete"))
-                        .on_hover_text("Del — clear non-air voxels inside the selection")
-                        .clicked()
-                    {
-                        self.state.request(UiAction::DeleteSelection);
-                    }
-                    if ui
-                        .button("Select All")
-                        .on_hover_text("Ctrl+A — select the AABB of every non-air voxel")
-                        .clicked()
-                    {
-                        self.state.request(UiAction::SelectAllSolid);
-                    }
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Deselect"))
-                        .on_hover_text("Esc / Ctrl+D — clear the active selection")
-                        .clicked()
-                    {
-                        // Goes through the action even though this panel
-                        // holds `&mut Editor`: clearing a selection is
-                        // more than `editor.selection = None` (drag/move
-                        // anchors and the move ghost live on App). See
-                        // `App::deselect`.
-                        self.state.request(UiAction::Deselect);
-                    }
-                });
-
-                ui.add_space(4.0);
-                ui.heading("Sockets");
-                if ui
-                    .selectable_label(editor.current_tool == Tool::Socket, "Place Socket")
-                    .on_hover_text(
-                        "Click a voxel face (or the ground) to drop a named \
-                         attachment point. Exports to glTF as an empty node \
-                         (name + position + orientation).",
-                    )
-                    .clicked()
-                {
-                    editor.select_tool(Tool::Socket);
+                let note = keymap::spec_of(tool).note;
+                if !note.is_empty() {
+                    ui.label(egui::RichText::new(note).small().weak());
                 }
-                if sockets.is_empty() {
-                    ui.label(egui::RichText::new("No sockets yet.").small().weak());
-                } else {
-                    // Per-socket row: inline rename + delete + position
-                    // readout. Names become glTF node names on export.
-                    // Every mutation also raises `SocketsEdited`: this
-                    // panel writes `editor.sockets` directly (its
-                    // `&mut Editor` makes that legal), but sockets are
-                    // document data no mesh rebuild notices, so without
-                    // the action a rename or delete never marked the
-                    // document modified — no save prompt, no autosave.
-                    let mut to_delete: Option<usize> = None;
-                    let mut edited = false;
-                    egui::ScrollArea::vertical()
-                        .max_height(120.0)
-                        .show(ui, |ui| {
-                            for (i, s) in sockets.iter_mut().enumerate() {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .add(
-                                            egui::TextEdit::singleline(&mut s.name)
-                                                .desired_width(110.0),
-                                        )
-                                        .on_hover_text("Name (becomes the glTF node name)")
-                                        .changed()
-                                    {
-                                        edited = true;
-                                    }
-                                    if ui
-                                        .small_button("✕")
-                                        .on_hover_text("Delete this socket")
-                                        .clicked()
-                                    {
-                                        to_delete = Some(i);
-                                    }
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "({:.1}, {:.1}, {:.1})",
-                                            s.position[0], s.position[1], s.position[2]
-                                        ))
-                                        .small()
-                                        .weak(),
-                                    );
-                                });
-                            }
+                ui.separator();
+
+                match tool {
+                    Tool::Place | Tool::Paint => {
+                        Self::brush_size_section(ui, editor);
+                        Self::symmetry_section(ui, editor);
+                        Self::color_material_section(ui, editor);
+                    }
+                    Tool::Remove => {
+                        Self::brush_size_section(ui, editor);
+                        Self::symmetry_section(ui, editor);
+                    }
+                    Tool::Fill => {
+                        Self::symmetry_section(ui, editor);
+                        Self::color_material_section(ui, editor);
+                    }
+                    Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder => {
+                        Self::symmetry_section(ui, editor);
+                        Self::color_material_section(ui, editor);
+                    }
+                    Tool::Eyedropper => {
+                        // Read-only: what a pick would overwrite.
+                        ui.heading("Brush");
+                        ui.horizontal(|ui| {
+                            let color = egui::Color32::from_rgb(
+                                editor.brush_color.r,
+                                editor.brush_color.g,
+                                editor.brush_color.b,
+                            );
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+                            ui.painter().rect_filled(rect, 4.0, color);
+                            ui.label(format!(
+                                "{}, {}, {}",
+                                editor.brush_color.r, editor.brush_color.g, editor.brush_color.b
+                            ));
                         });
-                    if let Some(i) = to_delete {
-                        sockets.remove(i);
-                        edited = true;
                     }
-                    if ui
-                        .button("Clear all sockets")
-                        .on_hover_text("Remove every socket from the scene")
-                        .clicked()
-                    {
-                        sockets.clear();
-                        edited = true;
+                    Tool::Select => {
+                        self.selection_section(ui, editor);
                     }
-                    if edited {
-                        self.state.request(UiAction::SocketsEdited);
+                    Tool::Socket => {
+                        self.sockets_section(ui, sockets);
                     }
                 }
-
-                ui.separator();
-
-                // Brush size
-                ui.heading("Brush Size");
-                let mut size = editor.brush_size as u32;
-                ui.add(egui::Slider::new(&mut size, 1..=10).show_value(true));
-                editor.brush_size = size as u8;
-
-                ui.separator();
-
-                // Symmetry
-                ui.heading("Symmetry");
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut editor.symmetry.x, "X")
-                        .on_hover_text("Mirror brush across the x = 0 plane");
-                    ui.checkbox(&mut editor.symmetry.y, "Y")
-                        .on_hover_text("Mirror brush across the y = 0 plane");
-                    ui.checkbox(&mut editor.symmetry.z, "Z")
-                        .on_hover_text("Mirror brush across the z = 0 plane");
-                });
-                ui.label(
-                    egui::RichText::new(
-                        "Mirrors Place / Remove / Paint / Fill and the shape \
-                         tools across enabled planes through the world origin. \
-                         Eyedropper is exempt.",
-                    )
-                    .small()
-                    .weak(),
-                );
-
-                ui.separator();
-
-                // Color
-                ui.heading("Color");
-                let mut color = [
-                    editor.brush_color.r as f32 / 255.0,
-                    editor.brush_color.g as f32 / 255.0,
-                    editor.brush_color.b as f32 / 255.0,
-                ];
-                if ui.color_edit_button_rgb(&mut color).changed() {
-                    // Only RGB changes; keep alpha + material flags
-                    // (emissive / metallic) so a color pick doesn't reset
-                    // what behaves like a brush mode.
-                    editor.brush_color.r = (color[0] * 255.0) as u8;
-                    editor.brush_color.g = (color[1] * 255.0) as u8;
-                    editor.brush_color.b = (color[2] * 255.0) as u8;
-                }
-
-                // RGB values
-                ui.horizontal(|ui| {
-                    ui.label("RGB:");
-                    ui.label(format!(
-                        "{}, {}, {}",
-                        editor.brush_color.r, editor.brush_color.g, editor.brush_color.b
-                    ));
-                });
-
-                ui.separator();
-
-                // Material flags baked into the brush's voxel template and
-                // carried into GLB export as glTF materials. A brush mode,
-                // like symmetry — picking a color preserves these.
-                ui.heading("Material");
-                ui.horizontal(|ui| {
-                    let mut emissive = editor.brush_color.is_emissive();
-                    if ui
-                        .checkbox(&mut emissive, "Emissive")
-                        .on_hover_text(
-                            "Mark placed voxels as self-illuminating \
-                             (exported as a glTF emissive material)",
-                        )
-                        .changed()
-                    {
-                        editor.brush_color.set_emissive(emissive);
-                    }
-                    let mut metallic = editor.brush_color.is_metallic();
-                    if ui
-                        .checkbox(&mut metallic, "Metallic")
-                        .on_hover_text(
-                            "Mark placed voxels as metal (exported as a \
-                             glTF metallic material)",
-                        )
-                        .changed()
-                    {
-                        editor.brush_color.set_metallic(metallic);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Tint zone");
-                    let mut zone = editor.brush_color.tint_zone();
-                    let before = zone;
-                    let label = match zone {
-                        1 => "Primary",
-                        2 => "Secondary",
-                        3 => "Reserved",
-                        _ => "None",
-                    };
-                    egui::ComboBox::from_id_salt("brush_tint_zone")
-                        .selected_text(label)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut zone, 0, "None");
-                            ui.selectable_value(&mut zone, 1, "Primary");
-                            ui.selectable_value(&mut zone, 2, "Secondary");
-                            ui.selectable_value(&mut zone, 3, "Reserved");
-                        });
-                    if zone != before {
-                        editor.brush_color.set_tint_zone(zone);
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "Faction recolor zone — exported per-vertex as _TINTZONE \
-                     for a downstream uber-shader (does not change the editor view)",
-                );
 
                 // Show hovered voxel info
                 if let Some(hit) = &editor.hovered_voxel {
@@ -1693,7 +1397,261 @@ impl Ui {
                     ));
                 }
             });
-        self.state.panels.show_tools = open;
+        self.state.panels.show_inspector = open;
+    }
+
+    /// Select's Inspector section: the live readout and the clipboard /
+    /// delete verbs, mirroring the Edit menu.
+    fn selection_section(&mut self, ui: &mut egui::Ui, editor: &Editor) {
+        if let Some(sel) = editor.selection {
+            let (w, h, d) = sel.size();
+            ui.label(
+                egui::RichText::new(format!(
+                    "Active: {}×{}×{} ({} cells)",
+                    w,
+                    h,
+                    d,
+                    sel.cell_count()
+                ))
+                .small()
+                .weak(),
+            );
+        }
+        let has_sel = editor.selection.is_some();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_sel, egui::Button::new("Copy"))
+                .on_hover_text("Ctrl+C — copy non-air voxels into the clipboard")
+                .clicked()
+            {
+                self.state.request(UiAction::CopySelection);
+            }
+            if ui
+                .add_enabled(has_sel, egui::Button::new("Cut"))
+                .on_hover_text("Ctrl+X — copy then clear in one undoable Command")
+                .clicked()
+            {
+                self.state.request(UiAction::CutSelection);
+            }
+            let can_paste = self.has_clipboard;
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste"))
+                .on_hover_text(
+                    "Ctrl+V — paste at selection origin (or cursor cell if no \
+                             selection). Ctrl+Shift+V always pastes at cursor.",
+                )
+                .clicked()
+            {
+                self.state
+                    .request(UiAction::PasteClipboard { at_cursor: false });
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_sel, egui::Button::new("Delete"))
+                .on_hover_text("Del — clear non-air voxels inside the selection")
+                .clicked()
+            {
+                self.state.request(UiAction::DeleteSelection);
+            }
+            if ui
+                .button("Select All")
+                .on_hover_text("Ctrl+A — select the AABB of every non-air voxel")
+                .clicked()
+            {
+                self.state.request(UiAction::SelectAllSolid);
+            }
+            if ui
+                .add_enabled(has_sel, egui::Button::new("Deselect"))
+                .on_hover_text("Esc / Ctrl+D — clear the active selection")
+                .clicked()
+            {
+                // Goes through the action even though this panel
+                // holds `&mut Editor`: clearing a selection is
+                // more than `editor.selection = None` (drag/move
+                // anchors and the move ghost live on App). See
+                // `App::deselect`.
+                self.state.request(UiAction::Deselect);
+            }
+        });
+    }
+
+    /// Socket's Inspector section: the per-socket list. Placement
+    /// itself is a click in the viewport; this is where the names —
+    /// the part glTF consumers key on — get edited.
+    fn sockets_section(&mut self, ui: &mut egui::Ui, sockets: &mut Vec<Socket>) {
+        if sockets.is_empty() {
+            ui.label(egui::RichText::new("No sockets yet.").small().weak());
+        } else {
+            // Per-socket row: inline rename + delete + position
+            // readout. Names become glTF node names on export.
+            // Every mutation also raises `SocketsEdited`: this
+            // section edits the document's sockets in place
+            // (through the `&mut` App threads in), but sockets
+            // are document data no mesh rebuild notices, so
+            // without the action a rename or delete never marked
+            // the document modified — no save prompt, no autosave.
+            let mut to_delete: Option<usize> = None;
+            let mut edited = false;
+            egui::ScrollArea::vertical()
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for (i, s) in sockets.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::TextEdit::singleline(&mut s.name).desired_width(110.0))
+                                .on_hover_text("Name (becomes the glTF node name)")
+                                .changed()
+                            {
+                                edited = true;
+                            }
+                            if ui
+                                .small_button("✕")
+                                .on_hover_text("Delete this socket")
+                                .clicked()
+                            {
+                                to_delete = Some(i);
+                            }
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "({:.1}, {:.1}, {:.1})",
+                                    s.position[0], s.position[1], s.position[2]
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        });
+                    }
+                });
+            if let Some(i) = to_delete {
+                sockets.remove(i);
+                edited = true;
+            }
+            if ui
+                .button("Clear all sockets")
+                .on_hover_text("Remove every socket from the scene")
+                .clicked()
+            {
+                sockets.clear();
+                edited = true;
+            }
+            if edited {
+                self.state.request(UiAction::SocketsEdited);
+            }
+        }
+    }
+
+    /// Brush radius, for the three tools that stroke cell-by-cell —
+    /// the only consumers of `brush_size` (`BrushTool::apply` returns
+    /// early for everything else).
+    fn brush_size_section(ui: &mut egui::Ui, editor: &mut Editor) {
+        ui.heading("Brush Size");
+        let mut size = editor.brush_size as u32;
+        ui.add(egui::Slider::new(&mut size, 1..=10).show_value(true));
+        editor.brush_size = size as u8;
+        ui.separator();
+    }
+
+    /// Mirror planes through the world origin. Every voxel-writing
+    /// tool consumes this (the brush sphere, the fill seed, the shape
+    /// sweep); Eyedropper doesn't, so its Inspector never shows it.
+    fn symmetry_section(ui: &mut egui::Ui, editor: &mut Editor) {
+        ui.heading("Symmetry");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut editor.symmetry.x, "X")
+                .on_hover_text("Mirror brush across the x = 0 plane");
+            ui.checkbox(&mut editor.symmetry.y, "Y")
+                .on_hover_text("Mirror brush across the y = 0 plane");
+            ui.checkbox(&mut editor.symmetry.z, "Z")
+                .on_hover_text("Mirror brush across the z = 0 plane");
+        });
+        ui.separator();
+    }
+
+    /// The brush voxel template: color, and the material flags that
+    /// ride with it into every placed voxel.
+    fn color_material_section(ui: &mut egui::Ui, editor: &mut Editor) {
+        ui.heading("Color");
+        let mut color = [
+            editor.brush_color.r as f32 / 255.0,
+            editor.brush_color.g as f32 / 255.0,
+            editor.brush_color.b as f32 / 255.0,
+        ];
+        if ui.color_edit_button_rgb(&mut color).changed() {
+            // Only RGB changes; keep alpha + material flags
+            // (emissive / metallic) so a color pick doesn't reset
+            // what behaves like a brush mode.
+            editor.brush_color.r = (color[0] * 255.0) as u8;
+            editor.brush_color.g = (color[1] * 255.0) as u8;
+            editor.brush_color.b = (color[2] * 255.0) as u8;
+        }
+
+        // RGB values
+        ui.horizontal(|ui| {
+            ui.label("RGB:");
+            ui.label(format!(
+                "{}, {}, {}",
+                editor.brush_color.r, editor.brush_color.g, editor.brush_color.b
+            ));
+        });
+
+        ui.separator();
+
+        // Material flags baked into the brush's voxel template and
+        // carried into GLB export as glTF materials. A brush mode,
+        // like symmetry — picking a color preserves these.
+        ui.heading("Material");
+        ui.horizontal(|ui| {
+            let mut emissive = editor.brush_color.is_emissive();
+            if ui
+                .checkbox(&mut emissive, "Emissive")
+                .on_hover_text(
+                    "Mark placed voxels as self-illuminating \
+                             (exported as a glTF emissive material)",
+                )
+                .changed()
+            {
+                editor.brush_color.set_emissive(emissive);
+            }
+            let mut metallic = editor.brush_color.is_metallic();
+            if ui
+                .checkbox(&mut metallic, "Metallic")
+                .on_hover_text(
+                    "Mark placed voxels as metal (exported as a \
+                             glTF metallic material)",
+                )
+                .changed()
+            {
+                editor.brush_color.set_metallic(metallic);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Tint zone");
+            let mut zone = editor.brush_color.tint_zone();
+            let before = zone;
+            let label = match zone {
+                1 => "Primary",
+                2 => "Secondary",
+                3 => "Reserved",
+                _ => "None",
+            };
+            egui::ComboBox::from_id_salt("brush_tint_zone")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut zone, 0, "None");
+                    ui.selectable_value(&mut zone, 1, "Primary");
+                    ui.selectable_value(&mut zone, 2, "Secondary");
+                    ui.selectable_value(&mut zone, 3, "Reserved");
+                });
+            if zone != before {
+                editor.brush_color.set_tint_zone(zone);
+            }
+        })
+        .response
+        .on_hover_text(
+            "Faction recolor zone — exported per-vertex as _TINTZONE \
+                     for a downstream uber-shader (does not change the editor view)",
+        );
     }
 
     fn show_palette_panel(&mut self, ctx: &Context, editor: &mut Editor) {
@@ -1701,9 +1659,8 @@ impl Ui {
         // closure holds the borrow that `set_status` needs.
         let mut palette_feedback: Option<String> = None;
         egui::Window::new("Palette")
-            // Right column: the left one is Statistics + Tools, and
-            // Tools alone is taller than the default window, so a
-            // left-column Palette started life buried under it.
+            // Right column: the left one is the toolbar + Inspector,
+            // so a left-column Palette started life buried under them.
             // (Float positions aren't persisted, so this constant is
             // what every session actually gets.)
             .default_pos([ctx.screen_rect().width() - 240.0, 40.0])
@@ -1798,7 +1755,7 @@ impl Ui {
 
     fn show_viewport_panel(&mut self, ctx: &Context) {
         let wireframe_supported = self.wireframe_supported;
-        // Local close flag — see `show_tools_panel` for why.
+        // Local close flag — see `show_inspector_panel` for why.
         let mut open = self.state.panels.show_viewport_settings;
         egui::Window::new("Viewport Settings")
             // Below Palette, which now owns the top of the right column.

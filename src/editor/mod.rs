@@ -170,7 +170,7 @@ impl Editor {
     }
 
     /// Switch to `tool` because the user asked for it (number key,
-    /// toolbar, Tools panel). Alt's temporary eyedropper never comes
+    /// toolbar). Alt's temporary eyedropper never comes
     /// through here — it is derived per read on the app side
     /// (`effective_tool`), so an explicit pick can't be rolled back by
     /// an Alt release.

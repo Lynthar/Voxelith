@@ -12,7 +12,7 @@
 //! `io::EditorState`) and round-trip through autosave. Like the box
 //! selection, though, they are **not** part of the undo history —
 //! placement / rename / delete are managed directly (the `Socket` tool
-//! drops one per click; the Tools panel renames and deletes them).
+//! drops one per click; the Inspector renames and deletes them).
 
 use glam::{Quat, Vec3};
 
