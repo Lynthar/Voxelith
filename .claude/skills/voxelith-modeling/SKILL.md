@@ -40,7 +40,7 @@ changes what you can do in one step.
 
 | Situation | Use | Why |
 |---|---|---|
-| A human has the model open in the Voxelith editor right now | **in-editor bridge** — `voxelith --agent-port 8737`, connect over HTTP | You edit the world they are looking at, sharing their undo stack. No file in the middle, so no race. 7 tools, no file operations. |
+| A human has the model open in the Voxelith editor right now | **in-editor bridge** — `voxelith --agent-port 8737`, connect over HTTP with the bearer token it prints | You edit the world they are looking at, sharing their undo stack. No file in the middle, so no race. 7 tools, no file operations. |
 | Iterating on **one** model, wanting to look at it repeatedly | **MCP** — `voxelith mcp` | The document is resident: undo reaches back through earlier batches, the selection persists, and `render_views` hands you images inline. |
 | Batch work, variants, anything that should be reproducible | **CLI** — `voxelith exec` | An `ops.json` is a file: diff it, commit it, re-run it, loop over it in a shell. Costs no context. |
 

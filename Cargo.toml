@@ -83,7 +83,7 @@ serde_json = "1.0"
 ron = { version = "0.8", optional = true }
 
 # CLI (headless batch export: `voxelith bake <spec.json>`)
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Utilities
 log = "0.4"

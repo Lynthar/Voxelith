@@ -89,6 +89,12 @@ enum Commands {
         /// instead of stdio. Needs the `mcp-http` feature.
         #[arg(long)]
         http: Option<String>,
+        /// Bearer token HTTP clients must send. Generated and logged at
+        /// startup when omitted; supply one when a client's config has
+        /// to be written down before the server runs. Ignored on stdio,
+        /// where the client is the process that launched this one.
+        #[arg(long, env = "VOXELITH_MCP_TOKEN")]
+        token: Option<String>,
         /// Write the document back to its file after every edit, so the
         /// editor — which reloads a project that changed on disk — shows
         /// each step. One writer at a time: don't hand-edit the same
@@ -165,8 +171,9 @@ fn main() {
         Some(Commands::Mcp {
             root,
             http,
+            token,
             checkpoint,
-        }) => run_mcp(root, http, checkpoint),
+        }) => run_mcp(root, http, token, checkpoint),
         Some(Commands::Render {
             project,
             view,
@@ -266,7 +273,7 @@ fn run_render(project: PathBuf, views: &str, size: u32, out: Option<PathBuf>) {
 /// Logs go to stderr and nothing here prints to stdout: on the stdio
 /// transport stdout *is* the protocol stream.
 #[cfg(feature = "mcp")]
-fn run_mcp(root: Option<PathBuf>, http: Option<String>, checkpoint: bool) {
+fn run_mcp(root: Option<PathBuf>, http: Option<String>, token: Option<String>, checkpoint: bool) {
     use voxelith::mcp::Checkpoint;
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -305,8 +312,17 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>, checkpoint: bool) {
     };
     let served = runtime.block_on(async move {
         match http {
-            Some(address) => serve_http(root, &address, checkpoint).await,
-            None => voxelith::mcp::serve_stdio(root, checkpoint).await,
+            Some(address) => serve_http(root, &address, token, checkpoint).await,
+            None => {
+                // Say so rather than letting someone believe stdio is
+                // token-protected: there is no request to authenticate
+                // here, the client is the process that launched this
+                // one, and the OS already decided it may.
+                if token.is_some() {
+                    log::warn!("--token / VOXELITH_MCP_TOKEN is ignored on stdio");
+                }
+                voxelith::mcp::serve_stdio(root, checkpoint).await
+            }
         }
     });
     if let Err(e) = served {
@@ -319,9 +335,16 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>, checkpoint: bool) {
 async fn serve_http(
     root: voxelith::mcp::Root,
     address: &str,
+    token: Option<String>,
     checkpoint: voxelith::mcp::Checkpoint,
 ) -> anyhow::Result<()> {
-    voxelith::mcp::serve_http(root, address.parse()?, checkpoint).await
+    // A supplied token is for the case where the client's config has to
+    // exist before the server does; otherwise one is minted per run, so
+    // a restart invalidates whatever an old client kept.
+    let token = token
+        .map(voxelith::mcp::AccessToken::from_string)
+        .unwrap_or_else(voxelith::mcp::AccessToken::generate);
+    voxelith::mcp::serve_http(root, address.parse()?, checkpoint, token).await
 }
 
 /// The HTTP transport is a separate feature because it drags axum in.
@@ -330,6 +353,7 @@ async fn serve_http(
 async fn serve_http(
     _root: voxelith::mcp::Root,
     _address: &str,
+    _token: Option<String>,
     _checkpoint: voxelith::mcp::Checkpoint,
 ) -> anyhow::Result<()> {
     anyhow::bail!(

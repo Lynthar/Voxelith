@@ -468,6 +468,12 @@ page.
 Every path resolves inside the server's root (`--root`, default the
 working directory); anything outside comes back as `path_refused`.
 
+Over `--http` the server also requires a bearer token — it logs the
+whole `claude mcp add … --header "Authorization: Bearer <token>"` line
+at startup, and `--token` / `VOXELITH_MCP_TOKEN` pins a fixed one for a
+client configured ahead of time. On stdio there is nothing to
+authenticate (the client launched the process) and the flag is ignored.
+
 ### Letting a human watch
 
 `voxelith mcp --checkpoint` writes the document back to its own file
@@ -496,11 +502,20 @@ the human is looking at.
 
 ```
 voxelith --agent-port 8737          # or: Agent panel ▸ Start
-claude mcp add --transport http voxelith http://127.0.0.1:8737/mcp
+claude mcp add --transport http voxelith http://127.0.0.1:8737/mcp \
+  --header "Authorization: Bearer <token>"
 ```
 
-Loopback only. **Seven tools** — `apply_ops`, `describe`, `slice`,
-`render_views`, `list_generators`, `undo`, `redo`.
+Loopback only, and **the token is required** — a request without it is
+answered `401`, and one carrying an `Origin` header is answered `403`
+(no browser is a legitimate client of an editor). The token is minted
+each time the bridge starts: the human copies the whole line from the
+Agent panel's *Copy setup command*, or reads it from the editor's log.
+It changes on every restart, so a `401` after the editor was reopened
+means asking them for the new line, not retrying.
+
+**Seven tools** — `apply_ops`, `describe`, `slice`, `render_views`,
+`list_generators`, `undo`, `redo`.
 
 - **One undo stack, shared with the person.** Your batch is one entry on
   the same history as their brush strokes. They can Ctrl+Z your step and

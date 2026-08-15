@@ -136,6 +136,11 @@ pub struct Ui {
 pub struct AgentView {
     /// The URL to hand a client, while the bridge is listening.
     pub url: Option<String>,
+    /// The same URL with the bearer token a client has to send — the
+    /// URL alone stopped being enough when the bridge grew a token, and
+    /// a panel that showed only the URL would be handing out a setup
+    /// that answers 401.
+    pub client_command: Option<String>,
     pub approval: Approval,
     /// Batches committed since it came up — the panel's evidence that
     /// something is happening on the other end.
@@ -411,13 +416,32 @@ impl Ui {
                         });
                         ui.label("Point an MCP client at:");
                         ui.monospace(url);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "claude mcp add --transport http voxelith {url}"
-                            ))
-                            .small()
-                            .weak(),
-                        );
+                        // The URL alone gets a 401: the bridge requires
+                        // a bearer token even on loopback, because
+                        // loopback means "a process on this machine",
+                        // not "the person sitting here". So what the
+                        // panel offers is the whole setup line — a
+                        // token nobody can copy is a token that only
+                        // locks out its owner.
+                        if let Some(command) = &agent.client_command {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("Copy setup command")
+                                    .on_hover_text(
+                                        "Includes the access token this run generated. It \
+                                         changes every time the bridge restarts",
+                                    )
+                                    .clicked()
+                                {
+                                    ui.output_mut(|out| out.copied_text = command.clone());
+                                }
+                                ui.label(
+                                    egui::RichText::new("token required — loopback isn't a login")
+                                        .small()
+                                        .weak(),
+                                );
+                            });
+                        }
                         ui.label(format!(
                             "{} batch{} applied since it started",
                             agent.applied,

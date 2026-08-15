@@ -162,9 +162,17 @@ impl App {
         };
         let address = listener.local_addr().unwrap_or(address);
 
+        // Minted per start, so stopping and restarting the bridge
+        // invalidates whatever an old client kept. The human copies the
+        // line the panel shows; nothing writes the token to disk, which
+        // is also why the panel is the only place it exists.
+        let token = voxelith::mcp::AccessToken::generate();
+        let client_command =
+            voxelith::mcp::guard::client_command(&format!("http://{address}/mcp"), &token);
+
         let (handle, receiver) = bridge::channel();
         let task = self.async_runtime.handle().spawn(async move {
-            if let Err(e) = bridge::serve_http_bridged(handle, listener).await {
+            if let Err(e) = bridge::serve_http_bridged(handle, listener, token).await {
                 // The socket is already bound by the time we get here, so
                 // this is the transport itself failing rather than a port
                 // clash. Nothing to recover: the receiver going quiet is
@@ -173,7 +181,12 @@ impl App {
             }
         });
 
-        let running = RunningBridge::new(address, task);
+        let running = RunningBridge::new(address, client_command, task);
+        // Also to the log, not only the panel: `--agent-port` is a
+        // command-line affordance, and someone who started the editor
+        // from a terminal expects the terminal to tell them how to
+        // connect rather than to go hunting for a window.
+        log::info!("Agent bridge client setup: {}", running.client_command());
         self.ui
             .set_status(format!("Agent bridge listening on {}", running.url()));
         self.agent.receiver = Some(receiver);
@@ -283,6 +296,11 @@ impl App {
     pub(super) fn agent_view(&self) -> AgentView {
         AgentView {
             url: self.agent.server.as_ref().map(RunningBridge::url),
+            client_command: self
+                .agent
+                .server
+                .as_ref()
+                .map(|running| running.client_command().to_string()),
             approval: self.agent.approval,
             applied: self.agent.applied,
             pending: self.agent.pending.as_ref().map(PendingReview::summary),

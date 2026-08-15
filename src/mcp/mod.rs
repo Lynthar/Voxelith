@@ -56,8 +56,12 @@ pub(crate) fn requested_views(views: Vec<crate::view::ViewKind>) -> Vec<crate::v
 use crate::view;
 
 pub mod bridge;
+#[cfg(feature = "mcp-http")]
+pub mod guard;
 mod paths;
 
+#[cfg(feature = "mcp-http")]
+pub use guard::AccessToken;
 pub use paths::{display, PathError, Root};
 
 /// The document the agent is working on, and where it came from.
@@ -665,16 +669,22 @@ pub async fn serve_stdio(root: Root, checkpoint: Checkpoint) -> anyhow::Result<(
     Ok(())
 }
 
-/// Serve Streamable HTTP at `/mcp` on `address`.
+/// Serve Streamable HTTP at `/mcp` on `address`, behind `token`.
 ///
 /// The handler factory hands out clones of one server, so every request
 /// works on the same document — a fresh one per request would give each
 /// call its own empty world and silently lose every edit.
+///
+/// Every request goes through [`guard`] first: no browser origins, and
+/// a bearer token even on loopback. The token is caller-supplied so the
+/// two servers (this one and the editor's bridge) mint it the same way
+/// and each decides for itself what to print and where.
 #[cfg(feature = "mcp-http")]
 pub async fn serve_http(
     root: Root,
     address: std::net::SocketAddr,
     checkpoint: Checkpoint,
+    token: guard::AccessToken,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -686,23 +696,33 @@ pub async fn serve_http(
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = guard::guarded(
+        axum::Router::new().nest_service("/mcp", service),
+        token.clone(),
+    );
     let listener = tokio::net::TcpListener::bind(address).await?;
-    // The transport has no authentication, no TLS and no rate limit; on
-    // loopback that's fine (the client is a process the same user
-    // started), but a routable bind hands read/write access to every
-    // project under --root to anything that can reach the port. Honor
-    // an explicit non-loopback address — a firewalled LAN box is a
+    let url = format!("http://{address}/mcp");
+    // A routable bind is still worth saying out loud. The token covers
+    // *who* may call, but not what the traffic crosses: there is no TLS
+    // here, so on anything but loopback the token and every voxel it
+    // moves are in clear text, and a rate limit doesn't exist either.
+    // Honor the address — a firewalled LAN box behind a TLS proxy is a
     // legitimate deployment — but never silently.
     if !address.ip().is_loopback() {
         log::warn!(
             "MCP HTTP is bound to {address}, which is not a loopback address. \
-             The protocol carries NO authentication: anything that can reach \
-             this port can edit every project under --root. Bind 127.0.0.1 \
-             unless the network itself is the access control."
+             Requests are authenticated but NOT encrypted: put a TLS-terminating \
+             reverse proxy in front, or bind 127.0.0.1 instead. Anything holding \
+             the token can edit every project under --root."
         );
     }
-    log::info!("MCP Streamable HTTP listening on http://{address}/mcp");
+    log::info!("MCP Streamable HTTP listening on {url}");
+    // The token is useless to a client that never sees it, so it goes
+    // out as the line the user can paste, not as a value they have to
+    // assemble a header from. stderr, like every other log here —
+    // stdout belongs to the protocol on the other transport, and the
+    // rule not varying by transport is the point.
+    log::info!("Client setup: {}", guard::client_command(&url, &token));
     axum::serve(listener, router).await?;
     Ok(())
 }

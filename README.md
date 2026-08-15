@@ -66,8 +66,9 @@ cargo run --release -- generators        # what `generate` can call
 cargo run --release -- mcp --root ./models --checkpoint
 
 # Or skip the file entirely: the editor hosts a server of its own, so an
-# agent edits the project you have open, on your undo stack. Point a
-# client at the URL it prints (loopback only).
+# agent edits the project you have open, on your undo stack. Paste the
+# setup line it prints — loopback, plus a bearer token minted per run,
+# because "a process on this machine" isn't the same as you.
 cargo run --release -- --agent-port 8737
 ```
 

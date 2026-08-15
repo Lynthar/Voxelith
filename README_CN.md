@@ -66,8 +66,8 @@ cargo run --release -- generators        # generate op 能调用哪些生成器
 cargo run --release -- mcp --root ./models --checkpoint
 
 # 或者干脆不经过文件:编辑器自己就托管一个 server,agent 直接编辑你
-# 开着的工程,批次进的是你自己的撤销栈。把客户端指向它打印的 URL
-# (仅回环地址)
+# 开着的工程,批次进的是你自己的撤销栈。把它打印的那行接入命令整段贴走
+# ——仅回环地址,且每次启动新生成一个令牌:"本机上的某个进程"不等于你本人
 cargo run --release -- --agent-port 8737
 ```
 

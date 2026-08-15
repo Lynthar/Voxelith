@@ -580,6 +580,7 @@ impl ServerHandler for BridgeMcp {
 pub async fn serve_http_bridged(
     editor: BridgeHandle,
     listener: std::net::TcpListener,
+    token: crate::mcp::guard::AccessToken,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -591,7 +592,12 @@ pub async fn serve_http_bridged(
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
-    let router = axum::Router::new().nest_service("/mcp", service);
+    // Loopback is not the access control here — see `guard`. The
+    // document on the other side of this socket is one a human has
+    // open, so "some process on this machine" is exactly the caller
+    // worth turning away.
+    let router =
+        crate::mcp::guard::guarded(axum::Router::new().nest_service("/mcp", service), token);
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
     axum::serve(listener, router).await?;
@@ -608,17 +614,38 @@ pub async fn serve_http_bridged(
 /// sender reports.
 pub struct RunningBridge {
     pub address: std::net::SocketAddr,
+    /// The ready-to-paste client setup line, token and all. Kept as
+    /// text rather than as the token itself: the panel's job is to
+    /// hand a human something that works, and nothing in the editor
+    /// needs to inspect the secret afterwards.
+    client_command: String,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl RunningBridge {
-    pub fn new(address: std::net::SocketAddr, task: tokio::task::JoinHandle<()>) -> Self {
-        Self { address, task }
+    pub fn new(
+        address: std::net::SocketAddr,
+        client_command: String,
+        task: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            address,
+            client_command,
+            task,
+        }
     }
 
-    /// The URL to hand a client, `/mcp` and all.
+    /// The URL to hand a client, `/mcp` and all. Not enough on its own
+    /// since the bridge started requiring a token — see
+    /// [`Self::client_command`].
     pub fn url(&self) -> String {
         format!("http://{}/mcp", self.address)
+    }
+
+    /// The whole line: URL plus the `Authorization` header a client
+    /// has to send.
+    pub fn client_command(&self) -> &str {
+        &self.client_command
     }
 }
 
