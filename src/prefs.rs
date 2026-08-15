@@ -91,10 +91,16 @@ pub struct PanelVisibility {
 }
 
 impl Default for PanelVisibility {
+    /// The lean default workspace (a 2026-08 product decision): the
+    /// always-on surfaces are the left toolbar, the status bar and the
+    /// palette; everything else is opt-in via the View menu, same as
+    /// the stats overlays. Only a fresh install (or a deleted
+    /// `prefs.ron`) sees these values — an existing file's own panel
+    /// set wins.
     fn default() -> Self {
         Self {
-            show_stats: true,
-            show_tools: true,
+            show_stats: false,
+            show_tools: false,
             show_palette: true,
             show_viewport_settings: false,
             show_procgen: false,
@@ -295,8 +301,9 @@ mod tests {
         let p: Prefs = ron::from_str(s).unwrap();
         assert_eq!(p.window.width, 1024);
         assert_eq!(p.window.height, 768);
-        // Panels are show=true by default for the always-on panels.
-        assert!(p.panels.show_stats);
+        // The lean default workspace: palette on, the rest opt-in.
+        assert!(p.panels.show_palette);
+        assert!(!p.panels.show_stats);
         assert!(p.recent_files.is_empty());
     }
 
@@ -304,11 +311,12 @@ mod tests {
     fn test_unknown_field_is_tolerated() {
         // serde with default attribute ignores extra fields by
         // default; this just confirms forward compatibility.
-        let s = "( window: ( width: 800, height: 600 ), panels: ( show_stats: false ) )";
+        let s = "( window: ( width: 800, height: 600 ), panels: ( show_stats: true, from_the_future: 42 ) )";
         let p: Prefs = ron::from_str(s).unwrap();
-        assert!(!p.panels.show_stats);
-        // show_tools should default to true.
-        assert!(p.panels.show_tools);
+        assert!(p.panels.show_stats);
+        // A field the file omits takes the struct default — assert on
+        // one whose default is `true`, so this can't pass by zero-init.
+        assert!(p.panels.show_palette);
     }
 
     #[test]
