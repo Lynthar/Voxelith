@@ -975,7 +975,7 @@ pub struct VoxModel {
     /// Color palette (256 colors, RGBA)
     pub palette: [[u8; 4]; 256],
     /// Number of distinct world colors that didn't fit in the
-    /// 255-slot palette and were quantized to the nearest existing
+    /// 254-slot palette and were quantized to the nearest existing
     /// entry. Caller can surface this in the UI so the user knows
     /// the export was lossy. Always 0 for `read`-loaded models.
     pub palette_overflow: u32,
@@ -1206,7 +1206,7 @@ fn find_closest_color(palette: &[[u8; 4]; 256], color: [u8; 3], end: u8) -> u8 {
 }
 
 /// Export world to VOX file. Returns the number of distinct world
-/// colors that didn't fit in the 255-slot palette and were quantized
+/// colors that didn't fit in the 254-slot palette and were quantized
 /// to the nearest existing entry — 0 means a lossless export.
 ///
 /// When `convert_axes` is set the world is rotated from Voxelith's Y-up
@@ -1253,7 +1253,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         let overflow = export_vox(&world, &mut buffer, false).unwrap();
-        assert_eq!(overflow, 0, "3 colors should fit in the 255-slot palette");
+        assert_eq!(overflow, 0, "3 colors should fit in the 254-slot palette");
 
         let imported = import_vox(&mut buffer.as_slice(), false).unwrap();
 

@@ -87,8 +87,18 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
             );
         }
     } else {
+        // Same budget as the scene walk: this fallback used to skip the
+        // limits entirely, making "export with no scene node" the way a
+        // hostile file bypassed the triangle cap.
         for mesh in document.meshes() {
-            extract_from_mesh(&mesh, Mat4::IDENTITY, &buffers, &textures, &mut triangles);
+            extract_from_mesh(
+                &mesh,
+                Mat4::IDENTITY,
+                &buffers,
+                &textures,
+                &mut triangles,
+                &mut limits,
+            );
         }
     }
 
@@ -302,9 +312,11 @@ fn walk_node(
     let transform = parent_transform * local;
 
     if let Some(mesh) = node.mesh() {
-        extract_from_mesh(&mesh, transform, buffers, textures, triangles);
-        if triangles.len() > MAX_TRIANGLES {
-            limits.stop("mesh has more triangles than an import can hold");
+        // The budget lives inside `extract_from_mesh` now — checked per
+        // primitive against the accessor's declared counts, before
+        // anything is collected.
+        extract_from_mesh(&mesh, transform, buffers, textures, triangles, limits);
+        if limits.exhausted {
             return;
         }
     }
@@ -345,14 +357,39 @@ fn extract_from_mesh(
     buffers: &[gltf::buffer::Data],
     textures: &HashMap<usize, DecodedImage>,
     triangles: &mut Vec<Triangle>,
+    limits: &mut WalkLimits,
 ) {
     for primitive in mesh.primitives() {
+        if limits.exhausted {
+            return;
+        }
         if primitive.mode() != gltf::mesh::Mode::Triangles {
             // Skip lines / points / triangle strips. Only triangles
             // have an interior to fill, and an imported file may well
             // contain the others — no-op the primitive, don't panic.
             continue;
         }
+
+        // Budget the primitive BEFORE collecting it: the accessor
+        // declares its counts up front, so an oversized primitive can
+        // be refused for the cost of two lookups. Checking only after
+        // the collect (as the walk's own post-mesh check does) let one
+        // huge primitive complete a multi-gigabyte allocation and
+        // *then* get discarded.
+        let vertex_count = primitive
+            .get(&gltf::Semantic::Positions)
+            .map(|a| a.count())
+            .unwrap_or(0);
+        let declared_triangles = primitive
+            .indices()
+            .map(|a| a.count())
+            .unwrap_or(vertex_count)
+            / 3;
+        if triangles.len() + declared_triangles > MAX_TRIANGLES {
+            limits.stop("mesh has more triangles than an import can hold");
+            return;
+        }
+
         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
         let positions: Vec<[f32; 3]> = match reader.read_positions() {

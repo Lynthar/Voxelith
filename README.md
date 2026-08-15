@@ -28,7 +28,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| 🎨 **Editing** | 5 brush tools (Place / Remove / Paint / Eyedropper / Fill) + 4 shape tools (Line / Box / Sphere / Cylinder) with click-anchor / drag / release. Drag-paint with stroke-merged undo, brush hover preview, X / Y / Z symmetry mirroring |
+| 🎨 **Editing** | 5 brush tools (Place / Remove / Paint / Eyedropper / Fill) + 4 shape tools (Line / Box / Sphere / Cylinder) with a two-phase gesture: drag the footprint, release, pull up for height, click to commit (Esc cancels). Drag-paint with stroke-merged undo, brush hover preview, X / Y / Z symmetry mirroring |
 | ▭ **Box select** | `0` to enter Select. Drag corners to mark an AABB; drag inside to move (single undoable Command, overlap-safe); arrow keys nudge X / Z, `Ctrl+↑↓` Y, `Shift` × 10. Rotate with `R` / `Shift+R`, mirror with `M` — each one undoable step. `Ctrl+C/X/V`, `Ctrl+Shift+V` paste-at-cursor, `Del`, `Ctrl+A` select-all-solid, `Esc` / `Ctrl+D` deselect. Paste auto-selects the destination AABB so Paste→drag→Paste chains |
 | ⚓ **Sockets** | Drop named attachment points on any voxel face (position + outward normal). They persist in the project and export as glTF empty nodes — weapon mounts, FX anchors, banner slots for the engine to hang parts on |
 | 📥 **Mesh import** | Voxelize a `.glb` into the scene at 32³ / 64³ / 128³ — surface sampling plus a parity-scan interior fill, with colors taken from the material's factor and base-color texture. Adds to what's already there as one undoable edit, so Ctrl+Z takes it back |
@@ -85,6 +85,8 @@ of the three paths to drive, the whole op vocabulary, and the modeling
 technique that keeps a first attempt from being wrong.
 
 ## Keyboard Shortcuts
+
+On macOS, use ⌘ wherever a shortcut below says `Ctrl`.
 
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|

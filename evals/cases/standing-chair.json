@@ -1,13 +1,17 @@
 {
   "id": "standing-chair",
   "task": "Build a chair that stands on the ground: four legs, a seat and a backrest. Everything must be attached to everything else, and no part may hang in mid-air. Around 8 to 20 cells tall and 5 to 15 across, using at least 80 voxels in all.",
-  "notes": "A seat one cell above its legs, or a backrest that never meets the seat, are the classic assembly failures. `floating_components` catches the parts that are not resting on anything; `components` catches the ones that touch nothing.",
+  "notes": "A seat one cell above its legs, or a backrest that never meets the seat, are the classic assembly failures. `floating_components` catches the parts that are not resting on anything; `components` catches the ones that touch nothing. The `footprint` bar is what the task's 'four legs' translates to structurally: a chair meets the ground through its legs, so its bottom layer is a few small pads — a 2026-08 review built a walled hut (floor, four walls, doorway, roof) that cleared every other bar here, and its ~100-cell ground plate is exactly what this refuses. Chunky legs at the size ceiling still fit: four 2×2 posts are 16 cells.",
   "expect": {
     "components": {
       "max": 1
     },
     "floating_components": {
       "max": 0
+    },
+    "footprint": {
+      "min": 4,
+      "max": 24
     },
     "size": [
       {

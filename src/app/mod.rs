@@ -67,6 +67,62 @@ const MOVE_GHOST_ALPHA: f32 = 0.55;
 /// hitch editing, short enough that a crash loses little work.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How long after the last input the app keeps rendering at full rate.
+/// Covers the gap before the OS starts delivering key repeats and the
+/// tail of any interaction, so activity never *feels* throttled.
+const ACTIVE_GRACE: Duration = Duration::from_millis(1500);
+
+/// Frame cadence when nothing is happening: no input inside the grace
+/// window, no camera key held, no gesture mid-flight. Ten frames a
+/// second keeps every per-frame tick honest — autosave, the 500 ms disk
+/// poll, agent-bridge calls arriving on their channel, the review
+/// timeout — while cutting a motionless editor's GPU/CPU burn to a
+/// rounding error. Input wakes the loop immediately (the wait is on
+/// events, not a sleep), so responsiveness doesn't ride on this number.
+const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Cells a shape gesture may write in one commit. Matches the agent
+/// layer's per-op region ceiling (128³) on purpose: what one `box` op
+/// may cover is a sensible bound for what one drag may cover, and one
+/// shared number beats two explanations. Without a cap the gesture is
+/// open-ended — a glancing-angle drag near the raycast reach spans a
+/// ~1000-cell footprint, and the enumeration + change list for it
+/// freezes the frame loop or exhausts memory before the user has
+/// committed anything.
+pub(super) const MAX_SHAPE_COMMIT_CELLS: i64 = 2_097_152;
+
+/// Cells the live shape *preview* re-enumerates per cursor step. Lower
+/// than the commit cap because this work runs on every mouse move —
+/// enumerate + mesh + upload — where the commit pays it once. Past
+/// this the preview goes dark with a status hint; the commit itself
+/// still works up to [`MAX_SHAPE_COMMIT_CELLS`].
+pub(super) const MAX_SHAPE_PREVIEW_CELLS: i64 = 262_144;
+
+/// Cells a shape gesture costs, before symmetry expansion. A line's
+/// cost is its length — costing it by bounding box would refuse a long
+/// thin diagonal that actually touches a few hundred cells — while the
+/// volumetric tools scan their full AABB, so the AABB *is* their cost.
+/// `i64` throughout: the i32 product wraps for exactly the drags this
+/// exists to refuse.
+pub(super) fn shape_cell_cost(
+    tool: Tool,
+    a: (i32, i32, i32),
+    b: (i32, i32, i32),
+) -> i64 {
+    let extent = |p: i32, q: i32| (p as i64 - q as i64).abs() + 1;
+    let (ex, ey, ez) = (extent(a.0, b.0), extent(a.1, b.1), extent(a.2, b.2));
+    match tool {
+        Tool::Line => ex.max(ey).max(ez),
+        _ => ex * ey * ez,
+    }
+}
+
+/// How many mirrored copies the active symmetry produces per cell
+/// (1, 2, 4 or 8) — the multiplier on a shape's base cost.
+pub(super) fn symmetry_factor(symmetry: SymmetryAxes) -> i64 {
+    1 << (symmetry.x as u32 + symmetry.y as u32 + symmetry.z as u32)
+}
+
 /// Inclusive AABB `(min, max)` enclosing a set of cell positions, or
 /// `None` for an empty set. Used to remember a generation's footprint
 /// for the "Frame Generated" camera action.
@@ -97,6 +153,18 @@ pub struct App {
 
     last_frame: Instant,
     frame_times: VecDeque<f32>,
+
+    /// When the user last touched the app (any keyboard / mouse /
+    /// wheel / raw-motion event). Drives the frame scheduler: full
+    /// rate for a grace window after the last touch, an idle heartbeat
+    /// after that. See `App::frame_interval`.
+    pub(super) last_interaction: Instant,
+    /// When the next frame is due. `about_to_wait` requests a redraw
+    /// once this passes and parks the loop until then — the replacement
+    /// for the old unconditional `ControlFlow::Poll` + request_redraw
+    /// pair, which rendered a motionless scene at the display's full
+    /// refresh rate for as long as the app was open.
+    pub(super) next_frame_at: Instant,
 
     /// `(milliseconds, chunks)` of the most recent non-empty
     /// dirty-chunk rebuild — mesh generation + GPU upload + dirty-flag
@@ -399,6 +467,8 @@ impl App {
             ui,
             last_frame: Instant::now(),
             frame_times: VecDeque::with_capacity(60),
+            last_interaction: Instant::now(),
+            next_frame_at: Instant::now(),
             last_rebuild: None,
             cursor_captured: false,
             cursor_pos: (0.0, 0.0),
@@ -918,20 +988,17 @@ impl App {
     }
 
     /// Per-frame autosave tick. Cheap when idle (one bool + one elapsed
-    /// check). Writes at most once per `AUTOSAVE_INTERVAL`, and only when
-    /// there are changes to a non-empty world. Clears `autosave_pending`
-    /// on a successful write so we don't rewrite an unchanged world every
+    /// check). Writes whenever the document changed — an *empty* world
+    /// included: after Clear All, or with nothing but a pipeline graph
+    /// or sockets, the empty scene IS the latest state, and skipping it
+    /// (as this used to) meant a crash recovered a stale autosave with
+    /// voxels the user had deliberately removed, while graph-only work
+    /// wasn't recoverable at all. Clears `autosave_pending` on a
+    /// successful write so we don't rewrite an unchanged world every
     /// interval; a failed write is logged and retried next interval.
     /// `unsaved_changes` is left alone — see its doc comment.
     pub(super) fn tick_autosave(&mut self) {
         if !self.autosave_pending || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
-            return;
-        }
-        // Don't autosave (or offer to recover) an empty scene — e.g. just
-        // after Clear All. Reset the timer so we don't re-check every frame.
-        if self.world.scene_center().is_none() {
-            self.autosave_pending = false;
-            self.last_autosave = Instant::now();
             return;
         }
         let Some(path) = Self::autosave_path() else {
@@ -943,11 +1010,14 @@ impl App {
         let state = self.current_editor_state();
         // Atomic write: serialize to a temp file, then rename it over the
         // real autosave. A crash mid-write then leaves at most a stale
-        // `autosave.tmp`, never a half-written `autosave.vxlt` — so
-        // recovery always loads a COMPLETE last state. `fs::rename`
-        // replaces the destination on Windows (MoveFileEx) as on POSIX,
-        // and both files share the dir so it's a same-volume move.
-        let tmp = path.with_extension("tmp");
+        // temp, never a half-written `autosave.vxlt` — so recovery
+        // always loads a COMPLETE last state. `fs::rename` replaces the
+        // destination on Windows (MoveFileEx) as on POSIX, and both
+        // files share the dir so it's a same-volume move. The temp name
+        // carries the process id for the same reason the project save's
+        // does: two running Voxeliths share one config dir, and a shared
+        // temp name lets their autosaves interleave into garbage.
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
         let result = voxelith::io::save_world_with_state(&self.world, state, &tmp)
             .and_then(|()| std::fs::rename(&tmp, &path).map_err(Into::into));
         match result {
@@ -990,6 +1060,35 @@ impl App {
         renderer
             .camera_controller
             .sync_orbit_state_from_camera(&renderer.camera);
+    }
+
+    /// How long after this frame the next one is due — the frame
+    /// scheduler's one policy decision.
+    ///
+    /// Full rate while the user is plausibly mid-something: inside the
+    /// grace window after any input, while the fly camera has a key or
+    /// mouse button down (continuous motion that must not depend on OS
+    /// key-repeat), or while a gesture is latched (stroke, shape drag,
+    /// selection drag / move, captured orbit). Everything else gets the
+    /// idle heartbeat, which still services every per-frame tick.
+    pub(super) fn frame_interval(&self) -> Duration {
+        let navigating = self
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.camera_controller.is_navigating());
+        let gesturing = self.left_button_held
+            || self.cursor_captured
+            || self.shape_drag.is_some()
+            || self.selection_drag_anchor.is_some()
+            || self.selection_move_anchor.is_some();
+        let active = navigating
+            || gesturing
+            || self.last_interaction.elapsed() < ACTIVE_GRACE;
+        if active {
+            Duration::ZERO
+        } else {
+            IDLE_FRAME_INTERVAL
+        }
     }
 
     /// The document differs from the user's file, and the autosave
@@ -1174,6 +1273,20 @@ impl App {
                     (drag.anchor, end_3d)
                 }
             };
+            // Budget check BEFORE enumerating: the enumeration is the
+            // cost being bounded, and it re-runs on every cursor step.
+            let cost = shape_cell_cost(tool, anchor, end_3d)
+                .saturating_mul(symmetry_factor(symmetry));
+            if cost > MAX_SHAPE_PREVIEW_CELLS {
+                self.ui.set_status(format!(
+                    "Shape too large to preview ({cost} cells) — commits up to \
+                     {MAX_SHAPE_COMMIT_CELLS}",
+                ));
+                if let Some(r) = &mut self.renderer {
+                    r.clear_brush_preview();
+                }
+                return;
+            }
             let raw = match tool {
                 Tool::Line => line_voxels(anchor, end_3d),
                 Tool::Box => box_voxels(anchor, end_3d),
@@ -1306,6 +1419,19 @@ impl App {
     /// content as `copy_selection_to_clipboard`, but keeps absolute
     /// positions since the ghost renders in world space.
     pub(super) fn begin_move_ghost(&mut self, sel: Selection) {
+        // Same dense-sweep bound as the selection operations in
+        // `input.rs`: this walks every cell of the AABB, air included,
+        // and it runs at *pick-up* — before the user has even dragged.
+        // An oversized box just gets no ghost; the move itself is
+        // refused with a message when it commits.
+        let extent = |a: i32, b: i32| (b as i64 - a as i64) + 1;
+        let cells = extent(sel.min.0, sel.max.0)
+            * extent(sel.min.1, sel.max.1)
+            * extent(sel.min.2, sel.max.2);
+        if cells > Self::MAX_SELECTION_SWEEP_CELLS {
+            self.move_ghost_voxels.clear();
+            return;
+        }
         self.move_ghost_voxels = sel
             .iter_cells()
             .filter_map(|(x, y, z)| {

@@ -369,14 +369,25 @@ fn run_gui() {
 /// puts a human step in the middle of something meant to run on its own.
 #[cfg(feature = "gui")]
 fn run_gui(agent_port: Option<u16>) {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp(None)
-        .init();
+    // Voxelith's own logs at info; the GPU stack quieted to warnings.
+    // wgpu logs device maintenance at info *per frame* — roughly seven
+    // thousand lines per idle minute — which buries anything the app
+    // says and makes the terminal the app was launched from useless.
+    // An explicit RUST_LOG still overrides all of this.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+        "info,wgpu_core=warn,wgpu_hal=warn,naga=warn",
+    ))
+    .format_timestamp(None)
+    .init();
 
     log::info!("Starting Voxelith...");
 
     let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // A placeholder only: `about_to_wait` re-arms the flow every turn
+    // with `WaitUntil(next_frame_at)` — full rate while the user is
+    // active, an idle heartbeat otherwise. `Poll` here would burn a
+    // core busy-spinning between frames.
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = app::App::new();
     app.start_agent_bridge_at(agent_port);

@@ -1391,7 +1391,9 @@ impl Ui {
                         if ui
                             .selectable_label(editor.current_tool == Tool::Cylinder, "Cylinder")
                             .on_hover_text(
-                                "Drag bbox; cylinder axis runs along the longest dimension",
+                                "Drag a footprint, then pull up — the cylinder \
+                                 stands along the height direction (the locked \
+                                 face's normal)",
                             )
                             .clicked()
                         {
@@ -1501,15 +1503,27 @@ impl Ui {
                 } else {
                     // Per-socket row: inline rename + delete + position
                     // readout. Names become glTF node names on export.
+                    // Every mutation also raises `SocketsEdited`: this
+                    // panel writes `editor.sockets` directly (its
+                    // `&mut Editor` makes that legal), but sockets are
+                    // document data no mesh rebuild notices, so without
+                    // the action a rename or delete never marked the
+                    // document modified — no save prompt, no autosave.
                     let mut to_delete: Option<usize> = None;
+                    let mut edited = false;
                     egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                         for (i, s) in editor.sockets.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut s.name)
-                                        .desired_width(110.0),
-                                )
-                                .on_hover_text("Name (becomes the glTF node name)");
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut s.name)
+                                            .desired_width(110.0),
+                                    )
+                                    .on_hover_text("Name (becomes the glTF node name)")
+                                    .changed()
+                                {
+                                    edited = true;
+                                }
                                 if ui
                                     .small_button("✕")
                                     .on_hover_text("Delete this socket")
@@ -1530,6 +1544,7 @@ impl Ui {
                     });
                     if let Some(i) = to_delete {
                         editor.sockets.remove(i);
+                        edited = true;
                     }
                     if ui
                         .button("Clear all sockets")
@@ -1537,6 +1552,10 @@ impl Ui {
                         .clicked()
                     {
                         editor.sockets.clear();
+                        edited = true;
+                    }
+                    if edited {
+                        self.state.request(UiAction::SocketsEdited);
                     }
                 }
 
@@ -1562,8 +1581,9 @@ impl Ui {
                 });
                 ui.label(
                     egui::RichText::new(
-                        "Mirrors Place / Remove / Paint / Fill across enabled \
-                         planes through the world origin. Eyedropper is exempt.",
+                        "Mirrors Place / Remove / Paint / Fill and the shape \
+                         tools across enabled planes through the world origin. \
+                         Eyedropper is exempt.",
                     )
                     .small()
                     .weak(),
@@ -2083,6 +2103,19 @@ impl Ui {
                 egui::ScrollArea::vertical()
                     .max_height(max_height)
                     .show(ui, |ui| {
+                // One line instead of rewriting thirty entries per
+                // platform: the chords below are bound to the
+                // platform's command key (`primary_modifier` in
+                // app/input), so the table stays written once.
+                #[cfg(target_os = "macos")]
+                {
+                    ui.label(
+                        egui::RichText::new("On macOS, use ⌘ wherever Ctrl is shown.")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(4.0);
+                }
                 egui::Grid::new("shortcuts_grid")
                     .num_columns(2)
                     .spacing([40.0, 4.0])

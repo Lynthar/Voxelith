@@ -205,6 +205,22 @@ impl Prefs {
                     path.display(),
                     e
                 );
+                // Set the broken file aside instead of leaving it to be
+                // overwritten on exit. Prefs are rebuildable workspace
+                // state, but this file can also still hold the one-time
+                // legacy-graph migration source — the user's pipeline —
+                // and destroying the only copy to recover from a parse
+                // error is a worse trade than a stray `.corrupt` file.
+                let quarantine = path.with_extension("ron.corrupt");
+                if let Err(rename_err) = std::fs::rename(&path, &quarantine) {
+                    log::warn!(
+                        "Could not set the corrupt prefs aside at {}: {}",
+                        quarantine.display(),
+                        rename_err
+                    );
+                } else {
+                    log::warn!("Corrupt prefs kept at {}", quarantine.display());
+                }
                 Self::default()
             }
         }

@@ -257,11 +257,33 @@ impl App {
             self.autosave_pending = false;
             self.last_autosave = std::time::Instant::now();
         } else {
-            // Corrupt / unreadable: drop it, keep the default scene
-            // already on screen.
-            self.delete_autosave();
-            self.ui
-                .set_status("Couldn't recover autosave — starting fresh");
+            // Corrupt / unreadable: set it aside rather than delete it.
+            // This file may be the only copy of the crashed session's
+            // work, and "unreadable to this loader today" is not
+            // "unrecoverable" — a partial RLE stream can still hold
+            // most of a model for a hand salvage. Deleting destroyed
+            // the evidence to tidy up.
+            let quarantine = path.with_extension("vxlt.corrupt");
+            match std::fs::rename(&path, &quarantine) {
+                Ok(()) => {
+                    log::warn!(
+                        "Autosave could not be read; kept at {}",
+                        quarantine.display()
+                    );
+                    self.ui.set_status(format!(
+                        "Couldn't read the autosave — a copy was kept as {}",
+                        quarantine
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("autosave.vxlt.corrupt")
+                    ));
+                }
+                Err(e) => {
+                    log::warn!("Could not set the corrupt autosave aside: {e}");
+                    self.ui
+                        .set_status("Couldn't recover autosave — starting fresh");
+                }
+            }
         }
     }
 
@@ -531,6 +553,30 @@ impl App {
         let Some(path) = dialog.pick_file() else {
             return;
         };
+
+        // Size gate before the whole-file read: everything downstream
+        // is budgeted (textures, triangle counts), but the read itself
+        // wasn't, so a mispicked multi-gigabyte file was swallowed into
+        // memory before the first budget could speak. 512 MiB matches
+        // the texture budget's scale and dwarfs any real asset headed
+        // for a ≤256³ voxelization.
+        const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > MAX_IMPORT_BYTES => {
+                let detail = format!(
+                    "\"{}\" is {} MiB; glTF import reads at most {} MiB.\n\n\
+                     A mesh headed for a voxel grid doesn't need a file this \
+                     size — re-export it smaller.",
+                    file_label(&path),
+                    meta.len() / (1024 * 1024),
+                    MAX_IMPORT_BYTES / (1024 * 1024),
+                );
+                self.show_error_dialog("Import failed", &detail);
+                self.ui.set_status("Import failed: file too large");
+                return;
+            }
+            _ => {}
+        }
 
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -993,7 +1039,8 @@ impl App {
                     let filename = file_label(&path);
                     let msg = if overflow > 0 {
                         format!(
-                            "Exported: {} ({} colors quantized — VOX is 255-color)",
+                            "Exported: {} ({} colors quantized — the VOX palette \
+                             holds 254)",
                             filename, overflow
                         )
                     } else {
@@ -1178,6 +1225,13 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
             "not a Voxelith .vxlt project (bad magic bytes)".to_string(),
             "Pick a .vxlt project, or use File \u{25B8} Import for .vox models.",
         ),
+        // Version 0 was never written by any build, so it's damage, not
+        // age — the "update Voxelith" advice would send the user
+        // chasing a release that doesn't exist.
+        io::ProjectError::UnsupportedVersion(0) => (
+            "a corrupt version field".to_string(),
+            "The file is damaged — try a backup or autosave copy.",
+        ),
         io::ProjectError::UnsupportedVersion(v) => (
             format!("saved in a newer project format (version {})", v),
             "Update Voxelith to open this project.",
@@ -1197,6 +1251,15 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
         io::ProjectError::InvalidChunkData | io::ProjectError::DecompressionError => (
             "corrupt voxel data".to_string(),
             "The project body is damaged — try a backup or autosave copy.",
+        ),
+        io::ProjectError::LimitExceeded(what) => (
+            format!("a {} past what any project can hold", what),
+            "The file is corrupt (or not really a project) — try a backup or \
+             autosave copy.",
+        ),
+        io::ProjectError::TrailingData => (
+            "extra data after the model (inconsistent file)".to_string(),
+            "The file is damaged — try a backup or autosave copy.",
         ),
     };
     let short = format!("Open failed: {}", reason);

@@ -36,6 +36,25 @@ use serde::Serialize;
 use crate::agent_ops::{AgentSession, ApplyReport, Description, OpsBatch, SliceRequest};
 use crate::exec::{self, ExecError, ExportInfo};
 use crate::io::EditorState;
+
+/// The viewpoints a render request actually means: empty defaults to
+/// one isometric view, and duplicates collapse to their first
+/// occurrence. `views` is an open list over the wire, so nothing stops
+/// a client repeating a view a thousand times — and every repeat was a
+/// full CPU render and another image in the answer. Seven distinct
+/// kinds exist, so the result is never longer than seven.
+pub(crate) fn requested_views(views: Vec<crate::view::ViewKind>) -> Vec<crate::view::ViewKind> {
+    if views.is_empty() {
+        return vec![crate::view::ViewKind::Iso];
+    }
+    let mut out: Vec<crate::view::ViewKind> = Vec::with_capacity(7);
+    for view in views {
+        if !out.contains(&view) {
+            out.push(view);
+        }
+    }
+    out
+}
 use crate::view;
 
 pub mod bridge;
@@ -430,10 +449,7 @@ impl VoxelithMcp {
         Parameters(args): Parameters<RenderArgs>,
     ) -> Result<CallToolResult, McpError> {
         let size = args.size.unwrap_or(view::DEFAULT_SIZE);
-        let views = match args.views.is_empty() {
-            true => vec![view::ViewKind::Iso],
-            false => args.views,
-        };
+        let views = requested_views(args.views);
         let document = self.document.lock();
 
         // One text block then one image per view, rather than a summary
@@ -672,6 +688,20 @@ pub async fn serve_http(
     );
     let router = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(address).await?;
+    // The transport has no authentication, no TLS and no rate limit; on
+    // loopback that's fine (the client is a process the same user
+    // started), but a routable bind hands read/write access to every
+    // project under --root to anything that can reach the port. Honor
+    // an explicit non-loopback address — a firewalled LAN box is a
+    // legitimate deployment — but never silently.
+    if !address.ip().is_loopback() {
+        log::warn!(
+            "MCP HTTP is bound to {address}, which is not a loopback address. \
+             The protocol carries NO authentication: anything that can reach \
+             this port can edit every project under --root. Bind 127.0.0.1 \
+             unless the network itself is the access control."
+        );
+    }
     log::info!("MCP Streamable HTTP listening on http://{address}/mcp");
     axum::serve(listener, router).await?;
     Ok(())

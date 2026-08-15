@@ -107,6 +107,12 @@ pub enum UiAction {
     /// no prompt, and the disk poll reloads a checkpoint straight over
     /// it ("nothing local to lose").
     GraphEdited,
+    /// A socket was placed, renamed, deleted, or all of them cleared —
+    /// same contract as [`UiAction::GraphEdited`], and for the same
+    /// reason: sockets are document data (they ride in the `.vxlt` and
+    /// export as glTF nodes) that no mesh rebuild ever notices, so
+    /// renaming one and quitting used to lose it without a prompt.
+    SocketsEdited,
 
     // Camera operations
     ResetCamera,

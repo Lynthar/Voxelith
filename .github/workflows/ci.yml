@@ -1,8 +1,11 @@
 name: CI
 
-# Build + test gate. Runs on windows-latest because that is the project's
-# primary/verified platform (Vulkan; see docs/STATUS.md) and avoids the
-# Linux system-dependency dance that rfd/winit/wgpu need just to compile.
+# Build + test gate on the two platforms the project is actually
+# developed and verified on: Windows (Vulkan — the original dev machine,
+# and the full feature-matrix job) and macOS (Metal, Apple Silicon — the
+# primary dev machine since 2026-08). Linux is deliberately absent: it
+# would add the rfd/winit/wgpu system-dependency dance for a platform
+# nobody runs the editor on yet. See docs/STATUS.md.
 on:
   push:
     branches: [main]
@@ -78,3 +81,33 @@ jobs:
       - name: Format check (informational)
         run: cargo fmt --check
         continue-on-error: true
+
+  # The other half of the platform story. Two behaviors regress ONLY
+  # here — the explicit first-frame request_redraw in handler::resumed
+  # (macOS delivers no initial paint event; miss it and the window is
+  # permanently blank) and the ⌘-based primary_modifier() chord handling
+  # — plus anything Metal-specific wgpu turns up. Neither can be caught
+  # by a unit test on Windows, so an actual macOS build+test run is the
+  # only automated line of defense. Kept lean on purpose: macOS runner
+  # minutes are the expensive kind, the feature-matrix and lint steps
+  # are platform-neutral and already run on the Windows job, so this
+  # one is the default build, both test suites, and nothing else.
+  build-and-test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (all targets)
+        run: cargo build --all-targets --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Test (headless)
+        run: cargo test --no-default-features --verbose

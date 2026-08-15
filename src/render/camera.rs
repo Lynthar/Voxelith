@@ -168,6 +168,17 @@ impl CameraController {
         self.pressed_keys.clear();
     }
 
+    /// Whether camera input is live right now — a movement key held, or
+    /// a mouse button driving orbit / pan. The frame scheduler keeps
+    /// rendering at full rate while this is true: flying is continuous
+    /// motion the camera integrates per frame, so it must not depend on
+    /// the OS delivering key-repeat events to stay smooth.
+    pub fn is_navigating(&self) -> bool {
+        !self.pressed_keys.is_empty()
+            || self.right_mouse_pressed
+            || self.middle_mouse_pressed
+    }
+
     /// Forget any in-progress mouse drag (middle-orbit / right-pan).
     /// Called on window focus loss alongside `clear_keys` so a button
     /// whose release is delivered to another window can't leave orbit or

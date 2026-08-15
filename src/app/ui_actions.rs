@@ -19,16 +19,36 @@ impl App {
                 // differently from the X.
                 UiAction::Exit => self.guard_then(PendingAction::Exit),
                 UiAction::Undo => {
-                    self.editor.undo(&mut self.world);
+                    if self.editor.undo(&mut self.world, &mut self.ui.graph) {
+                        // Voxel entries are flagged by the mesh rebuild;
+                        // a graph-only transition reaches no chunk, so
+                        // the step has to say so itself.
+                        self.mark_document_modified();
+                    }
                 }
                 UiAction::Redo => {
-                    self.editor.redo(&mut self.world);
+                    if self.editor.redo(&mut self.world, &mut self.ui.graph) {
+                        self.mark_document_modified();
+                    }
                 }
                 // Confirmed by the caller (the menu raises a confirm
                 // dialog first) — this arm just does it.
                 UiAction::ClearAll => {
+                    // Clearing discards document data (voxels, sockets,
+                    // the graph), and none of it through a path the mesh
+                    // rebuild notices: `world.clear()` drops chunks
+                    // without dirtying any. Flag the document ourselves
+                    // — but only when there was something to clear, so
+                    // clearing an already-empty scene doesn't raise a
+                    // pointless unsaved prompt on exit.
+                    let had_content = self.world.scene_center().is_some()
+                        || !self.editor.sockets.is_empty()
+                        || !self.ui.graph.nodes.is_empty();
                     self.world.clear();
                     self.reset_scene_session_state();
+                    if had_content {
+                        self.mark_document_modified();
+                    }
                 }
                 UiAction::CopySelection => self.copy_selection(),
                 UiAction::CutSelection => self.cut_selection(),
@@ -125,6 +145,7 @@ impl App {
                 UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
                 UiAction::GraphEdited => self.mark_document_modified(),
+                UiAction::SocketsEdited => self.mark_document_modified(),
                 UiAction::AgentStart(port) => self.start_agent_bridge(port),
                 UiAction::AgentStop => self.stop_agent_bridge(),
                 UiAction::AgentApproval(approval) => self.set_agent_approval(approval),

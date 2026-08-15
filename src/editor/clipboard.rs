@@ -401,7 +401,7 @@ mod tests {
         assert!(world.get_voxel(1, 0, 0).is_air());
 
         // One undo restores BOTH.
-        history.undo(&mut world);
+        history.undo(&mut world, &mut crate::procgen::PipelineGraph::default());
         assert_eq!(world.get_voxel(0, 0, 0), voxel(255, 0, 0));
         assert_eq!(world.get_voxel(1, 0, 0), voxel(0, 255, 0));
     }

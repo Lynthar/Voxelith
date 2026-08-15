@@ -459,10 +459,7 @@ impl BridgeMcp {
                 ),
             ));
         }
-        let views = match args.views.is_empty() {
-            true => vec![view::ViewKind::Iso],
-            false => args.views,
-        };
+        let views = super::requested_views(args.views);
         let rendered = match self
             .editor
             .call(AgentRequest::RenderViews { views, size })

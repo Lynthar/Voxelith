@@ -464,11 +464,50 @@ impl App {
                 self.editor
                     .sockets
                     .push(voxelith::editor::Socket::new(name.clone(), position, normal));
+                // Sockets are document data no mesh rebuild notices —
+                // placing one has to raise the unsaved flags itself, or
+                // "place a socket, quit" lost it without a prompt.
+                self.mark_document_modified();
                 self.ui.set_status(format!(
                     "Placed {} at ({:.1}, {:.1}, {:.1})",
                     name, position[0], position[1], position[2]
                 ));
             }
+        }
+    }
+
+    /// Largest selection AABB (in cells, air included) the dense sweep
+    /// operations will walk — 256³, a one-to-two-second worst case.
+    /// Copy / cut / delete / move / rotate / mirror all iterate every
+    /// cell of the box including air, so two voxels a million cells
+    /// apart plus Ctrl+A used to turn any of them into an hours-long
+    /// freeze. (Worlds like that are routine on the agent side, whose
+    /// coordinate ceiling is ±1,048,576.) The marquee itself may be any
+    /// size; only the sweeps are bounded.
+    pub(super) const MAX_SELECTION_SWEEP_CELLS: i64 = 16_777_216;
+
+    /// Cells in a selection's AABB, in `i64` — the `i32` arithmetic in
+    /// `Selection::size` wraps for exactly the boxes this guards.
+    fn selection_sweep_cells(sel: &Selection) -> i64 {
+        let extent = |a: i32, b: i32| (b as i64 - a as i64) + 1;
+        extent(sel.min.0, sel.max.0)
+            * extent(sel.min.1, sel.max.1)
+            * extent(sel.min.2, sel.max.2)
+    }
+
+    /// True (with a status message) when `sel` is too big for a dense
+    /// sweep; the caller returns without starting one.
+    fn refuse_oversized_sweep(&mut self, sel: Selection, what: &str) -> bool {
+        let cells = Self::selection_sweep_cells(&sel);
+        if cells > Self::MAX_SELECTION_SWEEP_CELLS {
+            self.ui.set_status(format!(
+                "{what} would sweep {cells} cells; the largest supported \
+                 box is {} (256³) — shrink the selection",
+                Self::MAX_SELECTION_SWEEP_CELLS
+            ));
+            true
+        } else {
+            false
         }
     }
 
@@ -546,6 +585,9 @@ impl App {
         let Some(sel) = self.editor.selection else {
             return;
         };
+        if self.refuse_oversized_sweep(sel, "Move") {
+            return;
+        }
         let changes = build_move_changes(&self.world, sel, delta);
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
@@ -603,6 +645,9 @@ impl App {
                 .set_status("No selection — drag with the Select tool first");
             return;
         };
+        if self.refuse_oversized_sweep(sel, "Rotate") {
+            return;
+        }
         let (new_sel, changes) =
             rotate_selection_changes(&self.world, sel, axis, quarter);
         let count = changes.len();
@@ -662,6 +707,9 @@ impl App {
                 .set_status("No selection — drag with the Select tool first");
             return;
         };
+        if self.refuse_oversized_sweep(sel, "Mirror") {
+            return;
+        }
         let changes = mirror_selection_changes(&self.world, sel, axis);
         let count = changes.len();
         if !changes.is_empty() {
@@ -727,6 +775,22 @@ impl App {
             }
         };
 
+        // Budget check BEFORE the enumeration it bounds — a glancing
+        // drag can legally describe hundreds of millions of cells, and
+        // materializing them freezes the frame loop or exhausts memory.
+        // Same accounting as the preview; the preview's smaller budget
+        // only limits per-cursor-step work, so a shape that outgrew its
+        // preview can still commit under this cap.
+        let cost = super::shape_cell_cost(tool, anchor, end)
+            .saturating_mul(super::symmetry_factor(self.editor.symmetry));
+        if cost > super::MAX_SHAPE_COMMIT_CELLS {
+            self.ui.set_status(format!(
+                "Shape spans {cost} cells; the largest commit is {} — \
+                 build it in smaller pieces",
+                super::MAX_SHAPE_COMMIT_CELLS
+            ));
+            return;
+        }
         let raw = match tool {
             Tool::Line => line_voxels(anchor, end),
             Tool::Box => box_voxels(anchor, end),
@@ -775,6 +839,9 @@ impl App {
             self.ui.set_status("No selection — drag with the Select tool first");
             return;
         };
+        if self.refuse_oversized_sweep(sel, "Copy") {
+            return;
+        }
         let clipboard = copy_selection_to_clipboard(&self.world, sel);
         let count = clipboard.voxel_count();
         self.clipboard = Some(clipboard);
@@ -795,6 +862,9 @@ impl App {
             self.ui.set_status("No selection — drag with the Select tool first");
             return;
         };
+        if self.refuse_oversized_sweep(sel, "Cut") {
+            return;
+        }
         let clipboard = copy_selection_to_clipboard(&self.world, sel);
         let count = clipboard.voxel_count();
         self.clipboard = Some(clipboard);
@@ -819,6 +889,9 @@ impl App {
             self.ui.set_status("No selection — drag with the Select tool first");
             return;
         };
+        if self.refuse_oversized_sweep(sel, "Delete") {
+            return;
+        }
         let changes = build_clear_changes(&self.world, sel);
         let count = changes.len();
         if !changes.is_empty() {
@@ -924,6 +997,32 @@ impl App {
         self.editor.selection = None;
     }
 
+    /// The platform's command modifier: ⌘ on macOS, Ctrl elsewhere.
+    /// Every chord shortcut (save / undo / copy …) keys off this.
+    /// Checking `control_key()` alone left ⌘S dead on macOS — the
+    /// event layer had already classified the press as a command chord
+    /// and kept it from the fly camera, so the key appeared to do
+    /// nothing at all.
+    fn primary_modifier(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.modifiers.super_key()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.modifiers.control_key()
+        }
+    }
+
+    /// Any command modifier at all — the same classification
+    /// `handler.rs` uses to keep chords out of the fly camera. The
+    /// bare-letter shortcuts (R / M) are guarded on this rather than on
+    /// Ctrl alone: guarding only Ctrl left ⌘R / ⌘M on macOS falling
+    /// through to rotate / mirror the selection.
+    fn command_chord(&self) -> bool {
+        self.modifiers.control_key() || self.modifiers.super_key()
+    }
+
     /// Handle keyboard shortcuts (tools, undo/redo, file ops,
     /// selection).
     pub(super) fn handle_tool_shortcut(&mut self, key: KeyCode) {
@@ -938,17 +1037,25 @@ impl App {
             KeyCode::Digit8 => self.editor.select_tool(Tool::Sphere),
             KeyCode::Digit9 => self.editor.select_tool(Tool::Cylinder),
             KeyCode::Digit0 => self.editor.select_tool(Tool::Select),
-            KeyCode::KeyZ if self.modifiers.control_key() => {
-                if self.modifiers.shift_key() {
-                    self.editor.redo(&mut self.world);
+            KeyCode::KeyZ if self.primary_modifier() => {
+                let stepped = if self.modifiers.shift_key() {
+                    self.editor.redo(&mut self.world, &mut self.ui.graph)
                 } else {
-                    self.editor.undo(&mut self.world);
+                    self.editor.undo(&mut self.world, &mut self.ui.graph)
+                };
+                if stepped {
+                    // Voxel entries are flagged by the mesh rebuild; a
+                    // graph-only transition reaches no chunk, so the
+                    // step has to say so itself.
+                    self.mark_document_modified();
                 }
             }
-            KeyCode::KeyY if self.modifiers.control_key() => {
-                self.editor.redo(&mut self.world);
+            KeyCode::KeyY if self.primary_modifier() => {
+                if self.editor.redo(&mut self.world, &mut self.ui.graph) {
+                    self.mark_document_modified();
+                }
             }
-            KeyCode::KeyS if self.modifiers.control_key() => {
+            KeyCode::KeyS if self.primary_modifier() => {
                 if self.modifiers.shift_key() {
                     self.save_project_as();
                 } else {
@@ -959,69 +1066,72 @@ impl App {
             // File menu — the guard lives on `App` precisely because
             // these two reach the file ops without passing the UiAction
             // queue.
-            KeyCode::KeyO if self.modifiers.control_key() => {
+            KeyCode::KeyO if self.primary_modifier() => {
                 self.guard_then(PendingAction::OpenPicker);
             }
-            KeyCode::KeyN if self.modifiers.control_key() => {
+            KeyCode::KeyN if self.primary_modifier() => {
                 self.guard_then(PendingAction::NewProject);
             }
-            // Esc deselects (Photoshop / image-editor convention).
-            // Ctrl+D matches the same convention for users coming
-            // from PS / vengi (`Ctrl+D` = select none). Both also
-            // abort an in-progress Select drag so the user can bail
-            // mid-gesture without committing a stray AABB.
+            // Esc: cancel the modal interaction first — an in-progress
+            // shape drag — and only deselect when there is none. Doing
+            // both at once meant bailing out of a shape also silently
+            // threw away the marquee the user had set up before it.
+            // Deselect follows the Photoshop / image-editor convention;
+            // Ctrl+D matches it for users coming from PS / vengi.
             KeyCode::Escape => {
-                self.deselect();
                 if self.shape_drag.is_some() {
                     self.shape_drag = None;
                     self.ui.set_status("Shape canceled");
+                } else {
+                    self.deselect();
                 }
             }
-            KeyCode::KeyD if self.modifiers.control_key() => {
+            KeyCode::KeyD if self.primary_modifier() => {
                 self.deselect();
             }
             // Selection clipboard ops. Ctrl+Shift+V forces "paste
             // at cursor" (vengi-style two-channel paste); plain
             // Ctrl+V uses the selection's origin if one exists.
-            KeyCode::KeyC if self.modifiers.control_key() => {
+            KeyCode::KeyC if self.primary_modifier() => {
                 self.copy_selection();
             }
-            KeyCode::KeyX if self.modifiers.control_key() => {
+            KeyCode::KeyX if self.primary_modifier() => {
                 self.cut_selection();
             }
-            KeyCode::KeyV if self.modifiers.control_key() => {
+            KeyCode::KeyV if self.primary_modifier() => {
                 let prefer_cursor = self.modifiers.shift_key();
                 self.paste_clipboard(prefer_cursor);
             }
             KeyCode::Delete => {
                 self.delete_selection();
             }
-            // Ctrl+A = select-all-solid: AABB of every non-air
+            // Ctrl+A / ⌘A = select-all-solid: AABB of every non-air
             // voxel in the world. Standard image-editor convention.
-            KeyCode::KeyA if self.modifiers.control_key() => {
+            KeyCode::KeyA if self.primary_modifier() => {
                 self.select_all_solid();
             }
             // Rotate / mirror the active selection (no-op with a status
             // hint if there's none). R spins around Y — the common
             // "turn it around" — and Shift+R reverses; M flips
             // left-right across X. The full axis × angle set lives in
-            // the Selection menu. Guarded against Ctrl so a stray
-            // Ctrl+R / Ctrl+M can't silently transform geometry.
-            KeyCode::KeyR if !self.modifiers.control_key() => {
+            // the Selection menu. Guarded against every command
+            // modifier so a stray Ctrl+R / ⌘R / ⌘M can't silently
+            // transform geometry.
+            KeyCode::KeyR if !self.command_chord() => {
                 if self.modifiers.shift_key() {
                     self.rotate_selection(Axis::Y, Quarter::Ccw);
                 } else {
                     self.rotate_selection(Axis::Y, Quarter::Cw);
                 }
             }
-            KeyCode::KeyM if !self.modifiers.control_key() => {
+            KeyCode::KeyM if !self.command_chord() => {
                 self.mirror_selection(Axis::X);
             }
             // Arrow-key selection nudge. ←→ = X axis, ↑↓ = Z axis
             // (matches "screen up = away from camera" for the
-            // default camera). Ctrl+↑↓ promotes to the Y axis since
-            // four arrows can't cover six 3D directions; Shift
-            // multiplies the step by 10 for fast travel.
+            // default camera). Ctrl+↑↓ (⌘ on macOS) promotes to the Y
+            // axis since four arrows can't cover six 3D directions;
+            // Shift multiplies the step by 10 for fast travel.
             //
             // Skipped (via `step_selection` guards) when there's no
             // selection or a mouse drag is mid-flight, so the user
@@ -1036,7 +1146,7 @@ impl App {
             }
             KeyCode::ArrowUp => {
                 let step = if self.modifiers.shift_key() { 10 } else { 1 };
-                if self.modifiers.control_key() {
+                if self.primary_modifier() {
                     self.step_selection((0, step, 0));
                 } else {
                     self.step_selection((0, 0, -step));
@@ -1044,7 +1154,7 @@ impl App {
             }
             KeyCode::ArrowDown => {
                 let step = if self.modifiers.shift_key() { 10 } else { 1 };
-                if self.modifiers.control_key() {
+                if self.primary_modifier() {
                     self.step_selection((0, -step, 0));
                 } else {
                     self.step_selection((0, 0, step));

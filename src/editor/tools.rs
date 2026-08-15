@@ -24,11 +24,15 @@ pub const MAX_FILL_DIST: i32 = 64;
 ///
 /// Brush tools (`Place`/`Remove`/`Paint`/`Eyedropper`/`Fill`) act on
 /// the hovered cell every click or drag-step. Shape tools (`Line`,
-/// `Box`, `Sphere`, `Cylinder`) use a click-anchor / drag-extent /
-/// release-commit gesture: the shape's full voxel set is committed
-/// in one `Command` on mouse-up. The `Select` tool follows the same
-/// click-drag-release gesture as shapes, but commits a `Selection`
-/// AABB into `Editor::selection` instead of writing voxels.
+/// `Box`, `Sphere`, `Cylinder`) use the two-phase gesture `app/input`
+/// implements: drag a footprint on the locked face plane, release,
+/// move the cursor vertically to set height, and a **second click**
+/// commits the whole shape as one `Command` (Esc cancels). This doc
+/// used to claim mouse-up committed — it doesn't, and the drift
+/// between here, the README and the in-app help is exactly what
+/// stale gesture descriptions cost. The `Select` tool is the one
+/// that *does* commit on release: drag corner-to-corner, release,
+/// and the `Selection` AABB lands in `Editor::selection`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     /// Place voxels
@@ -109,14 +113,6 @@ impl Tool {
             self,
             Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder
         )
-    }
-
-    /// Whether this tool's gesture needs a release-time commit
-    /// (latch anchor on press, finalize on release). Used by the
-    /// event handler to dispatch between `commit_shape` /
-    /// `commit_selection` / brush stroke-end on mouse-up.
-    pub fn needs_release_commit(&self) -> bool {
-        self.is_shape() || matches!(self, Tool::Select)
     }
 
     /// Whether this tool needs an anchor cell to operate. Place,

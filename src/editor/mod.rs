@@ -19,7 +19,7 @@ pub use clipboard::{
     build_clear_changes, build_move_changes, build_paste_changes,
     copy_selection_to_clipboard, Clipboard,
 };
-pub use commands::{Command, CommandHistory, VoxelChange};
+pub use commands::{Command, CommandHistory, GraphTransition, VoxelChange};
 pub use raycast::{Ray, RaycastHit, VoxelRaycast};
 pub use selection::Selection;
 pub use shapes::{box_voxels, cylinder_voxels, line_voxels, sphere_voxels};
@@ -208,13 +208,21 @@ impl Editor {
     }
 
     /// Undo last action
-    pub fn undo(&mut self, world: &mut crate::core::World) {
-        self.history.undo(world);
+    pub fn undo(
+        &mut self,
+        world: &mut crate::core::World,
+        graph: &mut crate::procgen::PipelineGraph,
+    ) -> bool {
+        self.history.undo(world, graph)
     }
 
     /// Redo last undone action
-    pub fn redo(&mut self, world: &mut crate::core::World) {
-        self.history.redo(world);
+    pub fn redo(
+        &mut self,
+        world: &mut crate::core::World,
+        graph: &mut crate::procgen::PipelineGraph,
+    ) -> bool {
+        self.history.redo(world, graph)
     }
 
     /// Check if undo is available

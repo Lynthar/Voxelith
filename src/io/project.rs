@@ -16,7 +16,10 @@ use thiserror::Error;
 
 /// Project file magic bytes
 const PROJECT_MAGIC: [u8; 4] = [b'V', b'X', b'L', b'T'];
-/// Current project format version
+/// Current project format version. Has been 1 since the very first
+/// commit that could write a `.vxlt`, which is why the loader rejects
+/// version 0 outright: no build ever wrote one, so a zero here is file
+/// damage, not an old file.
 const PROJECT_VERSION: u32 = 1;
 /// Cap for the chunk-vector capacity *hint* read from the file header.
 /// `chunk_count` is untrusted; the hint is only a preallocation
@@ -25,6 +28,33 @@ const PROJECT_VERSION: u32 = 1;
 /// declared count and errors cleanly if the stream is short. 4096 chunks
 /// covers a 512³ world; larger ones just grow the Vec a few times.
 const MAX_CHUNK_HINT: usize = 4096;
+
+/// Ceiling on the whole decompressed gzip stream. gzip expands up to
+/// ~1000:1, so without this a `.vxlt` of a few megabytes can declare
+/// gigabytes of data and the loader faithfully allocates them. 1 GiB is
+/// ~100 million voxels of worst-case (run-length-1) RLE — far past any
+/// project the in-memory chunk store could hold anyway. Hitting the cap
+/// surfaces as `UnexpectedEof` from the capped reader.
+const MAX_DECOMPRESSED_BYTES: u64 = 1 << 30;
+
+/// Ceiling on the JSON header (metadata + editor state). Real headers
+/// are kilobytes — a palette, a handful of sockets, a ≤64-node graph —
+/// so 64 MiB is three orders of magnitude of headroom, while still
+/// refusing a header that IS the decompression bomb.
+const MAX_HEADER_BYTES: usize = 64 << 20;
+
+/// Ceiling on one chunk's RLE payload: a run is 10 bytes and can cover
+/// as little as one voxel, so no honest chunk needs more than one run
+/// per cell.
+const MAX_RLE_BYTES: usize = CHUNK_VOLUME * 10;
+
+/// Ceiling on chunk coordinates read from a file, per axis. Cell
+/// coordinates derived from a chunk position are `chunk * 32 + 0..=31`;
+/// an unchecked chunk coordinate near `i32::MAX` overflows that multiply
+/// in the mesher and every AABB after it. ±2^24 chunks is ±2^29 cells —
+/// 512× beyond the agent layer's own coordinate ceiling, and still
+/// leaving two bits of headroom before any derived cell math can wrap.
+const MAX_CHUNK_COORD: i32 = 1 << 24;
 
 /// Errors that can occur when reading/writing project files
 #[derive(Debug, Error)]
@@ -41,6 +71,15 @@ pub enum ProjectError {
     InvalidChunkData,
     #[error("Decompression error")]
     DecompressionError,
+    /// A declared size or coordinate is past what any real project
+    /// needs — the file is corrupt or hostile, not merely big.
+    #[error("File exceeds format limits: {0}")]
+    LimitExceeded(&'static str),
+    /// The gzip stream holds data past the last declared chunk. A
+    /// well-formed writer never produces this, so the length fields and
+    /// the stream disagree about where the file ends.
+    #[error("Data past the end of the declared content")]
+    TrailingData,
 }
 
 /// Project metadata
@@ -211,9 +250,12 @@ impl Project {
         let mut project = Self::new();
         project.editor_state = editor_state;
 
-        // Deterministic chunk order so the `.vxlt` bytes are reproducible
-        // across runs (HashMap iteration is per-process random) — matters
-        // for backup dedup / content-addressing (#11).
+        // Deterministic chunk order so the same content serializes to
+        // the same *structure* regardless of insertion order (HashMap
+        // iteration is per-process random) (#11). Whole-file bytes still
+        // move between saves — `modified_at` in the header does exactly
+        // that on purpose — so this is order-independence, not
+        // byte-for-byte reproducibility across time.
         for pos in world.sorted_chunk_positions() {
             let Some(chunk_lock) = world.get_chunk(pos) else {
                 continue;
@@ -228,17 +270,22 @@ impl Project {
         project
     }
 
-    /// Convert project to world
-    pub fn to_world(&self) -> World {
+    /// Convert project to world.
+    ///
+    /// A chunk that doesn't decode is an error, not a gap: this used to
+    /// `if let Some` past decode failures, silently loading a world with
+    /// pieces of the model missing — the one outcome worse than refusing
+    /// the file, because nothing tells the user their save is short a
+    /// wall until they notice the hole themselves.
+    pub fn to_world(&self) -> Result<World, ProjectError> {
         let mut world = World::new();
 
         for chunk_data in &self.chunks {
-            if let Some(chunk) = rle_decode_chunk(&chunk_data.rle_data) {
-                *world.get_or_create_chunk(chunk_data.pos).write() = chunk;
-            }
+            let chunk = rle_decode_chunk(&chunk_data.rle_data)?;
+            *world.get_or_create_chunk(chunk_data.pos).write() = chunk;
         }
 
-        world
+        Ok(world)
     }
 
     /// Save project to writer
@@ -275,7 +322,17 @@ impl Project {
         Ok(())
     }
 
-    /// Load project from reader
+    /// Load project from reader.
+    ///
+    /// Strict about what it accepts: a `.vxlt` is an external file, and
+    /// the writer half of this module has produced exactly one shape of
+    /// stream since the format existed, so anything outside that shape
+    /// is damage to refuse rather than tolerance to extend. Every
+    /// declared size is capped, chunk coordinates are bounded, and the
+    /// stream is drained to gzip EOF at the end — which is the only
+    /// point flate2 verifies the CRC-32 and length trailer, so a loader
+    /// that stopped at the last chunk (as this one used to) reported a
+    /// truncated file as loading cleanly.
     pub fn load<R: Read>(reader: &mut R) -> Result<Self, ProjectError> {
         // Read and verify magic
         let mut magic = [0u8; 4];
@@ -284,21 +341,27 @@ impl Project {
             return Err(ProjectError::InvalidMagic);
         }
 
-        // Read version
+        // Read version. 0 is rejected alongside the future: no build
+        // ever wrote it (the constant has been 1 from the first commit),
+        // so it can only mean a damaged version field.
         let mut version_buf = [0u8; 4];
         reader.read_exact(&mut version_buf)?;
         let version = u32::from_le_bytes(version_buf);
-        if version > PROJECT_VERSION {
+        if version != PROJECT_VERSION {
             return Err(ProjectError::UnsupportedVersion(version));
         }
 
-        // Decompress
-        let mut decoder = GzDecoder::new(reader);
+        // Decompress, under a total-output cap — gzip's ratio makes the
+        // decompressed size otherwise the file author's choice, not ours.
+        let mut decoder = GzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES);
 
         // Read header JSON
         let mut len_buf = [0u8; 4];
         decoder.read_exact(&mut len_buf)?;
         let header_len = u32::from_le_bytes(len_buf) as usize;
+        if header_len > MAX_HEADER_BYTES {
+            return Err(ProjectError::LimitExceeded("header size"));
+        }
         let header_bytes = super::read_exact_vec(&mut decoder, header_len)?;
 
         let (metadata, editor_state): (ProjectMetadata, EditorState) =
@@ -313,6 +376,7 @@ impl Project {
         // below still reads the full count and fails via read_exact if
         // the data runs short.
         let mut chunks = Vec::with_capacity(chunk_count.min(MAX_CHUNK_HINT));
+        let mut seen = std::collections::HashSet::with_capacity(chunk_count.min(MAX_CHUNK_HINT));
         for _ in 0..chunk_count {
             // Read position
             let mut pos_buf = [0u8; 4];
@@ -322,16 +386,50 @@ impl Project {
             let y = i32::from_le_bytes(pos_buf);
             decoder.read_exact(&mut pos_buf)?;
             let z = i32::from_le_bytes(pos_buf);
+            if x.unsigned_abs() > MAX_CHUNK_COORD as u32
+                || y.unsigned_abs() > MAX_CHUNK_COORD as u32
+                || z.unsigned_abs() > MAX_CHUNK_COORD as u32
+            {
+                return Err(ProjectError::LimitExceeded("chunk position"));
+            }
+            // The writer emits each position once (it iterates a map's
+            // sorted keys), so a duplicate means the count and the
+            // stream disagree — refusing beats a silent last-one-wins.
+            if !seen.insert((x, y, z)) {
+                return Err(ProjectError::InvalidChunkData);
+            }
 
             // Read RLE data
             decoder.read_exact(&mut len_buf)?;
             let rle_len = u32::from_le_bytes(len_buf) as usize;
+            if rle_len > MAX_RLE_BYTES {
+                return Err(ProjectError::LimitExceeded("chunk RLE size"));
+            }
+            // Runs are 10 bytes each; a length that isn't a whole
+            // number of runs is refused here at the structural level —
+            // `rle_decode_chunk` re-checks when the payload is decoded,
+            // but a `Project` should not hold data it will later refuse.
+            if !rle_len.is_multiple_of(10) {
+                return Err(ProjectError::InvalidChunkData);
+            }
             let rle_data = super::read_exact_vec(&mut decoder, rle_len)?;
 
             chunks.push(ChunkData {
                 pos: ChunkPos::new(x, y, z),
                 rle_data,
             });
+        }
+
+        // Drain to gzip EOF. Two verifications ride on this read: any
+        // decompressed byte past the last declared chunk means the
+        // stream and the length fields disagree, and reaching true EOF
+        // is when flate2 checks the gzip CRC-32/ISIZE trailer — a file
+        // with its tail cut off errors here instead of "loading".
+        let mut tail = [0u8; 64];
+        match decoder.read(&mut tail) {
+            Ok(0) => {}
+            Ok(_) => return Err(ProjectError::TrailingData),
+            Err(e) => return Err(e.into()),
         }
 
         Ok(Self {
@@ -393,8 +491,18 @@ fn write_rle_run(buf: &mut Vec<u8>, voxel: Voxel, count: u16) {
     buf.extend_from_slice(bytemuck::bytes_of(&voxel));
 }
 
-/// Run-length decode chunk voxels
-fn rle_decode_chunk(data: &[u8]) -> Option<Chunk> {
+/// Run-length decode chunk voxels.
+///
+/// Strict on every axis the encoder is exact about: the payload is a
+/// whole number of 10-byte runs, no run is empty, and the runs sum to
+/// exactly one chunk's 32³ cells. The lenient version of this — pad
+/// short data with air, truncate long data, skip trailing fragments —
+/// turned every one of those corruptions into a silently wrong model
+/// instead of a refused file.
+fn rle_decode_chunk(data: &[u8]) -> Result<Chunk, ProjectError> {
+    if !data.len().is_multiple_of(10) {
+        return Err(ProjectError::InvalidChunkData);
+    }
     let mut decoded: Vec<Voxel> = Vec::with_capacity(CHUNK_VOLUME);
 
     let mut offset = 0;
@@ -402,9 +510,16 @@ fn rle_decode_chunk(data: &[u8]) -> Option<Chunk> {
         // Read count (2 bytes)
         let count = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
+        // A zero-length run encodes nothing; the encoder never emits
+        // one, so it can only be damage.
+        if count == 0 {
+            return Err(ProjectError::InvalidChunkData);
+        }
 
         // Read voxel (8 bytes)
-        let voxel_bytes: [u8; 8] = data[offset..offset + 8].try_into().ok()?;
+        let voxel_bytes: [u8; 8] = data[offset..offset + 8]
+            .try_into()
+            .map_err(|_| ProjectError::InvalidChunkData)?;
         let mut voxel: Voxel = *bytemuck::from_bytes(&voxel_bytes);
         offset += 8;
         // Every voxel that reaches the world is opaque. `.vox` import
@@ -419,23 +534,24 @@ fn rle_decode_chunk(data: &[u8]) -> Option<Chunk> {
             voxel.a = 255;
         }
 
-        // Add voxels
+        // Overflowing the chunk means the runs and the format disagree.
+        if decoded.len() + count > CHUNK_VOLUME {
+            return Err(ProjectError::InvalidChunkData);
+        }
         for _ in 0..count {
-            if decoded.len() >= CHUNK_VOLUME {
-                break;
-            }
             decoded.push(voxel);
         }
     }
 
-    // Fill remaining with air if needed
-    while decoded.len() < CHUNK_VOLUME {
-        decoded.push(Voxel::AIR);
+    // Exactly one chunk of cells — short data used to be padded with
+    // air, which reads as "part of the model quietly missing".
+    if decoded.len() != CHUNK_VOLUME {
+        return Err(ProjectError::InvalidChunkData);
     }
 
     // Create chunk with decoded voxels
     let mut chunk = Chunk::new();
-    for (i, voxel) in decoded.into_iter().enumerate().take(CHUNK_VOLUME) {
+    for (i, voxel) in decoded.into_iter().enumerate() {
         let x = i % CHUNK_SIZE;
         let y = (i / CHUNK_SIZE) % CHUNK_SIZE;
         let z = i / (CHUNK_SIZE * CHUNK_SIZE);
@@ -444,23 +560,79 @@ fn rle_decode_chunk(data: &[u8]) -> Option<Chunk> {
         }
     }
 
-    Some(chunk)
+    Ok(chunk)
 }
 
 /// Quick save world to file path (atomic + durable — see
 /// [`write_project_atomic`]).
 pub fn save_world(world: &World, path: &std::path::Path) -> Result<(), ProjectError> {
-    write_project_atomic(&Project::from_world(world), path)
+    write_project_atomic(&carry_metadata(Project::from_world(world), path), path)
 }
 
 /// Save world with editor state to file path (atomic + durable — see
-/// [`write_project_atomic`]).
+/// [`write_project_atomic`]). The metadata of the file being replaced
+/// is carried across — see [`carry_metadata`].
 pub fn save_world_with_state(
     world: &World,
     editor_state: EditorState,
     path: &std::path::Path,
 ) -> Result<(), ProjectError> {
-    write_project_atomic(&Project::from_world_with_state(world, editor_state), path)
+    write_project_atomic(
+        &carry_metadata(Project::from_world_with_state(world, editor_state), path),
+        path,
+    )
+}
+
+/// Keep the identity of the file a save is replacing.
+///
+/// Every save used to build a fresh default [`ProjectMetadata`], so a
+/// plain open → save reset `name`, `author` and — the one that can't be
+/// re-typed — `created_at`, on every project, silently. Reading the old
+/// header back at save time fixes that in the one place every saver
+/// (GUI Ctrl+S, `exec --out` over its input, the MCP checkpoint) goes
+/// through, with no host needing to carry metadata it has no UI for.
+/// `modified_at` moves to now, which is that field's whole job; a path
+/// with no readable project under it (a fresh Save As) keeps the fresh
+/// default metadata.
+fn carry_metadata(mut project: Project, path: &std::path::Path) -> Project {
+    if let Some(existing) = load_metadata(path) {
+        project.metadata = existing;
+        project.touch();
+    }
+    project
+}
+
+/// Metadata of an existing project file, or `None` if the path holds no
+/// readable project. Reads the header only — chunk data is never
+/// touched, so calling this per save costs a few KB of I/O, not a
+/// re-load of the world.
+fn load_metadata(path: &std::path::Path) -> Option<ProjectMetadata> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).ok()?;
+    if magic != PROJECT_MAGIC {
+        return None;
+    }
+    let mut version_buf = [0u8; 4];
+    reader.read_exact(&mut version_buf).ok()?;
+    if u32::from_le_bytes(version_buf) != PROJECT_VERSION {
+        return None;
+    }
+    let mut decoder = GzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES);
+    let mut len_buf = [0u8; 4];
+    decoder.read_exact(&mut len_buf).ok()?;
+    let header_len = u32::from_le_bytes(len_buf) as usize;
+    if header_len > MAX_HEADER_BYTES {
+        return None;
+    }
+    let header_bytes = super::read_exact_vec(&mut decoder, header_len).ok()?;
+    // The editor-state half is skipped as raw JSON: this reader wants
+    // the metadata even out of a file whose state half a newer build
+    // wrote, and it must never be the reason a save fails.
+    let (metadata, _): (ProjectMetadata, serde_json::Value) =
+        serde_json::from_slice(&header_bytes).ok()?;
+    Some(metadata)
 }
 
 /// Serialize a project to `path` **atomically and durably**.
@@ -483,9 +655,18 @@ pub fn save_world_with_state(
 ///   ever the complete old file or the complete new one.
 ///
 /// On any failure the partial temp is removed rather than left behind.
+///
+/// The temp name carries the process id: two Voxeliths saving the same
+/// project (the editor's Ctrl+S racing an MCP checkpoint) used to share
+/// one `<path>.tmp`, each truncating and interleaving into the other's
+/// half-written file — whichever rename landed second installed the
+/// mixture as the save. With per-process temps the last rename wins
+/// with a *complete* file, which is the most "two writers, no lock" can
+/// promise. The same process reuses its one name, so temps don't
+/// accumulate across saves.
 fn write_project_atomic(project: &Project, path: &std::path::Path) -> Result<(), ProjectError> {
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp{}", std::process::id()));
     let tmp = std::path::PathBuf::from(tmp);
 
     // Phase 1: write + fsync the temp. On any error, drop the partial
@@ -499,6 +680,20 @@ fn write_project_atomic(project: &Project, path: &std::path::Path) -> Result<(),
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
+    }
+
+    // Phase 3 (POSIX): fsync the parent directory, which is where the
+    // rename itself lives. Without it a power cut can roll the
+    // directory back to the old entry even though the save reported
+    // success — the old *complete* file, so atomicity holds either way;
+    // this closes the durability half of the promise. Best-effort: a
+    // directory that can't be opened or synced (exotic filesystems)
+    // doesn't fail a save whose bytes are already safe.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
     }
     Ok(())
 }
@@ -523,7 +718,7 @@ pub fn load_world(path: &std::path::Path) -> Result<World, ProjectError> {
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
     let project = Project::load(&mut reader)?;
-    Ok(project.to_world())
+    project.to_world()
 }
 
 /// Load world with editor state from file path
@@ -531,7 +726,7 @@ pub fn load_world_with_state(path: &std::path::Path) -> Result<(World, EditorSta
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
     let project = Project::load(&mut reader)?;
-    Ok((project.to_world(), project.editor_state))
+    Ok((project.to_world()?, project.editor_state))
 }
 
 #[cfg(test)]
@@ -551,7 +746,7 @@ mod tests {
         project.save(&mut buffer).unwrap();
 
         let loaded = Project::load(&mut buffer.as_slice()).unwrap();
-        let loaded_world = loaded.to_world();
+        let loaded_world = loaded.to_world().unwrap();
 
         assert!(loaded_world.get_voxel(0, 0, 0).is_solid());
         assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
@@ -683,7 +878,7 @@ mod tests {
         assert_eq!(es.brush_tint_zone, state.brush_tint_zone);
 
         // Every set voxel survives — negatives, far chunks, exact rgba.
-        let loaded_world = loaded.to_world();
+        let loaded_world = loaded.to_world().unwrap();
         for ((x, y, z), v) in samples {
             assert_eq!(
                 loaded_world.get_voxel(x, y, z),
@@ -795,7 +990,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("proj.vxlt");
-        let tmp = path.with_file_name("proj.vxlt.tmp"); // what the helper writes
+        // What the helper writes — the temp name carries the pid so two
+        // processes saving the same project can't share (and truncate)
+        // one temp file.
+        let tmp =
+            path.with_file_name(format!("proj.vxlt.tmp{}", std::process::id()));
 
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
@@ -831,6 +1030,177 @@ mod tests {
         );
         assert_eq!(loaded2.get_voxel(5, 5, 5).g, 255);
         assert!(!tmp.exists(), "temp file left behind after overwrite");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    type RawChunk = ((i32, i32, i32), Vec<u8>);
+
+    /// Hand-assemble a `.vxlt` from parts, mirroring `Project::save`'s
+    /// layout, so the strictness tests can put damage exactly where
+    /// they mean to.
+    fn raw_project(chunks: &[RawChunk]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&PROJECT_MAGIC);
+        out.extend_from_slice(&PROJECT_VERSION.to_le_bytes());
+        let mut enc = GzEncoder::new(&mut out, Compression::default());
+        let header = serde_json::to_string(&(
+            ProjectMetadata::default(),
+            EditorState::default(),
+        ))
+        .unwrap();
+        enc.write_all(&(header.len() as u32).to_le_bytes()).unwrap();
+        enc.write_all(header.as_bytes()).unwrap();
+        enc.write_all(&(chunks.len() as u32).to_le_bytes()).unwrap();
+        for ((x, y, z), rle) in chunks {
+            enc.write_all(&x.to_le_bytes()).unwrap();
+            enc.write_all(&y.to_le_bytes()).unwrap();
+            enc.write_all(&z.to_le_bytes()).unwrap();
+            enc.write_all(&(rle.len() as u32).to_le_bytes()).unwrap();
+            enc.write_all(rle).unwrap();
+        }
+        enc.finish().unwrap();
+        out
+    }
+
+    /// One full chunk of a single solid color, as the encoder writes it:
+    /// runs of u16::MAX voxels plus a remainder, summing to 32³.
+    fn full_chunk_rle() -> Vec<u8> {
+        let mut chunk = Chunk::new();
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    chunk.set(x, y, z, Voxel::from_rgb(9, 8, 7));
+                }
+            }
+        }
+        rle_encode_chunk(&chunk)
+    }
+
+    #[test]
+    fn a_file_with_its_gzip_trailer_cut_off_is_refused() {
+        // The exact corruption a crash mid-copy (or a truncating
+        // transfer) produces: everything present but the final CRC-32 +
+        // length trailer. The old loader stopped reading at the last
+        // chunk and reported this file as loading cleanly.
+        let bytes = raw_project(&[((0, 0, 0), full_chunk_rle())]);
+        let truncated = &bytes[..bytes.len() - 8];
+        assert!(
+            Project::load(&mut &truncated[..]).is_err(),
+            "a truncated gzip stream must not load"
+        );
+        // The intact stream still does — proving the drain-to-EOF
+        // doesn't reject well-formed files.
+        assert!(Project::load(&mut &bytes[..]).is_ok());
+    }
+
+    /// The whole read path a real open takes: parse the container, then
+    /// decode every chunk. Content-level RLE damage surfaces in the
+    /// second half.
+    fn load_bytes(bytes: &[u8]) -> Result<World, ProjectError> {
+        Project::load(&mut &bytes[..]).and_then(|p| p.to_world())
+    }
+
+    #[test]
+    fn corrupt_rle_payloads_are_refused_not_papered_over() {
+        // Trailing fragment: not a whole number of 10-byte runs.
+        let mut fragment = full_chunk_rle();
+        fragment.extend_from_slice(&[1, 2, 3]);
+        let bytes = raw_project(&[((0, 0, 0), fragment)]);
+        assert!(load_bytes(&bytes).is_err(), "fragment accepted");
+
+        // Short: runs sum to less than a chunk. Used to be padded with
+        // air — part of the model quietly missing.
+        let mut short = Vec::new();
+        short.extend_from_slice(&5u16.to_le_bytes());
+        short.extend_from_slice(bytemuck::bytes_of(&Voxel::from_rgb(1, 2, 3)));
+        let bytes = raw_project(&[((0, 0, 0), short)]);
+        assert!(load_bytes(&bytes).is_err(), "short chunk accepted");
+
+        // Long: runs sum past a chunk. Used to be silently truncated.
+        let mut long = full_chunk_rle();
+        long.extend_from_slice(&1u16.to_le_bytes());
+        long.extend_from_slice(bytemuck::bytes_of(&Voxel::from_rgb(1, 2, 3)));
+        let bytes = raw_project(&[((0, 0, 0), long)]);
+        assert!(load_bytes(&bytes).is_err(), "overlong chunk accepted");
+
+        // A zero-count run encodes nothing; the encoder never writes one.
+        let mut zero = Vec::new();
+        zero.extend_from_slice(&0u16.to_le_bytes());
+        zero.extend_from_slice(bytemuck::bytes_of(&Voxel::from_rgb(1, 2, 3)));
+        // Pad with a second, valid run so the %10 structural check
+        // alone can't be what rejects it.
+        zero.extend_from_slice(&7u16.to_le_bytes());
+        zero.extend_from_slice(bytemuck::bytes_of(&Voxel::from_rgb(1, 2, 3)));
+        let bytes = raw_project(&[((0, 0, 0), zero)]);
+        assert!(load_bytes(&bytes).is_err(), "zero-run accepted");
+
+        // And the counter-case: a well-formed chunk still loads whole.
+        let bytes = raw_project(&[((0, 0, 0), full_chunk_rle())]);
+        let world = load_bytes(&bytes).expect("well-formed chunk must load");
+        assert_eq!(world.get_voxel(0, 0, 0), Voxel::from_rgb(9, 8, 7));
+        assert_eq!(world.get_voxel(31, 31, 31), Voxel::from_rgb(9, 8, 7));
+    }
+
+    #[test]
+    fn hostile_positions_counts_and_versions_are_refused() {
+        // A chunk coordinate the mesher's `chunk * 32` math can't hold.
+        let bytes = raw_project(&[((i32::MAX, 0, 0), full_chunk_rle())]);
+        assert!(matches!(
+            Project::load(&mut &bytes[..]),
+            Err(ProjectError::LimitExceeded(_))
+        ));
+
+        // The same coordinate twice: the writer never does this, so the
+        // count and the stream disagree.
+        let bytes = raw_project(&[
+            ((0, 0, 0), full_chunk_rle()),
+            ((0, 0, 0), full_chunk_rle()),
+        ]);
+        assert!(Project::load(&mut &bytes[..]).is_err(), "duplicate accepted");
+
+        // Version 0 was never written by any build.
+        let mut bytes = raw_project(&[]);
+        bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            Project::load(&mut &bytes[..]),
+            Err(ProjectError::UnsupportedVersion(0))
+        ));
+    }
+
+    #[test]
+    fn saving_over_a_project_keeps_its_metadata() {
+        // Open → save must not reset the project's identity: `name`,
+        // `author` and `created_at` used to be rebuilt from defaults on
+        // every save, silently. `modified_at` alone moves.
+        let dir = std::env::temp_dir().join("voxelith_metadata_carry");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proj.vxlt");
+
+        // A project with distinctive metadata, written directly.
+        let mut world = World::new();
+        world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
+        let mut project = Project::from_world(&world);
+        project.metadata.name = "Fortress".to_string();
+        project.metadata.author = "Aqua".to_string();
+        project.metadata.created_at = 1_600_000_000;
+        project.metadata.modified_at = 1_600_000_000;
+        write_project_atomic(&project, &path).unwrap();
+
+        // The ordinary save path (what Ctrl+S, exec --out and the MCP
+        // checkpoint all call) writes over it.
+        save_world_with_state(&world, EditorState::default(), &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let loaded = Project::load(&mut std::io::BufReader::new(file)).unwrap();
+        assert_eq!(loaded.metadata.name, "Fortress");
+        assert_eq!(loaded.metadata.author, "Aqua");
+        assert_eq!(loaded.metadata.created_at, 1_600_000_000);
+        assert!(
+            loaded.metadata.modified_at > 1_600_000_000,
+            "modified_at is the one field a save should move"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

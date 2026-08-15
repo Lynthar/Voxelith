@@ -36,13 +36,22 @@ impl World {
         self.chunks.contains_key(&pos)
     }
 
-    /// Get chunk at position (returns None if not loaded)
-    pub fn get_chunk(&self, pos: ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
+    /// Get chunk at position (returns None if not loaded).
+    ///
+    /// `pub(crate)`, and so is `get_or_create_chunk`: the guard these
+    /// hand out is a *write* lock away from mutating a chunk behind
+    /// `World::set_voxel`'s back, and set_voxel is where the dirty
+    /// propagation across the full Moore neighborhood lives — a bypass
+    /// write renders with stale AO on every diagonal neighbor and
+    /// nothing ever corrects it. Inside the crate the callers are known
+    /// (meshing reads, the serializers, the batch scratch); outside it
+    /// the safe API is `get_voxel` / `set_voxel`.
+    pub(crate) fn get_chunk(&self, pos: ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
         self.chunks.get(&pos).cloned()
     }
 
     /// Get or create chunk at position.
-    pub fn get_or_create_chunk(&mut self, pos: ChunkPos) -> Arc<RwLock<Chunk>> {
+    pub(crate) fn get_or_create_chunk(&mut self, pos: ChunkPos) -> Arc<RwLock<Chunk>> {
         self.chunks
             .entry(pos)
             .or_insert_with(|| Arc::new(RwLock::new(Chunk::new())))
@@ -133,7 +142,13 @@ impl World {
         self.chunks.keys()
     }
 
-    /// Get all chunks
+    /// Get all chunks.
+    ///
+    /// Read through the guards this yields; never write through them.
+    /// Writes belong to `set_voxel`, which owes its neighbors the
+    /// Moore-neighborhood dirty propagation (see `get_chunk` — this
+    /// iterator stays public only because the app shell enumerates
+    /// chunks for read-only statistics and rendering).
     pub fn chunks(&self) -> impl Iterator<Item = (&ChunkPos, &Arc<RwLock<Chunk>>)> {
         self.chunks.iter()
     }

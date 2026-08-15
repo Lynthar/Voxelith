@@ -9,7 +9,7 @@ use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
-    event_loop::ActiveEventLoop,
+    event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
@@ -77,7 +77,33 @@ impl ApplicationHandler for App {
 
             let window = event_loop.create_window(window_attrs).unwrap();
             self.init(window);
+            // Kick the first frame. `RedrawRequested` re-arms itself
+            // through the scheduler, but the chain has to start
+            // somewhere: Windows happens to deliver an initial WM_PAINT,
+            // macOS only draws when asked — without this the window sat
+            // on the compositor's blank backing store forever, and even
+            // moving / resizing it never produced a first frame.
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The frame scheduler. `RedrawRequested` sets `next_frame_at`
+        // (immediately while the user is active, an idle heartbeat
+        // apart otherwise — see `App::frame_interval`); this arms the
+        // redraw when it comes due and parks the loop until then.
+        // Input wakes the loop regardless of the deadline, so a key
+        // press lands instantly however deep in an idle stretch it
+        // arrives.
+        let Some(window) = &self.window else {
+            return;
+        };
+        if Instant::now() >= self.next_frame_at {
+            window.request_redraw();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_at));
     }
 
     fn window_event(
@@ -86,6 +112,25 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Any input (or window-geometry change) marks the user active —
+        // the frame scheduler renders at full rate for a grace window
+        // after this stamp and drops to the idle heartbeat otherwise.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::Touch(_)
+                | WindowEvent::PinchGesture { .. }
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+        ) {
+            self.last_interaction = Instant::now();
+        }
+
         // Let egui see the event first — its `consumed` flag gates the editor.
         let egui_consumed = {
             let window = self.window.as_ref().unwrap();
@@ -449,9 +494,13 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                // Schedule rather than request: `about_to_wait` arms the
+                // actual redraw when this deadline passes. Immediate
+                // while the user is active (vsync paces the real rate),
+                // a 100 ms heartbeat when idle — the unconditional
+                // re-request this replaces rendered a motionless scene
+                // at 144 fps for as long as the app was open.
+                self.next_frame_at = Instant::now() + self.frame_interval();
             }
 
             _ => {}
@@ -468,6 +517,11 @@ impl ApplicationHandler for App {
         // Sign matches `CameraController::process_mouse_motion` — drag-the-scene.
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.cursor_captured {
+                // The windowed CursorMoved path is gated off while
+                // captured, so this is the only event stream proving
+                // the user is mid-orbit — stamp it or the scheduler
+                // would read a long smooth orbit as idleness.
+                self.last_interaction = Instant::now();
                 if let Some(renderer) = &mut self.renderer {
                     // Raw motion is the SOLE orbit path while captured (the
                     // windowed `CursorMoved` path is gated off then), so the

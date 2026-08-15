@@ -447,11 +447,17 @@ impl App {
             // a hazard: "undo that" should work whoever did it, and the
             // human's own Ctrl+Z is right there to put it back.
             AgentRequest::Undo => {
-                let stepped = self.editor.history.undo(&mut self.world);
+                let stepped = self
+                    .editor
+                    .history
+                    .undo(&mut self.world, &mut self.ui.graph);
                 Ok(self.stepped_and_meshed(stepped))
             }
             AgentRequest::Redo => {
-                let stepped = self.editor.history.redo(&mut self.world);
+                let stepped = self
+                    .editor
+                    .history
+                    .redo(&mut self.world, &mut self.ui.graph);
                 Ok(self.stepped_and_meshed(stepped))
             }
 
@@ -476,6 +482,10 @@ impl App {
     fn stepped_and_meshed(&mut self, stepped: bool) -> Answer {
         if stepped {
             self.rebuild_all_meshes();
+            // The rebuild only flags the document when a chunk went
+            // dirty; an entry that carried nothing but a graph
+            // transition moved the document without touching one.
+            self.mark_document_modified();
         }
         Answer::Stepped(Box::new(Stepped {
             stepped,
@@ -563,12 +573,40 @@ impl App {
         }
         let changed = outcome.changes.len();
 
+        // A graph the batch carried goes into the Graph panel — that is
+        // what sending a graph is *for*: the agent picks the generators
+        // and wires them, the human takes over at the sliders. It rides
+        // inside the batch's command as a before/after transition, so
+        // the one Ctrl+Z that takes the voxels back out restores the
+        // graph the batch replaced too. Laid out before it's stored,
+        // since an agent sends no positions and every node would
+        // otherwise pile up on the origin (and redo must re-apply the
+        // laid-out version, not re-pile them).
+        let graph = outcome.graph.map(|mut after| {
+            if after.all_at_origin() {
+                after.relayout();
+            }
+            voxelith::editor::GraphTransition {
+                before: self.ui.graph.clone(),
+                after,
+            }
+        });
+        if graph.as_ref().is_some_and(|t| t.before != t.after) {
+            // A batch that only carried a graph changed no voxel, so the
+            // re-mesh below finds nothing dirty and the document would
+            // answer "no unsaved changes" while holding a pipeline that
+            // exists nowhere on disk.
+            self.mark_document_modified();
+        }
+
         // One command for the whole batch: one entry on the same stack
         // the user's brush strokes push onto, so one Ctrl+Z takes the
         // agent's step back out.
-        self.editor
-            .history
-            .execute(Command::set_voxels(outcome.changes), &mut self.world);
+        self.editor.history.execute_with_graph(
+            Command::set_voxels_with_graph(outcome.changes, graph),
+            &mut self.world,
+            &mut self.ui.graph,
+        );
 
         // A batch that ends with no selection is clearing one, and
         // clearing a selection is more than assigning `None` — the drag
@@ -576,24 +614,6 @@ impl App {
         match outcome.selection {
             Some(selection) => self.editor.selection = Some(selection),
             None => self.deselect(),
-        }
-
-        // A graph the batch carried goes straight into the Graph panel.
-        // This is what sending a graph is *for*: the agent picks the
-        // generators and wires them, the human takes over at the
-        // sliders. Laid out on arrival, since an agent sends no
-        // positions and every node would otherwise pile up on the
-        // origin.
-        if let Some(mut graph) = outcome.graph {
-            if graph.all_at_origin() {
-                graph.relayout();
-            }
-            self.ui.graph = graph;
-            // A batch that only carried a graph changed no voxel, so the
-            // re-mesh below finds nothing dirty and the document would
-            // answer "no unsaved changes" while holding a pipeline that
-            // exists nowhere on disk.
-            self.mark_document_modified();
         }
 
         self.agent.applied += 1;

@@ -24,10 +24,12 @@
 //!    which is what makes `rotate` / `mirror` / `hollow` mean anything
 //!    inside a batch.
 //! 3. **One undo entry per batch.** The accumulated changes commit as a
-//!    single [`Command::set_voxels`], so a human at the editor undoes an
-//!    agent's whole step with one Ctrl+Z — and when the editor is the
-//!    one hosting the agent, that is literally the same undo stack their
-//!    own brush strokes push onto (see [`BatchOutcome`]).
+//!    single command — with any graph the batch installed riding inside
+//!    it as a before/after transition — so a human at the editor undoes
+//!    an agent's whole step, voxels and graph both, with one Ctrl+Z.
+//!    When the editor is the one hosting the agent, that is literally
+//!    the same undo stack their own brush strokes push onto (see
+//!    [`BatchOutcome`]).
 //!
 //! Errors are the product here as much as the edits are: every failure
 //! carries the offending `op_index`, a stable machine-readable
@@ -441,14 +443,22 @@ impl AgentSession {
 
         if !batch.options.dry_run {
             // One command for the whole batch: one undo entry, and a
-            // no-op batch pushes nothing (`CommandHistory::execute`
-            // drops no-ops).
-            self.history
-                .execute(Command::set_voxels(outcome.changes), &mut self.world);
+            // no-op batch pushes nothing (`execute_with_graph` drops
+            // no-ops). A graph the batch carried rides inside the same
+            // command, so undo steps the graph back with the voxels —
+            // assigning it beside the history (as this used to) left a
+            // graph-only batch with no undo entry at all, and a mixed
+            // batch whose undo kept the new graph over the old voxels.
+            let graph = outcome.graph.map(|after| crate::editor::GraphTransition {
+                before: self.graph.clone(),
+                after,
+            });
+            self.history.execute_with_graph(
+                Command::set_voxels_with_graph(outcome.changes, graph),
+                &mut self.world,
+                &mut self.graph,
+            );
             self.selection = outcome.selection;
-            if let Some(graph) = outcome.graph {
-                self.graph = graph;
-            }
         }
         Ok(outcome.report)
     }
@@ -512,11 +522,11 @@ impl AgentSession {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.history.undo(&mut self.world)
+        self.history.undo(&mut self.world, &mut self.graph)
     }
 
     pub fn redo(&mut self) -> bool {
-        self.history.redo(&mut self.world)
+        self.history.redo(&mut self.world, &mut self.graph)
     }
 }
 
@@ -597,7 +607,7 @@ mod tests {
         // out — the same guarantee the session gives, on the user's own
         // stack.
         assert_eq!(history.undo_count(), 1);
-        assert!(history.undo(&mut world));
+        assert!(history.undo(&mut world, &mut PipelineGraph::default()));
         assert!(
             world.get_voxel(2, 2, 0).is_air(),
             "undo must take the whole batch back out"
@@ -637,5 +647,94 @@ mod tests {
         let session = AgentSession::new();
         let preview = session.preview_ops(&parse(BATCH)).expect("batch should run");
         assert!(preview.report.dry_run);
+    }
+
+    /// A batch whose `graph` op replaced the document's graph. Uses the
+    /// registry's own template so the graph is one the op provably
+    /// accepts; `apply: false` keeps it a pure graph replacement.
+    fn graph_batch() -> OpsBatch {
+        let graph = crate::agent_ops::graph_template();
+        parse(&format!(
+            r#"{{"version":1,"ops":[{{"op":"graph","graph":{graph},"apply":false}}]}}"#
+        ))
+    }
+
+    /// "One undo entry per batch" has to cover the graph half of a
+    /// batch, not just its voxels. A graph-only batch used to assign
+    /// the graph beside the history — no undo entry at all, and the
+    /// graph it replaced was gone for good.
+    #[test]
+    fn a_graph_only_batch_is_one_undoable_entry() {
+        let mut session = AgentSession::new();
+        let before = session.graph.clone();
+        session.apply_ops(&graph_batch()).expect("batch should apply");
+
+        assert!(
+            !session.graph.nodes.is_empty(),
+            "the batch must have installed the template graph"
+        );
+        assert_eq!(
+            session.history.undo_count(),
+            1,
+            "a graph replacement is a document edit and gets an undo entry"
+        );
+
+        let installed = session.graph.clone();
+        assert!(session.undo(), "the entry must be steppable");
+        assert_eq!(
+            session.graph, before,
+            "undo must restore the graph the batch replaced"
+        );
+        assert!(session.redo());
+        assert_eq!(
+            session.graph, installed,
+            "redo must re-install the batch's graph"
+        );
+    }
+
+    /// A mixed batch (voxels + graph) undoes as a whole: the voxels
+    /// come back out AND the old graph comes back — not the half-state
+    /// where the voxels are gone but the new graph lingers.
+    #[test]
+    fn undoing_a_mixed_batch_restores_the_graph_with_the_voxels() {
+        let mut session = AgentSession::new();
+        let before = session.graph.clone();
+
+        let graph = crate::agent_ops::graph_template();
+        let batch = parse(&format!(
+            r#"{{"version":1,"ops":[
+                {{"op":"box","min":[0,0,0],"max":[2,2,2],"voxel":{{"rgb":[10,20,30]}}}},
+                {{"op":"graph","graph":{graph},"apply":false}}
+            ]}}"#
+        ));
+        session.apply_ops(&batch).expect("batch should apply");
+        assert_eq!(session.history.undo_count(), 1, "one entry for the whole batch");
+        assert!(!session.world.get_voxel(1, 1, 1).is_air());
+
+        assert!(session.undo());
+        assert!(
+            session.world.get_voxel(1, 1, 1).is_air(),
+            "undo must take the voxels back out"
+        );
+        assert_eq!(
+            session.graph, before,
+            "…and the graph back to what the batch replaced"
+        );
+    }
+
+    /// Re-sending the graph the document already holds changes nothing,
+    /// so it must push nothing — the same no-op rule voxel batches
+    /// follow.
+    #[test]
+    fn re_sending_the_same_graph_pushes_no_undo_entry() {
+        let mut session = AgentSession::new();
+        session.apply_ops(&graph_batch()).expect("first apply");
+        assert_eq!(session.history.undo_count(), 1);
+        session.apply_ops(&graph_batch()).expect("second apply");
+        assert_eq!(
+            session.history.undo_count(),
+            1,
+            "an identical graph is a no-op batch"
+        );
     }
 }

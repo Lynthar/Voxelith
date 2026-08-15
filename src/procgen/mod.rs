@@ -164,13 +164,11 @@ pub trait VoxelGenerator: Send + Sync {
     /// Run the generator and return its output patch.
     fn generate(&self) -> GenResult<VoxelPatch>;
 
-    /// Whether the generator can produce output incrementally.
-    /// Default: false.
-    fn supports_incremental(&self) -> bool {
-        false
-    }
-
-    /// Hint for UI progress display. Default: zero.
+    /// Hint for UI progress display. Default: zero. No caller reads it
+    /// yet — it stays because "preview time/count" is on the roadmap
+    /// (docs/STATUS.md, Procgen) and WFC / terrain already compute
+    /// honest estimates. (`supports_incremental` used to sit beside it
+    /// with neither an implementation nor a plan; that one is gone.)
     fn estimate_duration(&self) -> Duration {
         Duration::ZERO
     }
