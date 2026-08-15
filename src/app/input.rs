@@ -48,7 +48,7 @@ impl App {
         // Real-geometry hit takes priority — this is the use case the
         // user described: "zoom in to inspect this voxel". Use the same
         // RAYCAST_MAX_DIST as editor picking so the reach is consistent.
-        if let Some(hit) = VoxelRaycast::cast(&ray, &self.world, RAYCAST_MAX_DIST) {
+        if let Some(hit) = VoxelRaycast::cast(&ray, &self.document.world, RAYCAST_MAX_DIST) {
             return Some(ray.at(hit.distance));
         }
 
@@ -93,7 +93,7 @@ impl App {
         let ray = Ray::new(camera.position, camera.forward());
         Some(VoxelRaycast::orbit_pivot(
             &ray,
-            &self.world,
+            &self.document.world,
             RAYCAST_MAX_DIST,
             camera.target,
         ))
@@ -142,7 +142,7 @@ impl App {
 
     /// Frame the whole scene (AABB of every non-air voxel).
     pub(super) fn frame_all(&mut self) {
-        match self.world.scene_aabb() {
+        match self.document.world.scene_aabb() {
             Some((min, max)) => {
                 self.frame_camera_on_aabb(min, max);
                 self.ui.set_status("Framed scene");
@@ -221,9 +221,9 @@ impl App {
         );
 
         self.editor.hovered_voxel = if self.effective_tool().uses_ground_plane_fallback() {
-            VoxelRaycast::cast_with_ground_plane(&ray, &self.world, RAYCAST_MAX_DIST, 0)
+            VoxelRaycast::cast_with_ground_plane(&ray, &self.document.world, RAYCAST_MAX_DIST, 0)
         } else {
-            VoxelRaycast::cast(&ray, &self.world, RAYCAST_MAX_DIST)
+            VoxelRaycast::cast(&ray, &self.document.world, RAYCAST_MAX_DIST)
         };
     }
 
@@ -368,7 +368,7 @@ impl App {
                 }
                 let brush = BrushTool::new(self.effective_tool());
                 let mut ctx = ToolContext {
-                    world: &mut self.world,
+                    world: &mut self.document.world,
                     history: &mut self.editor.history,
                     brush_color: self.editor.brush_color,
                     brush_size: self.editor.brush_size,
@@ -377,7 +377,7 @@ impl App {
                 brush.apply(&mut ctx, &hit);
             }
             Tool::Eyedropper => {
-                if let Some(color) = eyedrop(&self.world, &hit) {
+                if let Some(color) = eyedrop(&self.document.world, &hit) {
                     self.editor.brush_color = color;
                 }
             }
@@ -388,7 +388,7 @@ impl App {
                 // eat the entire 3D air region around the cursor (capped
                 // by `flood_fill`'s spatial limit, but still visually
                 // alarming and never what the user meant).
-                let v = self.world.get_voxel(
+                let v = self.document.world.get_voxel(
                     hit.voxel_pos.0,
                     hit.voxel_pos.1,
                     hit.voxel_pos.2,
@@ -403,7 +403,7 @@ impl App {
                     // 8-fold symmetry.
                     let starts = symmetry.mirror_positions(hit.voxel_pos);
                     flood_fill_multi(
-                        &mut self.world,
+                        &mut self.document.world,
                         &mut self.editor.history,
                         &starts,
                         self.editor.brush_color,
@@ -411,7 +411,7 @@ impl App {
                     )
                 } else {
                     flood_fill(
-                        &mut self.world,
+                        &mut self.document.world,
                         &mut self.editor.history,
                         hit.voxel_pos,
                         self.editor.brush_color,
@@ -498,14 +498,14 @@ impl App {
                     vz as f32 + 0.5 + nz as f32 * 0.5,
                 ];
                 let normal = [nx as f32, ny as f32, nz as f32];
-                let name = voxelith::editor::next_socket_name(&self.editor.sockets);
-                self.editor
+                let name = voxelith::editor::next_socket_name(&self.document.sockets);
+                self.document
                     .sockets
                     .push(voxelith::editor::Socket::new(name.clone(), position, normal));
                 // Sockets are document data no mesh rebuild notices —
                 // placing one has to raise the unsaved flags itself, or
                 // "place a socket, quit" lost it without a prompt.
-                self.mark_document_modified();
+                self.document.bump();
                 self.ui.set_status(format!(
                     "Placed {} at ({:.1}, {:.1}, {:.1})",
                     name, position[0], position[1], position[2]
@@ -606,10 +606,10 @@ impl App {
         if self.refuse_oversized_sweep(sel, "Move") {
             return;
         }
-        let changes = build_move_changes(&self.world, sel, delta);
+        let changes = build_move_changes(&self.document.world, sel, delta);
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
         // Even an empty selection (all air) bumps its AABB so the
         // user can keyboard-nudge a marquee around empty space.
@@ -662,11 +662,11 @@ impl App {
             return;
         }
         let (new_sel, changes) =
-            rotate_selection_changes(&self.world, sel, axis, quarter);
+            rotate_selection_changes(&self.document.world, sel, axis, quarter);
         let count = changes.len();
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
         // Bump the selection AABB even when empty so a user rotating
         // an air-only marquee still sees the box reorient.
@@ -723,11 +723,11 @@ impl App {
         if self.refuse_oversized_sweep(sel, "Mirror") {
             return;
         }
-        let changes = mirror_selection_changes(&self.world, sel, axis);
+        let changes = mirror_selection_changes(&self.document.world, sel, axis);
         let count = changes.len();
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
         let label = match axis {
             Axis::X => "Flip X",
@@ -838,7 +838,7 @@ impl App {
             .into_iter()
             .map(|pos| VoxelChange {
                 pos,
-                old_voxel: self.world.get_voxel(pos.0, pos.1, pos.2),
+                old_voxel: self.document.world.get_voxel(pos.0, pos.1, pos.2),
                 new_voxel: color,
             })
             .filter(|c| c.old_voxel != c.new_voxel)
@@ -846,7 +846,7 @@ impl App {
 
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
     }
 
@@ -860,7 +860,7 @@ impl App {
         if self.refuse_oversized_sweep(sel, "Copy") {
             return;
         }
-        let clipboard = copy_selection_to_clipboard(&self.world, sel);
+        let clipboard = copy_selection_to_clipboard(&self.document.world, sel);
         let count = clipboard.voxel_count();
         self.clipboard = Some(clipboard);
         if count == 0 {
@@ -883,14 +883,14 @@ impl App {
         if self.refuse_oversized_sweep(sel, "Cut") {
             return;
         }
-        let clipboard = copy_selection_to_clipboard(&self.world, sel);
+        let clipboard = copy_selection_to_clipboard(&self.document.world, sel);
         let count = clipboard.voxel_count();
         self.clipboard = Some(clipboard);
 
-        let changes = build_clear_changes(&self.world, sel);
+        let changes = build_clear_changes(&self.document.world, sel);
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
 
         if count == 0 {
@@ -910,11 +910,11 @@ impl App {
         if self.refuse_oversized_sweep(sel, "Delete") {
             return;
         }
-        let changes = build_clear_changes(&self.world, sel);
+        let changes = build_clear_changes(&self.document.world, sel);
         let count = changes.len();
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
         if count == 0 {
             self.ui.set_status("Selection had no solid voxels to delete");
@@ -959,11 +959,11 @@ impl App {
             return;
         };
 
-        let changes = build_paste_changes(&self.world, clipboard, dest);
+        let changes = build_paste_changes(&self.document.world, clipboard, dest);
         let count = changes.len();
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            self.editor.history.execute(cmd, &mut self.world);
+            self.editor.history.execute(cmd, &mut self.document.world);
         }
 
         // Auto-select the destination AABB so the user can chain
@@ -986,7 +986,7 @@ impl App {
     /// exporters use). Surfaces "world is empty" if there's nothing
     /// to select.
     pub(super) fn select_all_solid(&mut self) {
-        match self.world.scene_aabb() {
+        match self.document.world.scene_aabb() {
             Some((min, max)) => {
                 self.editor.selection = Some(Selection { min, max });
                 let (w, h, d) = (max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1);
@@ -1084,20 +1084,20 @@ impl App {
             KeyCode::Digit0 => self.editor.select_tool(Tool::Select),
             KeyCode::KeyZ if self.primary_modifier() => {
                 let stepped = if self.modifiers.shift_key() {
-                    self.editor.redo(&mut self.world, &mut self.ui.graph)
+                    self.editor.redo(&mut self.document.world, &mut self.document.graph)
                 } else {
-                    self.editor.undo(&mut self.world, &mut self.ui.graph)
+                    self.editor.undo(&mut self.document.world, &mut self.document.graph)
                 };
                 if stepped {
                     // Voxel entries are flagged by the mesh rebuild; a
                     // graph-only transition reaches no chunk, so the
                     // step has to say so itself.
-                    self.mark_document_modified();
+                    self.document.bump();
                 }
             }
             KeyCode::KeyY if self.primary_modifier() => {
-                if self.editor.redo(&mut self.world, &mut self.ui.graph) {
-                    self.mark_document_modified();
+                if self.editor.redo(&mut self.document.world, &mut self.document.graph) {
+                    self.document.bump();
                 }
             }
             KeyCode::KeyS if self.primary_modifier() => {
@@ -1275,11 +1275,11 @@ mod tests {
     #[test]
     fn a_brush_press_arms_a_stroke_and_locks_the_plane() {
         let mut app = app_with_tool(Tool::Place);
-        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
+        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         // The press painted, and the stroke latched onto the hit face.
-        assert!(!app.world.get_voxel(0, 1, 0).is_air());
+        assert!(!app.document.world.get_voxel(0, 1, 0).is_air());
         match &app.interaction {
             EditInteraction::BrushStroke { plane: Some(p), .. } => {
                 assert_eq!((p.axis, p.sign), (1, 1), "top face = +Y plane");
@@ -1306,7 +1306,7 @@ mod tests {
     #[test]
     fn a_click_tool_press_is_a_plain_hold() {
         let mut app = app_with_tool(Tool::Eyedropper);
-        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(9, 8, 7));
+        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(9, 8, 7));
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         // Eyedropper sampled, but holds no plane and starts no gesture
@@ -1363,8 +1363,8 @@ mod tests {
         app.on_left_press();
         assert!(matches!(app.interaction, EditInteraction::Idle));
         assert_eq!(app.editor.history.undo_count(), 1);
-        assert!(!app.world.get_voxel(0, 1, 0).is_air());
-        assert!(!app.world.get_voxel(1, 1, 1).is_air());
+        assert!(!app.document.world.get_voxel(0, 1, 0).is_air());
+        assert!(!app.document.world.get_voxel(1, 1, 1).is_air());
     }
 
     #[test]
@@ -1410,7 +1410,7 @@ mod tests {
     #[test]
     fn a_press_inside_the_selection_moves_its_voxels() {
         let mut app = app_with_tool(Tool::Select);
-        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
+        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
         app.editor.selection = Some(Selection { min: (0, 0, 0), max: (0, 0, 0) });
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
@@ -1425,8 +1425,8 @@ mod tests {
         app.editor.hovered_voxel = Some(top_hit(2, 0, 0));
         app.on_left_release();
         assert!(matches!(app.interaction, EditInteraction::Idle));
-        assert!(app.world.get_voxel(0, 0, 0).is_air());
-        assert!(!app.world.get_voxel(2, 0, 0).is_air());
+        assert!(app.document.world.get_voxel(0, 0, 0).is_air());
+        assert!(!app.document.world.get_voxel(2, 0, 0).is_air());
         assert_eq!(app.editor.history.undo_count(), 1);
         assert_eq!(app.editor.selection.unwrap().min, (2, 0, 0));
     }
@@ -1490,12 +1490,12 @@ mod tests {
     #[test]
     fn arrow_nudges_are_ignored_mid_select_gesture() {
         let mut app = app_with_tool(Tool::Select);
-        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
+        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
         app.editor.selection = Some(Selection { min: (0, 0, 0), max: (0, 0, 0) });
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press(); // SelectMove in flight
         app.step_selection((1, 0, 0));
-        assert!(!app.world.get_voxel(0, 0, 0).is_air(), "nudge must not fight the drag");
+        assert!(!app.document.world.get_voxel(0, 0, 0).is_air(), "nudge must not fight the drag");
     }
 
     #[test]
@@ -1505,11 +1505,11 @@ mod tests {
         assert_eq!(app.effective_tool(), Tool::Eyedropper);
         assert_eq!(app.editor.current_tool, Tool::Place, "persisted tool untouched");
         // With Alt down, a press samples instead of painting.
-        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(42, 1, 1));
+        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(42, 1, 1));
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         assert_eq!(app.editor.brush_color.color()[0], 42);
-        assert!(app.world.get_voxel(0, 1, 0).is_air(), "nothing painted");
+        assert!(app.document.world.get_voxel(0, 1, 0).is_air(), "nothing painted");
         // Alt up (or the modifiers reset on focus loss): back to Place.
         app.modifiers = ModifiersState::empty();
         assert_eq!(app.effective_tool(), Tool::Place);

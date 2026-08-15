@@ -19,7 +19,7 @@ impl App {
                     if dist_sq <= radius_sq {
                         let t = (dist_sq.sqrt() / radius as f32 * 255.0) as u8;
                         let voxel = Voxel::from_rgb(255 - t, t, 128);
-                        self.world.set_voxel(
+                        self.document.world.set_voxel(
                             center.0 + x,
                             center.1 + y,
                             center.2 + z,
@@ -40,7 +40,7 @@ impl App {
                     let t = (y as f32 / height as f32 * 255.0) as u8;
                     let voxel =
                         Voxel::from_rgb(194 - t / 2, 178 - t / 2, 128 + t / 2);
-                    self.world.set_voxel(
+                    self.document.world.set_voxel(
                         base_center.0 + x,
                         base_center.1 + y,
                         base_center.2 + z,

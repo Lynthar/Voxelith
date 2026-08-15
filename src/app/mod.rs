@@ -14,6 +14,7 @@
 //! - `handler`  — winit `ApplicationHandler`
 
 mod agent_bridge;
+mod document;
 mod file_ops;
 mod handler;
 mod hud;
@@ -35,7 +36,7 @@ use winit::{keyboard::ModifiersState, window::Window};
 use std::collections::HashSet;
 
 use voxelith::{
-    core::{Voxel, World},
+    core::Voxel,
     editor::{
         box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Clipboard, Editor,
         EditorTool, RaycastHit, Selection, SymmetryAxes, Tool,
@@ -48,6 +49,7 @@ use voxelith::{
 };
 
 use agent_bridge::AgentBridgeState;
+use document::Document;
 use preview::PreviewState;
 
 /// Alpha applied to the brush hover overlay. Higher than the procgen
@@ -146,7 +148,10 @@ pub struct App {
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
 
-    world: World,
+    /// The open project — world, sockets, pipeline graph, metadata and
+    /// the revision marks that say whether it differs from the user's
+    /// file. See [`Document`].
+    document: Document,
     mesher: GreedyMesher,
     editor: Editor,
     ui: Ui,
@@ -250,21 +255,6 @@ pub struct App {
     /// no shutdown path needed.
     pub(super) async_runtime: runtime::AsyncRuntime,
 
-    /// Voxel data changed since the last time the user's *own* file was
-    /// written. Set from `rebuild_all_meshes` (dirty chunks ⟺ a voxel
-    /// changed) and cleared only by manual save / open / new / import /
-    /// initial-scene. Drives the unsaved-changes guard on every path
-    /// that would throw the scene away.
-    ///
-    /// Deliberately NOT cleared by autosave: the autosave is a crash net
-    /// living in the config dir, and a clean exit deletes it. If it
-    /// cleared this flag, the sequence "edit → autosave fires → close"
-    /// would skip the prompt and then delete the only copy.
-    pub(super) unsaved_changes: bool,
-    /// Same signal, but scoped to the autosave timer, which *does* want
-    /// "nothing changed since my last write" so it doesn't rewrite an
-    /// identical world every interval.
-    pub(super) autosave_pending: bool,
     /// When the last autosave ran. `tick_autosave` rate-limits writes to
     /// `AUTOSAVE_INTERVAL`.
     pub(super) last_autosave: Instant,
@@ -377,6 +367,7 @@ impl App {
                 .collect();
         }
 
+        let mut document = Document::new();
         let mut ui = Ui::new();
         ui.state.panels = prefs.panels.clone();
         ui.viewport = prefs.viewport.clone();
@@ -388,10 +379,10 @@ impl App {
         // migration every launch would drop the old graph on top of
         // whatever they had been editing since.
         if !prefs.graph_migrated && !prefs.graph.is_empty() {
-            ui.graph = prefs.graph.to_graph();
+            document.graph = prefs.graph.to_graph();
             // Pre-position-field prefs deserialize every node at [0, 0].
-            if ui.graph.all_at_origin() {
-                ui.graph.relayout();
+            if document.graph.all_at_origin() {
+                document.graph.relayout();
             }
             prefs.graph_migrated = true;
             ui.set_status(
@@ -408,7 +399,7 @@ impl App {
             renderer: None,
             egui_state: None,
             egui_renderer: None,
-            world: World::new(),
+            document,
             mesher: GreedyMesher::new(),
             editor,
             ui,
@@ -433,8 +424,6 @@ impl App {
             clipboard: None,
             prefs,
             async_runtime: runtime::AsyncRuntime::new(),
-            unsaved_changes: false,
-            autosave_pending: false,
             last_autosave: Instant::now(),
             watched_mtime: None,
             last_disk_poll: Instant::now(),
@@ -878,8 +867,9 @@ impl App {
         // event loop is running and the window has presented, so the
         // dialog behaves like the in-loop file dialogs that already work.
         self.create_initial_scene();
-        self.unsaved_changes = false;
-        self.autosave_pending = false;
+        // The rebuild above bumped the revision; the default scene is
+        // the baseline, not unsaved work.
+        self.document.mark_saved();
         // If a crash-recovery autosave is on disk, the last session
         // didn't exit cleanly (a clean exit deletes it) — raise the
         // in-app recovery prompt. The default scene is already up behind
@@ -895,8 +885,8 @@ impl App {
 
     /// Create the initial test scene shown on startup.
     fn create_initial_scene(&mut self) {
-        self.world.create_test_cube((0, 8, 0), 4);
-        self.world.create_test_ground(20, 2);
+        self.document.world.create_test_cube((0, 8, 0), 4);
+        self.document.world.create_test_ground(20, 2);
         self.rebuild_all_meshes();
         // Anchor the orbit pivot on the actual scene rather than the
         // hardcoded (0,0,0) target from `Camera::new`. Without this,
@@ -923,12 +913,12 @@ impl App {
         // Clears the selection plus the drag / move anchors and the
         // move ghost — see `App::deselect`.
         self.deselect();
-        self.editor.sockets.clear();
+        self.document.sockets.clear();
         // The graph is document data like the sockets, so it goes with
         // the scene. Open / reload put the incoming file's graph back
         // immediately after this call; New Scene is the path that wants
         // the empty one this leaves behind.
-        self.ui.graph = PipelineGraph::default();
+        self.document.graph = PipelineGraph::default();
         self.cancel_interaction();
         self.last_generated_bounds = None;
         // A batch parked for approval was built against the world that
@@ -952,7 +942,7 @@ impl App {
     /// the key handler and would sail straight past a guard installed
     /// only in the queue.
     pub(super) fn guard_then(&mut self, action: PendingAction) {
-        if !self.unsaved_changes {
+        if !self.document.unsaved() {
             self.run_guarded(action);
             return;
         }
@@ -1005,7 +995,7 @@ impl App {
     /// interval; a failed write is logged and retried next interval.
     /// `unsaved_changes` is left alone — see its doc comment.
     pub(super) fn tick_autosave(&mut self) {
-        if !self.autosave_pending || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+        if !self.document.autosave_due() || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
             return;
         }
         let Some(path) = Self::autosave_path() else {
@@ -1015,6 +1005,7 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
         let state = self.current_editor_state();
+        let metadata = self.document.metadata.clone();
         // Atomic write: serialize to a temp file, then rename it over the
         // real autosave. A crash mid-write then leaves at most a stale
         // temp, never a half-written `autosave.vxlt` — so recovery
@@ -1025,12 +1016,12 @@ impl App {
         // does: two running Voxeliths share one config dir, and a shared
         // temp name lets their autosaves interleave into garbage.
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-        let result = voxelith::io::save_world_with_state(&self.world, state, &tmp)
+        let result = voxelith::io::save_world_with_state(&self.document.world, state, metadata, &tmp)
             .and_then(|()| std::fs::rename(&tmp, &path).map_err(Into::into));
         match result {
             Ok(()) => {
                 log::info!("Autosaved to {}", path.display());
-                self.autosave_pending = false;
+                self.document.mark_autosaved();
             }
             Err(e) => {
                 log::warn!("Autosave failed: {}", e);
@@ -1061,7 +1052,7 @@ impl App {
     ///
     /// No-op when the world is empty (nothing meaningful to focus on).
     pub(super) fn recenter_camera_on_scene(&mut self) {
-        let Some(center) = self.world.scene_center() else { return };
+        let Some(center) = self.document.world.scene_center() else { return };
         let Some(renderer) = &mut self.renderer else { return };
         renderer.camera.target = center;
         renderer
@@ -1104,24 +1095,6 @@ impl App {
         self.interaction = EditInteraction::Idle;
     }
 
-    /// The document differs from the user's file, and the autosave
-    /// timer owes it a write.
-    ///
-    /// Two flags on purpose, and neither is the other's shorthand:
-    /// `unsaved_changes` is "dirty relative to the file the user owns"
-    /// and only a manual save / open / new clears it; `autosave_pending`
-    /// is the timer's own bookkeeping. Autosave must never clear the
-    /// first, or "edit → autosave fires → close" would skip the guard
-    /// and then delete the only copy on the way out.
-    ///
-    /// Callers are the two ways a document changes: voxels (through the
-    /// mesh rebuild below, which every edit funnels into) and the
-    /// pipeline graph, which reaches no chunk and so has to say so.
-    pub(super) fn mark_document_modified(&mut self) {
-        self.unsaved_changes = true;
-        self.autosave_pending = true;
-    }
-
     /// Rebuild meshes for all dirty chunks and upload them to the GPU.
     ///
     /// Mesh generation runs on rayon's thread pool. Uploads stay on
@@ -1133,7 +1106,7 @@ impl App {
             return;
         }
 
-        let dirty = self.world.dirty_chunks();
+        let dirty = self.document.world.dirty_chunks();
         if dirty.is_empty() {
             return;
         }
@@ -1141,18 +1114,20 @@ impl App {
 
         // Dirty chunks this frame ⟺ voxel data changed (a write marks its
         // chunk dirty; boundary writes also mark neighbors). This is the
-        // single chokepoint every edit / generation / import / paste funnels
-        // through, so it's where we flag the document as modified. The
-        // load / new / initial-scene paths clear the flags again after
-        // their own rebuild.
-        self.mark_document_modified();
+        // single chokepoint every edit / generation / import / paste
+        // funnels into, so it's where the document's revision moves for
+        // voxel data. The load / new / initial-scene paths mark the
+        // document saved again after their own rebuild — that world came
+        // out of (or is) the baseline. Sockets, graph edits and undo/redo
+        // steps reach no chunk, so their sites bump for themselves.
+        self.document.bump();
 
         // Concurrent reads only: mesher acquires read locks on the dirty
         // chunk + its 26 Moore neighbors (3³−1 — per-vertex AO samples
         // diagonal chunks, not just the 6 faces; see mesh::neighbors).
         // Multiple workers on disjoint chunks share-read those fine.
         let mesher = &self.mesher;
-        let world = &self.world;
+        let world = &self.document.world;
         let meshes: Vec<_> = dirty
             .par_iter()
             .map(|&pos| mesher.generate(world, pos))
@@ -1167,7 +1142,7 @@ impl App {
             renderer.upload_mesh(mesh);
         }
 
-        self.world.clear_dirty_flags();
+        self.document.world.clear_dirty_flags();
 
         self.last_rebuild = Some((
             started.elapsed().as_secs_f32() * 1000.0,
@@ -1471,7 +1446,7 @@ impl App {
         }
         sel.iter_cells()
             .filter_map(|(x, y, z)| {
-                let v = self.world.get_voxel(x, y, z);
+                let v = self.document.world.get_voxel(x, y, z);
                 (!v.is_air()).then_some(((x, y, z), v))
             })
             .collect()
@@ -1489,7 +1464,7 @@ impl App {
     /// load). Renames don't move the gizmo, so they don't rebuild it.
     pub(super) fn update_socket_visualization(&mut self) {
         let cur: Vec<([f32; 3], [f32; 3])> = self
-            .editor
+            .document
             .sockets
             .iter()
             .map(|s| (s.position, s.normal))
@@ -1532,7 +1507,7 @@ impl App {
             fps: 1000.0 / avg_frame_time,
             frame_time_ms: avg_frame_time,
             triangles: renderer.total_triangles(),
-            chunks: self.world.chunk_count(),
+            chunks: self.document.world.chunk_count(),
             camera_pos: (camera_pos.x, camera_pos.y, camera_pos.z),
             last_rebuild: self.last_rebuild,
         }

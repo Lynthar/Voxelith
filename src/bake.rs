@@ -563,7 +563,7 @@ fn bake_item(item: &ResolvedItem) -> ItemReport {
 }
 
 fn bake_item_inner(item: &ResolvedItem) -> ItemReport {
-    let (world, state) = match io::load_world_with_state(&item.src) {
+    let (world, state, _) = match io::load_world_with_state(&item.src) {
         Ok(v) => v,
         Err(e) => return item.failed(format!("load failed: {e}")),
     };
@@ -937,7 +937,7 @@ mod tests {
                 }
             }
         }
-        io::save_world_with_state(&world, io::EditorState::default(), &src).unwrap();
+        io::save_world_with_state(&world, io::EditorState::default(), Default::default(), &src).unwrap();
 
         // Absolute paths; `base.join(absolute)` keeps the absolute path.
         fn esc(p: &Path) -> String {

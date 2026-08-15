@@ -341,7 +341,7 @@ fn load_cases(path: &Path) -> Result<Vec<EvalCase>, EvalError> {
 /// result is a failed case, not a failed run — "the agent didn't get
 /// there" is an outcome the suite has to be able to report.
 fn grade_file(case: &EvalCase, path: &Path) -> CaseReport {
-    let (world, state) = match io::load_world_with_state(path) {
+    let (world, state, _) = match io::load_world_with_state(path) {
         Ok(loaded) => loaded,
         Err(e) => {
             return CaseReport {

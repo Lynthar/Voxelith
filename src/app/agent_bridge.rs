@@ -391,9 +391,9 @@ impl App {
             AgentRequest::ApplyOps(batch) => Some((
                 agent_ops::run_batch(
                     agent_ops::BatchInput {
-                        world: &self.world,
+                        world: &self.document.world,
                         selection: self.editor.selection,
-                        graph: &self.ui.graph,
+                        graph: &self.document.graph,
                     },
                     batch,
                 ),
@@ -418,7 +418,7 @@ impl App {
                 description: agent_ops::describe(self.document_view()),
             }))),
 
-            AgentRequest::Slice(request) => match agent_ops::slice(&self.world, request) {
+            AgentRequest::Slice(request) => match agent_ops::slice(&self.document.world, request) {
                 Ok(text) => Ok(Answer::Sliced(Box::new(Sliced {
                     status: self.bridge_status(),
                     slice: text.lines().map(String::from).collect(),
@@ -429,7 +429,7 @@ impl App {
             AgentRequest::RenderViews { views, size } => {
                 let mut rendered = Vec::with_capacity(views.len());
                 for &kind in views {
-                    match view::render(&self.world, kind, *size) {
+                    match view::render(&self.document.world, kind, *size) {
                         Ok(view) => rendered.push(view),
                         // Same rule as everywhere else in this protocol:
                         // a size out of range is refused, not clamped.
@@ -450,14 +450,14 @@ impl App {
                 let stepped = self
                     .editor
                     .history
-                    .undo(&mut self.world, &mut self.ui.graph);
+                    .undo(&mut self.document.world, &mut self.document.graph);
                 Ok(self.stepped_and_meshed(stepped))
             }
             AgentRequest::Redo => {
                 let stepped = self
                     .editor
                     .history
-                    .redo(&mut self.world, &mut self.ui.graph);
+                    .redo(&mut self.document.world, &mut self.document.graph);
                 Ok(self.stepped_and_meshed(stepped))
             }
 
@@ -485,7 +485,7 @@ impl App {
             // The rebuild only flags the document when a chunk went
             // dirty; an entry that carried nothing but a graph
             // transition moved the document without touching one.
-            self.mark_document_modified();
+            self.document.bump();
         }
         Answer::Stepped(Box::new(Stepped {
             stepped,
@@ -513,11 +513,11 @@ impl App {
             let description = agent_ops::describe(DocumentView {
                 world: &outcome.world,
                 selection: outcome.selection,
-                sockets: &self.editor.sockets,
+                sockets: &self.document.sockets,
                 // Same rule as the world: under a dry run the graph to
                 // describe is the one the batch *would* leave, which is
                 // the editor's own unless the batch carried a new one.
-                graph: outcome.graph.as_ref().unwrap_or(&self.ui.graph),
+                graph: outcome.graph.as_ref().unwrap_or(&self.document.graph),
                 // The history genuinely did not move, so these are the
                 // editor's real depths rather than the preview's zeros.
                 undo_depth: self.editor.history.undo_count(),
@@ -587,7 +587,7 @@ impl App {
                 after.relayout();
             }
             voxelith::editor::GraphTransition {
-                before: self.ui.graph.clone(),
+                before: self.document.graph.clone(),
                 after,
             }
         });
@@ -596,7 +596,7 @@ impl App {
             // re-mesh below finds nothing dirty and the document would
             // answer "no unsaved changes" while holding a pipeline that
             // exists nowhere on disk.
-            self.mark_document_modified();
+            self.document.bump();
         }
 
         // One command for the whole batch: one entry on the same stack
@@ -604,8 +604,8 @@ impl App {
         // agent's step back out.
         self.editor.history.execute_with_graph(
             Command::set_voxels_with_graph(outcome.changes, graph),
-            &mut self.world,
-            &mut self.ui.graph,
+            &mut self.document.world,
+            &mut self.document.graph,
         );
 
         // A batch that ends with no selection is clearing one, and
@@ -642,10 +642,10 @@ impl App {
 
     fn document_view(&self) -> DocumentView<'_> {
         DocumentView {
-            world: &self.world,
+            world: &self.document.world,
             selection: self.editor.selection,
-            sockets: &self.editor.sockets,
-            graph: &self.ui.graph,
+            sockets: &self.document.sockets,
+            graph: &self.document.graph,
             undo_depth: self.editor.history.undo_count(),
             redo_depth: self.editor.history.redo_count(),
         }
@@ -654,10 +654,10 @@ impl App {
     fn bridge_status(&self) -> BridgeStatus {
         BridgeStatus {
             path: self.project_path.as_deref().map(voxelith::mcp::display),
-            voxel_count: solid_voxel_count(&self.world),
+            voxel_count: solid_voxel_count(&self.document.world),
             undo_depth: self.editor.history.undo_count(),
             redo_depth: self.editor.history.redo_count(),
-            unsaved_changes: self.unsaved_changes,
+            unsaved_changes: self.document.unsaved(),
             approval: self.agent.approval,
         }
     }

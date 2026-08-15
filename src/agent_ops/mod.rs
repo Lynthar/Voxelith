@@ -45,6 +45,7 @@
 use serde::Serialize;
 
 use crate::core::World;
+use crate::io::ProjectMetadata;
 use crate::editor::{Command, CommandHistory, Selection, Socket, VoxelChange};
 use crate::procgen::PipelineGraph;
 
@@ -416,6 +417,10 @@ pub struct AgentSession {
     /// only in the editor: a graph an agent built has to be reachable
     /// by the human who opens the project afterwards.
     pub graph: PipelineGraph,
+    /// The project's identity (`name` / `author` / `created_at`).
+    /// Loaded with the file and handed back to the save, so a headless
+    /// load → edit → save round trip keeps it — no op modifies it.
+    pub metadata: ProjectMetadata,
 }
 
 impl Default for AgentSession {
@@ -432,6 +437,7 @@ impl AgentSession {
             selection: None,
             sockets: Vec::new(),
             graph: PipelineGraph::default(),
+            metadata: ProjectMetadata::default(),
         }
     }
 
@@ -483,6 +489,7 @@ impl AgentSession {
                 selection: outcome.selection,
                 sockets: self.sockets.clone(),
                 graph: outcome.graph.unwrap_or_else(|| self.graph.clone()),
+                metadata: self.metadata.clone(),
             },
         })
     }

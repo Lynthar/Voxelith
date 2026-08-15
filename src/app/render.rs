@@ -37,7 +37,14 @@ impl App {
         // anchors, stroke plane) lives on App, so condense it here
         // and hand the display-ready struct across the UI boundary.
         let hud = self.build_hud_state();
-        self.ui.show(&egui_ctx, &stats, &mut self.editor, &hud);
+        self.ui.show(
+            &egui_ctx,
+            &stats,
+            &mut self.editor,
+            &mut self.document.graph,
+            &mut self.document.sockets,
+            &hud,
+        );
 
         let full_output = egui_ctx.end_pass();
 

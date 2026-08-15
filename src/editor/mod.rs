@@ -117,12 +117,6 @@ pub struct Editor {
     /// pushed onto the undo stack — it's an ephemeral marquee, like
     /// in image editors.
     pub selection: Option<Selection>,
-    /// Named attachment points placed with the `Socket` tool. Unlike
-    /// the selection these *are* document data — they persist in
-    /// `.vxlt` and export to glTF as empty nodes — but, like it, they
-    /// stay out of the undo history (managed via the Tools panel). See
-    /// [`Socket`].
-    pub sockets: Vec<Socket>,
 }
 
 impl Default for Editor {
@@ -142,7 +136,6 @@ impl Editor {
             palette: Self::default_palette(),
             symmetry: SymmetryAxes::default(),
             selection: None,
-            sockets: Vec::new(),
         }
     }
 

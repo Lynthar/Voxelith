@@ -856,7 +856,7 @@ mod tests {
             palette: vec![[9, 8, 7, 255]],
             ..Default::default()
         };
-        io::save_world_with_state(&world, state, &project).unwrap();
+        io::save_world_with_state(&world, state, Default::default(), &project).unwrap();
 
         let server = server(&dir);
         let opened = body(&server
@@ -869,7 +869,7 @@ mod tests {
         let saved = body(&server.save_project(Parameters(SaveArgs { path: None })).unwrap());
         assert_eq!(saved["ok"], serde_json::json!(true));
 
-        let (reloaded, state) = io::load_world_with_state(&project).unwrap();
+        let (reloaded, state, _) = io::load_world_with_state(&project).unwrap();
         assert!(reloaded.chunk_count() > 0);
         assert_eq!(state.camera_position, [12.0, 34.0, 56.0], "camera preserved");
         assert_eq!(state.palette, vec![[9, 8, 7, 255]], "palette preserved");
@@ -900,7 +900,7 @@ mod tests {
         // the file must go back with the session, not stay ahead of it.
         let dir = scratch("checkpoint");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
 
         let server = checkpointing_server(&dir);
         server
@@ -935,7 +935,7 @@ mod tests {
         // otherwise "preview this" makes the human's editor reload.
         let dir = scratch("checkpoint_dry");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
 
         let server = checkpointing_server(&dir);
         server
@@ -974,7 +974,7 @@ mod tests {
     fn without_the_flag_nothing_is_written_and_the_answer_stays_quiet() {
         let dir = scratch("checkpoint_off");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
 
         let server = server(&dir);
         server

@@ -19,16 +19,16 @@ impl App {
                 // differently from the X.
                 UiAction::Exit => self.guard_then(PendingAction::Exit),
                 UiAction::Undo => {
-                    if self.editor.undo(&mut self.world, &mut self.ui.graph) {
+                    if self.editor.undo(&mut self.document.world, &mut self.document.graph) {
                         // Voxel entries are flagged by the mesh rebuild;
                         // a graph-only transition reaches no chunk, so
                         // the step has to say so itself.
-                        self.mark_document_modified();
+                        self.document.bump();
                     }
                 }
                 UiAction::Redo => {
-                    if self.editor.redo(&mut self.world, &mut self.ui.graph) {
-                        self.mark_document_modified();
+                    if self.editor.redo(&mut self.document.world, &mut self.document.graph) {
+                        self.document.bump();
                     }
                 }
                 // Confirmed by the caller (the menu raises a confirm
@@ -41,13 +41,13 @@ impl App {
                     // — but only when there was something to clear, so
                     // clearing an already-empty scene doesn't raise a
                     // pointless unsaved prompt on exit.
-                    let had_content = self.world.scene_center().is_some()
-                        || !self.editor.sockets.is_empty()
-                        || !self.ui.graph.nodes.is_empty();
-                    self.world.clear();
+                    let had_content = self.document.world.scene_center().is_some()
+                        || !self.document.sockets.is_empty()
+                        || !self.document.graph.nodes.is_empty();
+                    self.document.world.clear();
                     self.reset_scene_session_state();
                     if had_content {
-                        self.mark_document_modified();
+                        self.document.bump();
                     }
                 }
                 UiAction::CopySelection => self.copy_selection(),
@@ -144,8 +144,8 @@ impl App {
                 UiAction::ExportGlbSmoothedHeavy => self.export_glb_smoothed(true),
                 UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
-                UiAction::GraphEdited => self.mark_document_modified(),
-                UiAction::SocketsEdited => self.mark_document_modified(),
+                UiAction::GraphEdited => self.document.bump(),
+                UiAction::SocketsEdited => self.document.bump(),
                 UiAction::AgentStart(port) => self.start_agent_bridge(port),
                 UiAction::AgentStop => self.stop_agent_bridge(),
                 UiAction::AgentApproval(approval) => self.set_agent_approval(approval),
@@ -159,7 +159,7 @@ impl App {
                     // it's still set the write failed or the user backed
                     // out of the Save As picker — either way, don't go
                     // ahead and destroy the scene.
-                    if self.unsaved_changes {
+                    if self.document.unsaved() {
                         self.drop_pending_guarded();
                         self.ui.set_status("Not saved — your work is still open");
                     } else if let Some(action) = self.pending_guarded.take() {
@@ -188,11 +188,11 @@ impl App {
     /// without the wipe its GPU mesh lingers and renders as ghost
     /// geometry over an otherwise-correct world.
     pub(super) fn generate_scene(&mut self, kind: GenerateKind) {
-        self.world.clear();
+        self.document.world.clear();
         self.reset_scene_session_state();
         match kind {
-            GenerateKind::TestCube => self.world.create_test_cube((0, 8, 0), 4),
-            GenerateKind::Ground => self.world.create_test_ground(20, 2),
+            GenerateKind::TestCube => self.document.world.create_test_cube((0, 8, 0), 4),
+            GenerateKind::Ground => self.document.world.create_test_ground(20, 2),
             GenerateKind::Sphere => self.create_sphere((0, 10, 0), 6),
             GenerateKind::Pyramid => self.create_pyramid((0, 0, 0), 10),
         }
@@ -212,12 +212,12 @@ impl App {
         // `.vxlt` (an external file, which can hold a chain long enough
         // to overflow the stack or a terrain node whose height span
         // overflows `i32`) doesn't fail here, it takes the editor.
-        if let Err(refusal) = voxelith::agent_ops::check_graph(&self.ui.graph) {
+        if let Err(refusal) = voxelith::agent_ops::check_graph(&self.document.graph) {
             log::warn!("Graph refused before evaluation: {}", refusal.message);
             self.ui.set_status(format!("Graph: {}", refusal.message));
             return;
         }
-        let result = self.ui.graph.evaluate();
+        let result = self.document.graph.evaluate();
         let patch = match result {
             Ok(p) => p,
             Err(e) => {
@@ -245,7 +245,7 @@ impl App {
         // camera action (uses the full patch, not just changed cells).
         self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
         let cmd = Command::set_voxels(changes);
-        self.editor.history.execute(cmd, &mut self.world);
+        self.editor.history.execute(cmd, &mut self.document.world);
 
         let mut status = format!("Graph: {} voxels", count);
         if !patch.notes.is_empty() {
@@ -272,7 +272,7 @@ impl App {
             .dedup_last_write()
             .into_iter()
             .filter_map(|(pos, new_voxel)| {
-                let old_voxel = self.world.get_voxel(pos.0, pos.1, pos.2);
+                let old_voxel = self.document.world.get_voxel(pos.0, pos.1, pos.2);
                 (old_voxel != new_voxel).then_some(VoxelChange {
                     pos,
                     old_voxel,
@@ -327,7 +327,7 @@ impl App {
         // `changes` was built by cloning out of patch.voxels, so patch
         // is still owned here — we can read its notes after building cmd.
         let cmd = Command::set_voxels(changes);
-        self.editor.history.execute(cmd, &mut self.world);
+        self.editor.history.execute(cmd, &mut self.document.world);
 
         let mut status = format!("{}: {} voxels", label, count);
         if !patch.notes.is_empty() {

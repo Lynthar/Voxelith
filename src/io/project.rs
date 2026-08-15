@@ -563,76 +563,27 @@ fn rle_decode_chunk(data: &[u8]) -> Result<Chunk, ProjectError> {
     Ok(chunk)
 }
 
-/// Quick save world to file path (atomic + durable — see
-/// [`write_project_atomic`]).
-pub fn save_world(world: &World, path: &std::path::Path) -> Result<(), ProjectError> {
-    write_project_atomic(&carry_metadata(Project::from_world(world), path), path)
-}
-
-/// Save world with editor state to file path (atomic + durable — see
-/// [`write_project_atomic`]). The metadata of the file being replaced
-/// is carried across — see [`carry_metadata`].
+/// Save world + editor state + metadata to file path (atomic + durable
+/// — see [`write_project_atomic`]).
+///
+/// The metadata comes from the caller — every host holds its document's
+/// identity now (the editor's `Document`, an `AgentSession`) and passes
+/// it through explicitly, load to save. The previous scheme read the
+/// replaced file's header back at save time, which kept identity on a
+/// plain open → save but made Save As onto an unrelated file *inherit
+/// that file's* name and author. `modified_at` moves to now here, which
+/// is that field's whole job; `created_at` and the rest are the
+/// caller's to keep.
 pub fn save_world_with_state(
     world: &World,
     editor_state: EditorState,
+    metadata: ProjectMetadata,
     path: &std::path::Path,
 ) -> Result<(), ProjectError> {
-    write_project_atomic(
-        &carry_metadata(Project::from_world_with_state(world, editor_state), path),
-        path,
-    )
-}
-
-/// Keep the identity of the file a save is replacing.
-///
-/// Every save used to build a fresh default [`ProjectMetadata`], so a
-/// plain open → save reset `name`, `author` and — the one that can't be
-/// re-typed — `created_at`, on every project, silently. Reading the old
-/// header back at save time fixes that in the one place every saver
-/// (GUI Ctrl+S, `exec --out` over its input, the MCP checkpoint) goes
-/// through, with no host needing to carry metadata it has no UI for.
-/// `modified_at` moves to now, which is that field's whole job; a path
-/// with no readable project under it (a fresh Save As) keeps the fresh
-/// default metadata.
-fn carry_metadata(mut project: Project, path: &std::path::Path) -> Project {
-    if let Some(existing) = load_metadata(path) {
-        project.metadata = existing;
-        project.touch();
-    }
-    project
-}
-
-/// Metadata of an existing project file, or `None` if the path holds no
-/// readable project. Reads the header only — chunk data is never
-/// touched, so calling this per save costs a few KB of I/O, not a
-/// re-load of the world.
-fn load_metadata(path: &std::path::Path) -> Option<ProjectMetadata> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).ok()?;
-    if magic != PROJECT_MAGIC {
-        return None;
-    }
-    let mut version_buf = [0u8; 4];
-    reader.read_exact(&mut version_buf).ok()?;
-    if u32::from_le_bytes(version_buf) != PROJECT_VERSION {
-        return None;
-    }
-    let mut decoder = GzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES);
-    let mut len_buf = [0u8; 4];
-    decoder.read_exact(&mut len_buf).ok()?;
-    let header_len = u32::from_le_bytes(len_buf) as usize;
-    if header_len > MAX_HEADER_BYTES {
-        return None;
-    }
-    let header_bytes = super::read_exact_vec(&mut decoder, header_len).ok()?;
-    // The editor-state half is skipped as raw JSON: this reader wants
-    // the metadata even out of a file whose state half a newer build
-    // wrote, and it must never be the reason a save fails.
-    let (metadata, _): (ProjectMetadata, serde_json::Value) =
-        serde_json::from_slice(&header_bytes).ok()?;
-    Some(metadata)
+    let mut project = Project::from_world_with_state(world, editor_state);
+    project.metadata = metadata;
+    project.touch();
+    write_project_atomic(&project, path)
 }
 
 /// Serialize a project to `path` **atomically and durably**.
@@ -721,12 +672,17 @@ pub fn load_world(path: &std::path::Path) -> Result<World, ProjectError> {
     project.to_world()
 }
 
-/// Load world with editor state from file path
-pub fn load_world_with_state(path: &std::path::Path) -> Result<(World, EditorState), ProjectError> {
+/// Load world + editor state + metadata from file path. The metadata
+/// travels out so the host can hold the project's identity and hand it
+/// back to [`save_world_with_state`] — that round trip is what keeps
+/// `name` / `author` / `created_at` stable across open → save.
+pub fn load_world_with_state(
+    path: &std::path::Path,
+) -> Result<(World, EditorState, ProjectMetadata), ProjectError> {
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
     let project = Project::load(&mut reader)?;
-    Ok((project.to_world()?, project.editor_state))
+    Ok((project.to_world()?, project.editor_state, project.metadata))
 }
 
 #[cfg(test)]
@@ -908,9 +864,9 @@ mod tests {
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgba(10, 20, 30, 0));
         world.set_voxel(1, 0, 0, Voxel::from_rgba(40, 50, 60, 128));
-        save_world_with_state(&world, EditorState::default(), &path).unwrap();
+        save_world_with_state(&world, EditorState::default(), Default::default(), &path).unwrap();
 
-        let (loaded, _) = load_world_with_state(&path).unwrap();
+        let (loaded, _, _) = load_world_with_state(&path).unwrap();
         assert_eq!(loaded.get_voxel(0, 0, 0), Voxel::from_rgb(10, 20, 30));
         assert_eq!(loaded.get_voxel(1, 0, 0), Voxel::from_rgb(40, 50, 60));
         // Air is left alone: it is the one voxel that is *supposed* to
@@ -1006,11 +962,11 @@ mod tests {
             ..Default::default()
         };
 
-        save_world_with_state(&world, state.clone(), &path).unwrap();
+        save_world_with_state(&world, state.clone(), Default::default(), &path).unwrap();
         assert!(path.exists(), "save produced no file");
         assert!(!tmp.exists(), "temp file left behind after a successful save");
 
-        let (loaded_world, loaded_state) = load_world_with_state(&path).unwrap();
+        let (loaded_world, loaded_state, _) = load_world_with_state(&path).unwrap();
         assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
         assert_eq!(loaded_world.get_voxel(40, 2, -3), Voxel::from_rgb(1, 2, 3));
         assert_eq!(loaded_state.brush_color, [12, 34, 56, 200]);
@@ -1022,8 +978,8 @@ mod tests {
         // rename swapped the file rather than appending / partially writing).
         let mut world2 = World::new();
         world2.set_voxel(5, 5, 5, Voxel::from_rgb(0, 255, 0));
-        save_world_with_state(&world2, EditorState::default(), &path).unwrap();
-        let (loaded2, _) = load_world_with_state(&path).unwrap();
+        save_world_with_state(&world2, EditorState::default(), Default::default(), &path).unwrap();
+        let (loaded2, _, _) = load_world_with_state(&path).unwrap();
         assert!(
             loaded2.get_voxel(0, 0, 0).is_air(),
             "old content survived the overwrite"
@@ -1172,7 +1128,8 @@ mod tests {
     fn saving_over_a_project_keeps_its_metadata() {
         // Open → save must not reset the project's identity: `name`,
         // `author` and `created_at` used to be rebuilt from defaults on
-        // every save, silently. `modified_at` alone moves.
+        // every save, silently. The host loads the metadata, holds it,
+        // and hands it back — `modified_at` alone moves.
         let dir = std::env::temp_dir().join("voxelith_metadata_carry");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1188,9 +1145,10 @@ mod tests {
         project.metadata.modified_at = 1_600_000_000;
         write_project_atomic(&project, &path).unwrap();
 
-        // The ordinary save path (what Ctrl+S, exec --out and the MCP
-        // checkpoint all call) writes over it.
-        save_world_with_state(&world, EditorState::default(), &path).unwrap();
+        // The load → save round trip every host performs (the editor's
+        // Document, exec --out, the MCP checkpoint).
+        let (world, state, metadata) = load_world_with_state(&path).unwrap();
+        save_world_with_state(&world, state, metadata, &path).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let loaded = Project::load(&mut std::io::BufReader::new(file)).unwrap();

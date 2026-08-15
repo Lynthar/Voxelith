@@ -6,7 +6,7 @@ mod panels;
 pub use hud::HudState;
 pub use panels::{ConfirmPrompt, ExportReport, UiAction, UiState};
 
-use crate::editor::{Axis, Editor, Quarter, Tool};
+use crate::editor::{Axis, Editor, Quarter, Socket, Tool};
 use crate::mcp::bridge::{Approval, DEFAULT_PORT};
 use crate::procgen::{
     CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind,
@@ -114,15 +114,6 @@ pub struct Ui {
     pub state: UiState,
     pub viewport: ViewportSettings,
     pub procgen: ProcgenSettings,
-    /// Pipeline graph edited in the Graph panel.
-    ///
-    /// Document data, not workspace state: it rides in the `.vxlt`
-    /// (`EditorState.graph`) because it is the recipe the model was
-    /// built from, and it used to live in `prefs.ron`, where it
-    /// followed the machine instead of the work. It sits on `Ui`
-    /// because the panel edits it directly — which is why that panel
-    /// tells `App` when it changed (`UiAction::GraphEdited`).
-    pub graph: PipelineGraph,
     /// Currently-selected node in the visual graph editor. Drives
     /// the sidebar parameter editor. Cleared automatically when the
     /// node is removed.
@@ -192,7 +183,6 @@ impl Ui {
             state: UiState::default(),
             viewport: ViewportSettings::default(),
             procgen: ProcgenSettings::default(),
-            graph: PipelineGraph::default(),
             selected_node: None,
             dragging_wire: None,
             recent_files: Vec::new(),
@@ -211,6 +201,8 @@ impl Ui {
         ctx: &Context,
         stats: &RenderStats,
         editor: &mut Editor,
+        graph: &mut PipelineGraph,
+        sockets: &mut Vec<Socket>,
         hud: &HudState,
     ) {
         // Top menu bar
@@ -240,7 +232,7 @@ impl Ui {
 
         // Tools panel
         if self.state.panels.show_tools {
-            self.show_tools_panel(ctx, editor);
+            self.show_tools_panel(ctx, editor, sockets);
         }
 
         // Color palette panel
@@ -260,7 +252,7 @@ impl Ui {
 
         // Pipeline graph panel
         if self.state.panels.show_graph {
-            self.show_graph_panel(ctx);
+            self.show_graph_panel(ctx, graph);
         }
 
         // Agent bridge panel
@@ -1314,7 +1306,7 @@ impl Ui {
             });
     }
 
-    fn show_tools_panel(&mut self, ctx: &Context, editor: &mut Editor) {
+    fn show_tools_panel(&mut self, ctx: &Context, editor: &mut Editor, sockets: &mut Vec<Socket>) {
         // The close button's flag rides a local: `.open()` would borrow
         // `self.state.panels` for the whole window, while the closure
         // needs `self.state` for `request(...)`. Written back once both
@@ -1498,7 +1490,7 @@ impl Ui {
                 {
                     editor.select_tool(Tool::Socket);
                 }
-                if editor.sockets.is_empty() {
+                if sockets.is_empty() {
                     ui.label(egui::RichText::new("No sockets yet.").small().weak());
                 } else {
                     // Per-socket row: inline rename + delete + position
@@ -1512,7 +1504,7 @@ impl Ui {
                     let mut to_delete: Option<usize> = None;
                     let mut edited = false;
                     egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                        for (i, s) in editor.sockets.iter_mut().enumerate() {
+                        for (i, s) in sockets.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 if ui
                                     .add(
@@ -1543,7 +1535,7 @@ impl Ui {
                         }
                     });
                     if let Some(i) = to_delete {
-                        editor.sockets.remove(i);
+                        sockets.remove(i);
                         edited = true;
                     }
                     if ui
@@ -1551,7 +1543,7 @@ impl Ui {
                         .on_hover_text("Remove every socket from the scene")
                         .clicked()
                     {
-                        editor.sockets.clear();
+                        sockets.clear();
                         edited = true;
                     }
                     if edited {
@@ -1936,7 +1928,7 @@ impl Ui {
         }
     }
 
-    fn show_graph_panel(&mut self, ctx: &Context) {
+    fn show_graph_panel(&mut self, ctx: &Context, graph: &mut PipelineGraph) {
         // The graph as this frame found it. The panel edits it in a
         // dozen places — four deferred actions, a node drag, and every
         // widget in the inspector — and a `.vxlt` carries the result, so
@@ -1950,7 +1942,7 @@ impl Ui {
         // happens between frames, so it can't be mistaken for a person
         // editing — the file paths deliberately land on a *clean*
         // document, and an agent's batch flags itself.
-        let before = self.graph.clone();
+        let before = graph.clone();
 
         // Deferred actions: collected during the immediate-mode pass,
         // applied after the window closure releases its borrows on
@@ -1962,7 +1954,7 @@ impl Ui {
         let mut wire_action: Option<(NodeId, usize, Option<NodeId>)> = None;
         let mut wire_error: Option<String> = None;
 
-        let graph = &mut self.graph;
+        let graph = &mut *graph;
         let selected = &mut self.selected_node;
         let drag_wire = &mut self.dragging_wire;
         let preview_enabled = &mut self.procgen.graph_preview_enabled;
@@ -2081,7 +2073,7 @@ impl Ui {
         if run {
             self.state.request(UiAction::RunGraph);
         }
-        if self.graph != before {
+        if *graph != before {
             self.state.request(UiAction::GraphEdited);
         }
     }

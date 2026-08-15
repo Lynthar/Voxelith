@@ -110,6 +110,30 @@ fn graph_from_state(state: &io::EditorState) -> PipelineGraph {
     graph
 }
 
+/// How much of a loaded `EditorState` to apply — the one place the
+/// difference between the restore paths is written down.
+///
+/// The state splits into three groups by *meaning*, not by layout (the
+/// serialized form doesn't change):
+/// - **document state** (sockets, pipeline graph): part of the model,
+///   restored by every kind — an agent that rewrote the recipe means
+///   for the human to see the new one;
+/// - **view state** (camera): restored on open, left alone on reload —
+///   applying it there would yank the view back to the last save every
+///   time an agent finished a batch;
+/// - **workspace echo** (brush, palette, tool): the file carries the
+///   workspace as a convenience; open restores it, reload keeps the
+///   user's hands where they are.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoadKind {
+    /// Open / crash recovery: the user asked for this file, so
+    /// everything it carries applies.
+    Open,
+    /// The file changed under the open project (an agent's checkpoint):
+    /// only the document itself follows.
+    Reload,
+}
+
 /// Which remembered directory a file dialog should open in. Keeping
 /// the mapping in one place stops each dialog site from inventing its
 /// own idea of "where should this start".
@@ -162,12 +186,12 @@ impl App {
     /// Create a new empty project. Guarded by `App::guard_then` —
     /// callers must not invoke this directly.
     pub(super) fn new_project(&mut self) {
-        self.world.clear();
+        self.document.world.clear();
         self.reset_scene_session_state();
+        self.document.metadata = voxelith::io::ProjectMetadata::default();
         self.project_path = None;
         self.note_project_mtime();
-        self.unsaved_changes = false;
-        self.autosave_pending = false;
+        self.document.mark_saved();
         self.ui.set_status("New project created");
     }
 
@@ -209,7 +233,7 @@ impl App {
             brush_flags: self.editor.brush_color.flags,
             brush_tint_zone: self.editor.brush_color.tint_zone(),
             sockets: self
-                .editor
+                .document
                 .sockets
                 .iter()
                 .map(|s| io::SocketData {
@@ -221,7 +245,7 @@ impl App {
             // Document data, like the sockets above: the graph says how
             // this model was made, so it belongs to the project rather
             // than to whoever's machine the editor is running on.
-            graph: self.ui.graph.clone(),
+            graph: self.document.graph.clone(),
         }
     }
 
@@ -229,7 +253,7 @@ impl App {
     /// rotation) from the live sockets, for the GLB export paths. The
     /// `+Y → normal` rotation convention lives in `Socket::rotation`.
     fn socket_export_nodes(&self) -> Vec<io::SocketNode> {
-        self.editor
+        self.document
             .sockets
             .iter()
             .map(|s| io::SocketNode {
@@ -238,6 +262,53 @@ impl App {
                 rotation: s.rotation(),
             })
             .collect()
+    }
+
+
+    /// Apply a loaded `EditorState` per `kind` — the single place that
+    /// says which restore path takes which fields (see [`LoadKind`]).
+    /// Returns whether a usable camera was applied, so the caller can
+    /// frame the scene after its mesh rebuild when there wasn't one.
+    pub(super) fn apply_editor_state(
+        &mut self,
+        state: &io::EditorState,
+        kind: LoadKind,
+    ) -> bool {
+        // Document state — every kind.
+        self.document.sockets = sockets_from_state(state);
+        self.document.graph = graph_from_state(state);
+        if kind == LoadKind::Reload {
+            return true; // camera untouched = nothing to re-frame
+        }
+
+        // Workspace echo — Open only. Rebuilding the brush from a color
+        // zeroes its flags, so the material mode / tint zone ride along
+        // explicitly (#8).
+        self.editor.brush_color = super::brush_from_stored(state.brush_color);
+        self.editor.brush_color.flags = state.brush_flags;
+        self.editor.brush_color.set_tint_zone(state.brush_tint_zone);
+        self.editor.palette = state
+            .palette
+            .iter()
+            .map(|&c| super::brush_from_stored(c))
+            .collect();
+        self.editor.current_tool = super::tool_from_index(state.selected_tool as u8);
+
+        // View state — Open only, and only when the pose is usable
+        // (`camera_from_state` refuses the degenerate ones old files
+        // and headless writers can hold).
+        let camera = camera_from_state(state);
+        if let (Some(renderer), Some((position, target))) = (&mut self.renderer, camera) {
+            renderer.camera.position = position;
+            renderer.camera.target = target;
+            // Full sync (yaw / pitch / distance) — setting only part
+            // used to leave the controller stale, so a post-load scroll
+            // or Reset Camera teleported the camera.
+            renderer
+                .camera_controller
+                .sync_orbit_state_from_camera(&renderer.camera);
+        }
+        camera.is_some()
     }
 
     /// Answer the recovery prompt's Recover button, once the
@@ -253,8 +324,7 @@ impl App {
             // unsaved — say so, or the guard would wave a clean exit
             // through and the exit would then delete the autosave that
             // held the only copy.
-            self.unsaved_changes = true;
-            self.autosave_pending = false;
+            self.document.mark_recovered();
             self.last_autosave = std::time::Instant::now();
         } else {
             // Corrupt / unreadable: set it aside rather than delete it.
@@ -294,43 +364,21 @@ impl App {
     /// false — caller falls back to the default scene — if the file is
     /// unreadable.
     pub(super) fn recover_from_autosave(&mut self, path: &Path) -> bool {
-        let (world, editor_state) = match io::load_world_with_state(path) {
+        let (world, editor_state, metadata) = match io::load_world_with_state(path) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("Failed to load autosave {}: {}", path.display(), e);
                 return false;
             }
         };
-        self.world = world;
+        self.document.world = world;
+        self.document.metadata = metadata;
         self.reset_scene_session_state();
         self.project_path = None;
         self.note_project_mtime();
-        self.editor.brush_color = super::brush_from_stored(editor_state.brush_color);
-        // Same brush flag / tint-zone restore as `do_open_project` (#8) —
-        // otherwise crash recovery drops the emissive / metallic /
-        // faction-zone mode the user had when the autosave was written.
-        self.editor.brush_color.flags = editor_state.brush_flags;
-        self.editor
-            .brush_color
-            .set_tint_zone(editor_state.brush_tint_zone);
-        self.editor.palette = editor_state
-            .palette
-            .iter()
-            .map(|&c| super::brush_from_stored(c))
-            .collect();
-        self.editor.current_tool = super::tool_from_index(editor_state.selected_tool as u8);
-        self.editor.sockets = sockets_from_state(&editor_state);
-        self.ui.graph = graph_from_state(&editor_state);
-        let camera = camera_from_state(&editor_state);
-        if let (Some(renderer), Some((position, target))) = (&mut self.renderer, camera) {
-            renderer.camera.position = position;
-            renderer.camera.target = target;
-            renderer
-                .camera_controller
-                .sync_orbit_state_from_camera(&renderer.camera);
-        }
+        let had_camera = self.apply_editor_state(&editor_state, LoadKind::Open);
         self.rebuild_all_meshes();
-        if camera.is_none() {
+        if !had_camera {
             self.recenter_camera_on_scene();
         }
         self.ui
@@ -362,14 +410,14 @@ impl App {
     fn do_save_project(&mut self, path: PathBuf) {
         let editor_state = self.current_editor_state();
 
-        match io::save_world_with_state(&self.world, editor_state, &path) {
+        let metadata = self.document.metadata.clone();
+        match io::save_world_with_state(&self.document.world, editor_state, metadata, &path) {
             Ok(_) => {
                 self.project_path = Some(path.clone());
                 // Our own write — mark it, or the next poll reads it as
                 // somebody else's and reloads what we just saved.
                 self.note_project_mtime();
-                self.unsaved_changes = false;
-                self.autosave_pending = false;
+                self.document.mark_saved();
                 self.touch_recent(&path);
                 let filename = file_label(&path);
                 self.ui.set_status(format!("Saved: {}", filename));
@@ -403,57 +451,24 @@ impl App {
     /// the Open Recent menu). Touches the recent-files MRU on success.
     pub(super) fn do_open_project(&mut self, path: PathBuf) {
         match io::load_world_with_state(&path) {
-            Ok((world, editor_state)) => {
-                self.world = world;
+            Ok((world, editor_state, metadata)) => {
+                self.document.world = world;
+                self.document.metadata = metadata;
                 self.reset_scene_session_state();
                 self.project_path = Some(path.clone());
 
-                self.editor.brush_color = super::brush_from_stored(editor_state.brush_color);
-                // Restore the brush's material flags / tint zone too —
-                // rebuilding it from a color zeroes them, which used to
-                // silently clear the emissive / metallic / faction-zone
-                // mode on every open (#8). Round-trips via EditorState now.
-                self.editor.brush_color.flags = editor_state.brush_flags;
-                self.editor
-                    .brush_color
-                    .set_tint_zone(editor_state.brush_tint_zone);
-                self.editor.palette = editor_state
-                    .palette
-                    .iter()
-                    .map(|&c| super::brush_from_stored(c))
-                    .collect();
-                self.editor.current_tool =
-                    super::tool_from_index(editor_state.selected_tool as u8);
-                self.editor.sockets = sockets_from_state(&editor_state);
-                self.ui.graph = graph_from_state(&editor_state);
-
-                let camera = camera_from_state(&editor_state);
-                if let (Some(renderer), Some((position, target))) =
-                    (&mut self.renderer, camera)
-                {
-                    renderer.camera.position = position;
-                    renderer.camera.target = target;
-                    // Full sync (yaw / pitch / distance) — setting only
-                    // distance here used to leave yaw/pitch stale, so a
-                    // post-load scroll or Reset Camera would teleport
-                    // the camera (same root cause as the startup-state
-                    // mismatch fixed in `Renderer::new`).
-                    renderer
-                        .camera_controller
-                        .sync_orbit_state_from_camera(&renderer.camera);
-                }
-
+                let had_camera =
+                    self.apply_editor_state(&editor_state, LoadKind::Open);
                 self.rebuild_all_meshes();
                 // A project with no usable camera of its own — one an
                 // agent built headless — keeps the viewport where it is
                 // and aims it at what was just loaded, rather than
                 // opening on a blank screen.
-                if camera.is_none() {
+                if !had_camera {
                     self.recenter_camera_on_scene();
                 }
                 self.note_project_mtime();
-                self.unsaved_changes = false;
-                self.autosave_pending = false;
+                self.document.mark_saved();
                 self.touch_recent(&path);
                 let filename = file_label(&path);
                 self.ui.set_status(format!("Opened: {}", filename));
@@ -484,8 +499,9 @@ impl App {
         match std::fs::File::open(&path) {
             Ok(mut file) => match io::import_vox(&mut file, convert_axes) {
                 Ok(world) => {
-                    self.world = world;
+                    self.document.world = world;
                     self.reset_scene_session_state();
+                    self.document.metadata = voxelith::io::ProjectMetadata::default();
                     // Detach from any previously-open .vxlt: the imported
                     // model is a new document, so a later Save must prompt
                     // for a location instead of silently overwriting the
@@ -504,8 +520,7 @@ impl App {
                     // camera pose verbatim — but .vox files don't carry
                     // camera state.)
                     self.recenter_camera_on_scene();
-                    self.unsaved_changes = false;
-                    self.autosave_pending = false;
+                    self.document.mark_saved();
                     // Imports seed the next import dialog rather than
                     // the project MRU — see `Prefs::touch_recent`.
                     self.prefs.remember_import_dir(&path);
@@ -639,7 +654,7 @@ impl App {
         self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
         self.editor
             .history
-            .execute(Command::set_voxels(changes), &mut self.world);
+            .execute(Command::set_voxels(changes), &mut self.document.world);
         self.rebuild_all_meshes();
         self.recenter_camera_on_scene();
         self.prefs.remember_import_dir(&path);
@@ -690,7 +705,8 @@ impl App {
         self.last_disk_poll = Instant::now();
 
         let on_disk = file_mtime(&path);
-        let verdict = classify_disk_poll(self.watched_mtime, on_disk, self.unsaved_changes);
+        let verdict =
+            classify_disk_poll(self.watched_mtime, on_disk, self.document.unsaved());
         // Take the new time when this poll is settled — a refused
         // reload warns once rather than on every poll from here on. A
         // reload that *failed* is not settled: the file is still one
@@ -740,7 +756,7 @@ impl App {
     /// Returns whether the file was actually read, so the caller knows
     /// whether this version has been dealt with.
     fn reload_from_disk(&mut self, path: &Path) -> bool {
-        let (world, state) = match io::load_world_with_state(path) {
+        let (world, state, metadata) = match io::load_world_with_state(path) {
             Ok(loaded) => loaded,
             Err(e) => {
                 // Saves are write-temp-then-rename, so a torn read
@@ -756,19 +772,15 @@ impl App {
                 return false;
             }
         };
-        self.world = world;
+        self.document.world = world;
+        self.document.metadata = metadata;
         self.reset_scene_session_state();
-        self.editor.sockets = sockets_from_state(&state);
-        // The graph joins the world and the sockets on the "restore"
-        // side of this split rather than the camera's: an agent that
-        // rewrote the recipe means for the human to see the new one.
-        self.ui.graph = graph_from_state(&state);
+        self.apply_editor_state(&state, LoadKind::Reload);
         self.rebuild_all_meshes();
-        // `rebuild_all_meshes` flags the document modified — true of an
-        // edit, wrong here: this world came *out* of the user's file, so
-        // it is exactly what the file holds.
-        self.unsaved_changes = false;
-        self.autosave_pending = false;
+        // `rebuild_all_meshes` bumped the revision — true of an edit,
+        // wrong here: this world came *out* of the user's file, so it is
+        // exactly what the file holds.
+        self.document.mark_saved();
         // Whatever the strip was reporting is settled: this editor now
         // shows what the file holds.
         self.ui.state.disk_conflict = None;
@@ -813,7 +825,7 @@ impl App {
             return;
         };
 
-        match io::export_obj_smoothed(&self.world, &path, blur) {
+        match io::export_obj_smoothed(&self.document.world, &path, blur) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
                 let filename = file_label(&path);
@@ -870,7 +882,7 @@ impl App {
         };
 
         let sockets = self.socket_export_nodes();
-        match io::export_glb_smoothed(&self.world, &sockets, &path, blur) {
+        match io::export_glb_smoothed(&self.document.world, &sockets, &path, blur) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
                 let filename = file_label(&path);
@@ -927,7 +939,7 @@ impl App {
         };
 
         let sockets = self.socket_export_nodes();
-        match io::export_glb(&self.world, &sockets, &path) {
+        match io::export_glb(&self.document.world, &sockets, &path) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
                 let filename = file_label(&path);
@@ -981,7 +993,7 @@ impl App {
             return;
         };
 
-        match io::export_obj(&self.world, &path) {
+        match io::export_obj(&self.document.world, &path) {
             Ok(stats) => {
                 self.prefs.remember_export_dir(&path);
                 let filename = file_label(&path);
@@ -1033,7 +1045,7 @@ impl App {
         };
 
         match std::fs::File::create(&path) {
-            Ok(mut file) => match io::export_vox(&self.world, &mut file, convert_axes) {
+            Ok(mut file) => match io::export_vox(&self.document.world, &mut file, convert_axes) {
                 Ok(overflow) => {
                     self.prefs.remember_export_dir(&path);
                     let filename = file_label(&path);
@@ -1347,6 +1359,35 @@ mod tests {
         let (position, target) = camera_from_state(&saved).expect("must be usable");
         assert_eq!(position.to_array(), [1.5, -2.0, 3.25]);
         assert_eq!(target.to_array(), [0.0, 4.0, -1.0]);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_users_hands_where_they_are() {
+        // The LoadKind split, end to end: a Reload applies the file's
+        // document (sockets, graph) but must not touch the workspace —
+        // brush, palette, tool stay as the user left them.
+        let mut app = super::super::App::new();
+        app.editor.brush_color = voxelith::core::Voxel::from_rgb(9, 9, 9);
+        app.editor.select_tool(voxelith::editor::Tool::Fill);
+        let state = io::EditorState {
+            brush_color: [1, 2, 3, 255],
+            selected_tool: 0, // Place
+            sockets: vec![io::SocketData {
+                name: "muzzle".into(),
+                position: [1.0, 2.0, 3.0],
+                normal: [0.0, 1.0, 0.0],
+            }],
+            ..Default::default()
+        };
+
+        app.apply_editor_state(&state, LoadKind::Reload);
+        assert_eq!(app.document.sockets.len(), 1, "document state follows the file");
+        assert_eq!(app.editor.brush_color.r, 9, "workspace stays the user's");
+        assert_eq!(app.editor.current_tool, voxelith::editor::Tool::Fill);
+
+        app.apply_editor_state(&state, LoadKind::Open);
+        assert_eq!(app.editor.brush_color.r, 1, "an open applies the whole file");
+        assert_eq!(app.editor.current_tool, voxelith::editor::Tool::Place);
     }
 
     #[test]

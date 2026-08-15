@@ -208,7 +208,7 @@ impl App {
 
         if !self.preview.graph_enabled {
             self.preview.graph_enabled = true;
-            self.preview.last_graph = self.ui.graph.clone();
+            self.preview.last_graph = self.document.graph.clone();
             self.preview.graph_last_change = Some(Instant::now());
             self.preview.graph_needs_regen = true;
         }
@@ -217,8 +217,8 @@ impl App {
         // Position-only edits also trigger a regen, which is a tiny bit
         // wasteful (output doesn't depend on layout) but the debounce
         // makes it cheap and keeps the change detector trivial.
-        if self.ui.graph != self.preview.last_graph {
-            self.preview.last_graph = self.ui.graph.clone();
+        if self.document.graph != self.preview.last_graph {
+            self.preview.last_graph = self.document.graph.clone();
             self.preview.graph_last_change = Some(Instant::now());
             self.preview.graph_needs_regen = true;
         }
@@ -279,12 +279,12 @@ impl App {
         // opening a project with the preview toggle on is enough to
         // reach the evaluator, and the ceilings it walks past are the
         // ones that end the process rather than the frame.
-        if let Err(refusal) = voxelith::agent_ops::check_graph(&self.ui.graph) {
+        if let Err(refusal) = voxelith::agent_ops::check_graph(&self.document.graph) {
             log::debug!("Graph preview skipped: {}", refusal.message);
             self.preview_slot_release(PreviewOwner::Graph);
             return;
         }
-        let patch = match self.ui.graph.evaluate() {
+        let patch = match self.document.graph.evaluate() {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
                 self.preview_slot_release(PreviewOwner::Graph);

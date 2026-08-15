@@ -319,7 +319,7 @@ pub(crate) fn open_session(
     let Some(path) = input else {
         return Ok((AgentSession::new(), EditorState::default()));
     };
-    let (world, state) = io::load_world_with_state(path).map_err(|e| {
+    let (world, state, metadata) = io::load_world_with_state(path).map_err(|e| {
         ExecError::new(
             "input_unreadable",
             format!("could not load {}: {e}", path.display()),
@@ -339,6 +339,7 @@ pub(crate) fn open_session(
     // `next_id` is whatever some other build wrote there.
     session.graph = state.graph.clone();
     session.graph.normalize();
+    session.metadata = metadata;
     Ok((session, state))
 }
 
@@ -379,7 +380,7 @@ pub(crate) fn save_project(
         })
         .collect();
     state.graph = session.graph.clone();
-    io::save_world_with_state(&session.world, state, path).map_err(|e| {
+    io::save_world_with_state(&session.world, state, session.metadata.clone(), path).map_err(|e| {
         ExecError::new(
             "save_failed",
             format!("could not save {}: {e}", path.display()),
@@ -665,7 +666,7 @@ mod tests {
         assert!(asset.exists());
 
         // The saved project must reopen with exactly what was reported.
-        let (reloaded, _) = io::load_world_with_state(&project).unwrap();
+        let (reloaded, _, _) = io::load_world_with_state(&project).unwrap();
         assert_eq!(solid_voxels(&reloaded) as u64, report.voxel_count);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -692,7 +693,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        io::save_world_with_state(&world, state, &project).unwrap();
+        io::save_world_with_state(&world, state, Default::default(), &project).unwrap();
 
         run_exec(&ExecRequest {
             ops: Some(write_ops(
@@ -705,7 +706,7 @@ mod tests {
         })
         .expect("the run should succeed");
 
-        let (world, state) = io::load_world_with_state(&project).unwrap();
+        let (world, state, _) = io::load_world_with_state(&project).unwrap();
         assert_eq!(solid_voxels(&world), 2, "the edit landed");
         assert_eq!(state.camera_position, [12.0, 34.0, 56.0]);
         assert_eq!(state.palette, vec![[9, 8, 7, 255]]);
@@ -721,7 +722,7 @@ mod tests {
     fn a_dry_run_reports_without_touching_the_project() {
         let dir = scratch("dry_run");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), &project).unwrap();
+        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
 
         let outcome = run_exec(&ExecRequest {
             ops: Some(write_ops(&dir, HUT)),
@@ -735,7 +736,7 @@ mod tests {
         assert!(report.dry_run);
         assert!(report.changed_voxels > 0, "it still reports what would happen");
 
-        let (world, _) = io::load_world_with_state(&project).unwrap();
+        let (world, _, _) = io::load_world_with_state(&project).unwrap();
         assert_eq!(solid_voxels(&world), 0, "the file must be untouched");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -882,7 +883,7 @@ mod tests {
         for x in 0..3 {
             world.set_voxel(x, 0, 0, Voxel::from_rgb(200, 0, 0));
         }
-        io::save_world_with_state(&world, EditorState::default(), &project).unwrap();
+        io::save_world_with_state(&world, EditorState::default(), Default::default(), &project).unwrap();
         let before = std::fs::read(&project).unwrap();
 
         // Exactly what `voxelith inspect` builds.
