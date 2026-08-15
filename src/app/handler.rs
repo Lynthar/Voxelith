@@ -1,9 +1,8 @@
 //! winit `ApplicationHandler` integration.
 //!
 //! Egui consumes events first; only unconsumed events reach the editor
-//! and camera controller. The Alt key temporarily swaps the active tool
-//! to `Eyedropper` (saving the prior tool in `editor.tool_before_alt`)
-//! and restores it on release.
+//! and camera controller. Alt acts as a temporary eyedropper, derived
+//! per read by `App::effective_tool` — nothing is swapped or restored.
 
 use std::time::Instant;
 use winit::{
@@ -162,34 +161,22 @@ impl ApplicationHandler for App {
                 // Losing focus (alt-tab, or a modal Save/Open dialog
                 // taking over) means press/release events can be delivered
                 // elsewhere. Abandon EVERY in-progress interaction so none
-                // resumes latched when focus returns — mirror the mouse-
-                // release + deselect cleanup: forget held keys and mouse
-                // buttons, drop the brush-stroke / shape latches, release
-                // the orbit cursor capture, and clear any select-drag /
-                // move-drag anchor + ghost. The committed selection marquee
-                // itself is left intact, exactly like a plain mouse release.
+                // resumes latched when focus returns: forget held keys and
+                // mouse buttons, cancel the edit gesture (whatever it
+                // was — that's one call now), and release the orbit
+                // cursor capture. The committed selection marquee itself
+                // is left intact, exactly like a plain mouse release.
                 if let Some(renderer) = &mut self.renderer {
                     renderer.camera_controller.clear_keys();
                     renderer.camera_controller.clear_mouse_buttons();
                 }
-                self.left_button_held = false;
-                self.editor.history.end_stroke();
-                self.last_stroke_voxel = None;
-                self.stroke_start_screen_pos = None;
-                self.stroke_plane = None;
-                self.shape_drag = None;
-                self.selection_drag_anchor = None;
-                self.selection_move_anchor = None;
-                self.move_ghost_voxels.clear();
+                self.cancel_interaction();
                 // Modifier state is only refreshed by ModifiersChanged,
                 // which is delivered to whoever has focus — so an
                 // alt-tab away leaves `modifiers` claiming Alt is still
-                // down and (if Alt swapped the tool) the eyedropper
-                // latched in. Reset both, mirroring the alt-release arm.
+                // down, and `effective_tool` would keep answering
+                // Eyedropper. Resetting the modifiers is the whole fix.
                 self.modifiers = Default::default();
-                if let Some(tool) = self.editor.tool_before_alt.take() {
-                    self.editor.current_tool = tool;
-                }
                 if self.cursor_captured {
                     self.cursor_captured = false;
                     if let Some(window) = &self.window {
@@ -199,22 +186,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::ModifiersChanged(new_modifiers) => {
-                let old_alt = self.modifiers.alt_key();
-                let new_alt = new_modifiers.state().alt_key();
+                // Alt's temporary eyedropper needs no handling here:
+                // `effective_tool` derives it from this state per read.
                 self.modifiers = new_modifiers.state();
-
-                // Alt-press: swap to eyedropper, remember prior tool.
-                // Alt-release: restore.
-                if new_alt && !old_alt {
-                    if self.editor.current_tool != Tool::Eyedropper {
-                        self.editor.tool_before_alt = Some(self.editor.current_tool);
-                        self.editor.current_tool = Tool::Eyedropper;
-                    }
-                } else if !new_alt && old_alt {
-                    if let Some(tool) = self.editor.tool_before_alt.take() {
-                        self.editor.current_tool = tool;
-                    }
-                }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
@@ -279,10 +253,9 @@ impl ApplicationHandler for App {
                 // onto one) must still tear down in-progress state, or the
                 // latches stick — orbit/pan wedged on, `cursor_captured`
                 // stuck (the raw-motion orbit in `device_event` ignores egui
-                // entirely), a phantom selection anchor, or `left_button_held`
-                // jammed true so the next tool drag-paints while the old
-                // selection still tracks. That stranded release is exactly
-                // the "tool states stack and can't be cancelled" bug.
+                // entirely), or the edit gesture jammed active so the next
+                // click resumes it. That stranded release is exactly the
+                // "tool states stack and can't be cancelled" bug.
                 if pressed && !egui_consumed {
                     // Middle-press re-anchors the orbit pivot onto whatever
                     // the camera's forward ray hits (voxel surface, else the
@@ -307,13 +280,9 @@ impl ApplicationHandler for App {
                     }
                     if button == MouseButton::Left {
                         // Brush tools apply on press, then drag-paint
-                        // re-applies on motion. Shape / Select latch an
-                        // anchor here and commit on release.
-                        self.apply_tool();
-                        self.left_button_held = true;
-                        self.last_stroke_voxel =
-                            self.editor.hovered_voxel.map(|h| h.voxel_pos);
-                        self.stroke_start_screen_pos = Some(self.cursor_pos);
+                        // re-applies on motion. Shape / Select enter
+                        // their gesture states and finish on release.
+                        self.on_left_press();
                     }
                     if button == MouseButton::Middle {
                         // Capture the cursor for orbit; the release branch
@@ -335,44 +304,15 @@ impl ApplicationHandler for App {
                         );
                     }
                     if button == MouseButton::Left {
-                        // Finalize an in-progress interaction only if a press
-                        // actually started one in the viewport; either way,
-                        // clear every latch so nothing carries into the next
-                        // click. Shape release transitions to the Height
-                        // phase (committed by a second click — vengi-style
-                        // two-phase drag); Select commits the AABB; a brush
-                        // seals its merged undo entry.
-                        if self.left_button_held {
-                            // Seal the stroke unconditionally, before
-                            // the per-tool dispatch. That dispatch asks
-                            // "what tool is active *now*", but the
-                            // gesture was started by whatever tool was
-                            // active at press time — switch with a
-                            // number key mid-drag and the stroke would
-                            // never get sealed, so the next stroke
-                            // within the 200 ms merge window silently
-                            // joined the previous undo entry (one
-                            // Ctrl+Z, two separate strokes gone). It's
-                            // a no-op when no stroke is open, and the
-                            // shape / select paths commit via `execute`,
-                            // which reseals anyway.
-                            self.editor.history.end_stroke();
-                            let tool = self.editor.current_tool;
-                            if tool.is_shape() {
-                                self.transition_shape_to_height();
-                            } else if matches!(tool, Tool::Select) {
-                                self.commit_selection();
-                            }
-                        }
-                        self.left_button_held = false;
-                        self.last_stroke_voxel = None;
-                        self.stroke_start_screen_pos = None;
-                        self.stroke_plane = None;
-                        // Defensive: drop any select drag/move anchors in
-                        // case a press latched one but egui swallowed the
-                        // release before `commit_selection` could take it.
-                        self.selection_drag_anchor = None;
-                        self.selection_move_anchor = None;
+                        // Finish whatever gesture the press started —
+                        // dispatched on the gesture state itself, so a
+                        // release over a panel (after dragging out of
+                        // the viewport) tears it down the same way.
+                        // Shape release transitions to the Height phase
+                        // (committed by a second click — vengi-style
+                        // two-phase drag); Select commits the AABB; a
+                        // brush seals its merged undo entry.
+                        self.on_left_release();
                     }
                     if button == MouseButton::Middle {
                         self.cursor_captured = false;
@@ -415,31 +355,41 @@ impl ApplicationHandler for App {
                 if !egui_consumed {
                     self.update_raycast();
 
-                    // Drag-paint: while left button is held, re-apply
-                    // the brush whenever the hover crosses into a new
-                    // voxel. Limited to brush-style tools — Eyedropper
-                    // / Fill keep their click-only behavior to avoid
-                    // spam (Fill especially would explode the
+                    // Drag-paint: while a press-hold is in flight,
+                    // re-apply the brush whenever the hover crosses
+                    // into a new voxel. Limited to brush-style tools —
+                    // Eyedropper / Fill keep their click-only behavior
+                    // to avoid spam (Fill especially would explode the
                     // history). A pixel dead-zone around the press
                     // point absorbs unintended micro-drags from a
                     // single click.
-                    if self.left_button_held {
+                    if let super::EditInteraction::BrushStroke {
+                        last_voxel,
+                        start_screen: (sx, sy),
+                        ..
+                    } = &self.interaction
+                    {
+                        let (last_voxel, sx, sy) = (*last_voxel, *sx, *sy);
                         let drag_eligible = matches!(
-                            self.editor.current_tool,
+                            self.effective_tool(),
                             Tool::Place | Tool::Remove | Tool::Paint
                         );
-                        let past_dead_zone =
-                            self.stroke_start_screen_pos.map_or(false, |(sx, sy)| {
-                                let dx = self.cursor_pos.0 - sx;
-                                let dy = self.cursor_pos.1 - sy;
-                                dx * dx + dy * dy >= DRAG_THRESHOLD_PX_SQ
-                            });
+                        let past_dead_zone = {
+                            let dx = self.cursor_pos.0 - sx;
+                            let dy = self.cursor_pos.1 - sy;
+                            dx * dx + dy * dy >= DRAG_THRESHOLD_PX_SQ
+                        };
                         if drag_eligible && past_dead_zone {
                             let current =
                                 self.editor.hovered_voxel.map(|h| h.voxel_pos);
-                            if current.is_some() && current != self.last_stroke_voxel {
+                            if current.is_some() && current != last_voxel {
                                 self.apply_tool();
-                                self.last_stroke_voxel = current;
+                                if let super::EditInteraction::BrushStroke {
+                                    last_voxel, ..
+                                } = &mut self.interaction
+                                {
+                                    *last_voxel = current;
+                                }
                             }
                         }
                     }

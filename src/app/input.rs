@@ -12,9 +12,7 @@ use voxelith::editor::{
     ToolContext, VoxelChange, VoxelRaycast,
 };
 
-use super::{
-    build_stroke_plane, App, PendingAction, ShapeDrag, ShapePhase, StrokePlane,
-};
+use super::{build_stroke_plane, App, EditInteraction, PendingAction, StrokePlane};
 
 /// Maximum distance (in voxel units) the editor's mouse-hover ray
 /// will travel through the world looking for a hit. Caps DDA work
@@ -188,24 +186,22 @@ impl App {
     /// give confusing previews and either no-op or, worse, explode
     /// (Fill flooding a 3D air region).
     ///
-    /// **Plane-locked drag-paint takes precedence**: when
-    /// `stroke_plane` is set (Place / Remove / Paint left-pressed),
-    /// the cursor casts ray-vs-plane against the locked face. This
-    /// keeps the stroke on one face instead of stacking along the
-    /// view direction as new voxels occlude the ray-vs-voxels hit.
+    /// **A gesture's locked plane takes precedence**: while the
+    /// interaction holds one (a brush stroke past its first apply, or
+    /// a shape phase), the cursor casts ray-vs-plane against that
+    /// locked face. This keeps the stroke on one face instead of
+    /// stacking along the view direction as new voxels occlude the
+    /// ray-vs-voxels hit.
     pub(super) fn update_raycast(&mut self) {
-        if let Some(plane) = self.stroke_plane {
+        // A latched gesture locks the cursor to its face plane: a
+        // brush stroke past its first apply, and both shape phases —
+        // Footprint needs ray-vs-plane to compute the other corner;
+        // Height doesn't actually use `hovered_voxel`, but routing
+        // through the plane lock means a stray cursor move doesn't
+        // briefly reveal a "real-world" hit and confuse the preview
+        // cache key.
+        if let Some(plane) = self.interaction.locked_plane() {
             self.editor.hovered_voxel = self.cast_ray_to_plane(&plane);
-            return;
-        }
-        // Shape drag (Footprint or Height phase) also locks the
-        // plane — Footprint needs ray-vs-plane to compute the other
-        // corner; Height doesn't actually use `hovered_voxel`, but
-        // routing through plane lock means a stray cursor move
-        // doesn't briefly reveal a "real-world" hit and confuse the
-        // preview cache key.
-        if let Some(drag) = self.shape_drag {
-            self.editor.hovered_voxel = self.cast_ray_to_plane(&drag.plane);
             return;
         }
 
@@ -224,7 +220,7 @@ impl App {
             view_proj_inv,
         );
 
-        self.editor.hovered_voxel = if self.editor.current_tool.uses_ground_plane_fallback() {
+        self.editor.hovered_voxel = if self.effective_tool().uses_ground_plane_fallback() {
             VoxelRaycast::cast_with_ground_plane(&ray, &self.world, RAYCAST_MAX_DIST, 0)
         } else {
             VoxelRaycast::cast(&ray, &self.world, RAYCAST_MAX_DIST)
@@ -285,24 +281,68 @@ impl App {
         })
     }
 
+    /// A left press landed in the viewport: arm the generic press-hold
+    /// state, then let `apply_tool` act — its tool branches refine the
+    /// state into a shape footprint or a selection drag where that's
+    /// what the press means. The plain `BrushStroke` survives for the
+    /// brush and click tools (and for a press over empty sky, which
+    /// must still arm drag-paint — dragging into the world then paints
+    /// from the first in-world cell, plane locked on that first apply).
+    pub(super) fn on_left_press(&mut self) {
+        if !self.interaction.is_active() {
+            self.interaction = EditInteraction::BrushStroke {
+                plane: None,
+                last_voxel: self.editor.hovered_voxel.map(|h| h.voxel_pos),
+                start_screen: self.cursor_pos,
+            };
+        }
+        self.apply_tool();
+    }
+
+    /// The left button came up: seal the stroke's merged undo entry,
+    /// then finish whatever the gesture was. Runs even when egui
+    /// consumed the release (dragging out of the viewport onto a panel
+    /// must still tear the gesture down).
+    ///
+    /// `ShapeHeight` is the one state a release leaves alone — the
+    /// button isn't held during that phase, so a release reaching it
+    /// belongs to a click egui swallowed the press of, and the pending
+    /// extrusion must survive it.
+    pub(super) fn on_left_release(&mut self) {
+        // Seal the stroke unconditionally, before the per-state
+        // dispatch — a no-op when no stroke is open. (Switching tools
+        // mid-drag used to leave the stroke unsealed, silently merging
+        // the next stroke into the previous undo entry.)
+        self.editor.history.end_stroke();
+        match std::mem::take(&mut self.interaction) {
+            EditInteraction::ShapeFootprint { anchor, plane } => {
+                self.shape_footprint_released(anchor, plane);
+            }
+            keep @ EditInteraction::ShapeHeight { .. } => {
+                self.interaction = keep;
+            }
+            EditInteraction::SelectDrag { anchor } => {
+                self.commit_select_drag(anchor);
+            }
+            EditInteraction::SelectMove { anchor, .. } => {
+                self.commit_select_move(anchor);
+            }
+            EditInteraction::BrushStroke { .. } | EditInteraction::Idle => {}
+        }
+    }
+
     /// Apply the current tool at the hovered location.
     pub(super) fn apply_tool(&mut self) {
         // The shape tools' Height-phase commit is the one action here
         // that doesn't need a hovered voxel: it extrudes by the cursor's
-        // screen-Y against the already-locked plane (`extruded_end`).
-        // Behind the hover guard below it was silently swallowed exactly
-        // when the ray left that plane — building a wall from a low
-        // angle, the moment the cursor crossed the plane's screen
-        // horizon the commit click did nothing, with no message, while
-        // the preview still showed the full extrusion.
-        if self.editor.current_tool.is_shape()
-            && matches!(
-                self.shape_drag,
-                Some(ShapeDrag {
-                    phase: ShapePhase::Height { .. },
-                    ..
-                })
-            )
+        // screen-Y against the already-locked plane. Behind the hover
+        // guard below it was silently swallowed exactly when the ray
+        // left that plane — building a wall from a low angle, the
+        // moment the cursor crossed the plane's screen horizon the
+        // commit click did nothing, with no message, while the preview
+        // still showed the full extrusion.
+        if self.effective_tool().is_shape()
+            && matches!(self.interaction, EditInteraction::ShapeHeight { .. })
         {
             self.commit_shape();
             return;
@@ -312,18 +352,21 @@ impl App {
             return;
         };
 
-        match self.editor.current_tool {
+        match self.effective_tool() {
             Tool::Place | Tool::Remove | Tool::Paint => {
                 // Lock the stroke to the first hit's face plane.
                 // Subsequent CursorMoved events (drag-paint) will
                 // ray-vs-plane against this lock instead of the
                 // voxel world — so paint stays on one face instead
-                // of stacking toward the camera. The lock is
-                // released in `handler.rs` on left-up.
-                if self.stroke_plane.is_none() {
-                    self.stroke_plane = build_stroke_plane(&hit);
+                // of stacking toward the camera. The lock dies with
+                // the `BrushStroke` state on release.
+                if let EditInteraction::BrushStroke {
+                    plane: plane @ None, ..
+                } = &mut self.interaction
+                {
+                    *plane = build_stroke_plane(&hit);
                 }
-                let brush = BrushTool::new(self.editor.current_tool);
+                let brush = BrushTool::new(self.effective_tool());
                 let mut ctx = ToolContext {
                     world: &mut self.world,
                     history: &mut self.editor.history,
@@ -379,40 +422,34 @@ impl App {
             }
             Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder => {
                 // Shape press is two-phase:
-                //   - First press (drag is None): enter Footprint —
-                //     lock the plane from the hit's face, anchor at
-                //     `adjacent_pos`. Subsequent CursorMoved walks
-                //     ray-vs-plane to find the W×D corner.
-                //   - Second press (drag is in Height phase): commit
-                //     the extruded shape and clear the drag.
+                //   - First press (no shape gesture yet): enter
+                //     Footprint — lock the plane from the hit's face,
+                //     anchor at `adjacent_pos`. Subsequent CursorMoved
+                //     walks ray-vs-plane to find the W×D corner.
+                //   - Second press (Height phase): commit the extruded
+                //     shape. (Normally intercepted at the top of
+                //     `apply_tool`; kept here defensively.)
                 //   - Press while still in Footprint shouldn't happen
                 //     (the second press only fires after release
                 //     transitions us to Height); ignore defensively.
-                match self.shape_drag {
-                    None => {
+                match self.interaction {
+                    EditInteraction::ShapeHeight { .. } => {
+                        self.commit_shape();
+                    }
+                    EditInteraction::ShapeFootprint { .. } => {
+                        // Defensive: ignore.
+                    }
+                    _ => {
                         if let Some(plane) = build_stroke_plane(&hit) {
-                            self.shape_drag = Some(ShapeDrag {
+                            self.interaction = EditInteraction::ShapeFootprint {
                                 anchor: hit.adjacent_pos,
                                 plane,
-                                phase: ShapePhase::Footprint,
-                            });
+                            };
                         } else {
                             self.ui.set_status(
                                 "Shape tool: face normal not axis-aligned, ignoring click",
                             );
                         }
-                    }
-                    Some(ShapeDrag {
-                        phase: ShapePhase::Height { .. },
-                        ..
-                    }) => {
-                        self.commit_shape();
-                    }
-                    Some(ShapeDrag {
-                        phase: ShapePhase::Footprint,
-                        ..
-                    }) => {
-                        // Defensive: ignore.
                     }
                 }
             }
@@ -427,12 +464,13 @@ impl App {
                 let cell = Self::select_anchor_pos(&hit);
                 if let Some(sel) = self.editor.selection {
                     if sel.contains(cell) {
-                        self.selection_move_anchor = Some(cell);
-                        self.begin_move_ghost(sel);
+                        let ghost = self.move_ghost_snapshot(sel);
+                        self.interaction =
+                            EditInteraction::SelectMove { anchor: cell, ghost };
                         return;
                     }
                 }
-                self.selection_drag_anchor = Some(cell);
+                self.interaction = EditInteraction::SelectDrag { anchor: cell };
             }
             Tool::Socket => {
                 // Drop a named attachment point at the center of the
@@ -511,60 +549,40 @@ impl App {
         }
     }
 
-    /// Commit the in-progress selection drag on left-button release.
-    /// Two paths:
-    /// - **Move drag** (`selection_move_anchor` set): translate the
-    ///   selection's voxels by `current - anchor` as a single
-    ///   `SetVoxels` Command, then update the AABB.
-    /// - **New-selection drag** (`selection_drag_anchor` set): build
-    ///   a `Selection` from the press anchor → current hover cell
-    ///   and store it on the editor.
-    ///
-    /// Selection state itself is *not* pushed onto the undo history
-    /// — the marquee is ephemeral, like in image editors. Move's
-    /// voxel writes *are* undoable through their `SetVoxels`.
-    pub(super) fn commit_selection(&mut self) {
-        // A release always ends any in-flight move drag — drop the
-        // ghost snapshot so a large moved region doesn't linger in
-        // memory (the renderer slot itself clears once the anchor is
-        // gone).
-        self.move_ghost_voxels.clear();
-
-        // Move mode wins if both anchors happen to be set (defensive
-        // — they shouldn't both be set at once).
-        if let Some(move_anchor) = self.selection_move_anchor.take() {
-            // Cancel any new-selection anchor that snuck in.
-            self.selection_drag_anchor = None;
-            match (self.editor.selection, self.editor.hovered_voxel) {
-                (Some(_sel), Some(hit)) => {
-                    let cur = Self::select_anchor_pos(&hit);
-                    let delta = (
-                        cur.0 - move_anchor.0,
-                        cur.1 - move_anchor.1,
-                        cur.2 - move_anchor.2,
-                    );
-                    if delta != (0, 0, 0) {
-                        self.move_selection(delta);
-                    }
+    /// Finish a `SelectMove` on release: translate the selection's
+    /// voxels by `current - anchor` as a single `SetVoxels` Command
+    /// (undoable), then update the AABB. The ghost snapshot was
+    /// dropped with the state, so a large moved region doesn't linger
+    /// in memory.
+    fn commit_select_move(&mut self, anchor: (i32, i32, i32)) {
+        match (self.editor.selection, self.editor.hovered_voxel) {
+            (Some(_sel), Some(hit)) => {
+                let cur = Self::select_anchor_pos(&hit);
+                let delta =
+                    (cur.0 - anchor.0, cur.1 - anchor.1, cur.2 - anchor.2);
+                if delta != (0, 0, 0) {
+                    self.move_selection(delta);
                 }
-                // Released with the ray off the world entirely (cursor
-                // above the horizon, past the raycast reach, or nearly
-                // parallel to the ground plane). Say so: the ghost
-                // snaps back to the original spot, and silence made
-                // that read as "the move didn't take" with no clue why.
-                // Matches the footprint-off-plane message shape.
-                (Some(_), None) => {
-                    self.ui
-                        .set_status("Move canceled (cursor off-world on release)");
-                }
-                _ => {}
             }
-            return;
+            // Released with the ray off the world entirely (cursor
+            // above the horizon, past the raycast reach, or nearly
+            // parallel to the ground plane). Say so: the ghost
+            // snaps back to the original spot, and silence made
+            // that read as "the move didn't take" with no clue why.
+            // Matches the footprint-off-plane message shape.
+            (Some(_), None) => {
+                self.ui
+                    .set_status("Move canceled (cursor off-world on release)");
+            }
+            _ => {}
         }
+    }
 
-        let Some(anchor) = self.selection_drag_anchor.take() else {
-            return;
-        };
+    /// Finish a `SelectDrag` on release: build a `Selection` from the
+    /// press anchor → current hover cell and store it on the editor.
+    /// Selection state itself is *not* pushed onto the undo history —
+    /// the marquee is ephemeral, like in image editors.
+    fn commit_select_drag(&mut self, anchor: (i32, i32, i32)) {
         let Some(hit) = self.editor.hovered_voxel else {
             self.ui
                 .set_status("Selection canceled (cursor off-world on release)");
@@ -598,37 +616,32 @@ impl App {
         self.editor.selection = Some(sel.translated(delta));
     }
 
-    /// Transition an in-progress shape drag from Footprint to
-    /// Height phase on left-button release. The cursor's current
-    /// plane-locked hit becomes the locked footprint corner, and
-    /// its screen-Y becomes the baseline that future cursor moves
-    /// measure against to set extruded height.
+    /// A `ShapeFootprint` release: transition to Height phase. The
+    /// cursor's current plane-locked hit becomes the locked footprint
+    /// corner, and its screen-Y becomes the baseline that future
+    /// cursor moves measure against to set extruded height.
     ///
     /// If the cursor is off-world at release (no plane hit), cancel
-    /// the drag — committing a shape with no second corner would
+    /// the gesture — committing a shape with no second corner would
     /// produce a single-cell at the anchor, which is almost never
-    /// what the user wants.
-    pub(super) fn transition_shape_to_height(&mut self) {
-        let Some(drag) = self.shape_drag else {
-            return;
-        };
-        if !matches!(drag.phase, ShapePhase::Footprint) {
-            return;
-        }
+    /// what the user wants. (The caller took the state, so doing
+    /// nothing here IS the cancel.)
+    fn shape_footprint_released(
+        &mut self,
+        anchor: (i32, i32, i32),
+        plane: StrokePlane,
+    ) {
         let Some(hit) = self.editor.hovered_voxel else {
-            self.shape_drag = None;
             self.ui
                 .set_status("Shape canceled (cursor off-plane on release)");
             return;
         };
-        self.shape_drag = Some(ShapeDrag {
-            anchor: drag.anchor,
-            plane: drag.plane,
-            phase: ShapePhase::Height {
-                end_on_plane: hit.adjacent_pos,
-                release_screen_y: self.cursor_pos.1,
-            },
-        });
+        self.interaction = EditInteraction::ShapeHeight {
+            anchor,
+            plane,
+            end_on_plane: hit.adjacent_pos,
+            release_screen_y: self.cursor_pos.1,
+        };
         self.ui
             .set_status("Drag vertically to set height, click to commit (Esc cancels)");
     }
@@ -733,7 +746,10 @@ impl App {
     /// press. No-op if there's no selection or a mouse drag is in
     /// progress (so the user can't fight a drag with the keyboard).
     fn step_selection(&mut self, delta: (i32, i32, i32)) {
-        if self.selection_drag_anchor.is_some() || self.selection_move_anchor.is_some() {
+        if matches!(
+            self.interaction,
+            EditInteraction::SelectDrag { .. } | EditInteraction::SelectMove { .. }
+        ) {
             return;
         }
         if self.editor.selection.is_none() {
@@ -742,38 +758,40 @@ impl App {
         self.move_selection(delta);
     }
 
-    /// Commit the in-progress shape drag. Called on the second
+    /// Commit the in-progress shape gesture. Called on the second
     /// click (after the user has dragged a footprint, released, and
     /// then optionally moved the cursor vertically to set height).
-    /// Reads anchor + plane + phase from `shape_drag` and clears it.
-    /// No-op if there's no active drag.
+    /// Takes the gesture state; no-op if none is active.
     ///
     /// Footprint-only commit (no Height phase reached) treats height
     /// as 0 — the shape is one cell thick along the plane normal,
     /// matching the Goxel `planar=on` single-click flow.
     pub(super) fn commit_shape(&mut self) {
-        let Some(drag) = self.shape_drag.take() else {
-            return;
-        };
-        let tool = self.editor.current_tool;
+        let tool = self.effective_tool();
         let cursor_y = self.cursor_pos.1;
 
-        let (anchor, end) = match drag.phase {
-            ShapePhase::Footprint => {
+        let (anchor, end, plane_axis) = match self.interaction {
+            EditInteraction::ShapeFootprint { anchor, plane } => {
                 // Defensive — second-click commit should always come
                 // from Height phase. If we somehow get here from
                 // Footprint, fall back to the cursor's current
-                // plane-locked cell.
+                // plane-locked cell; the gesture ends either way.
                 let Some(hit) = self.editor.hovered_voxel else {
+                    self.interaction = EditInteraction::Idle;
                     return;
                 };
-                (drag.anchor, hit.adjacent_pos)
+                (anchor, hit.adjacent_pos, plane.axis)
             }
-            ShapePhase::Height { .. } => {
-                let end = drag.extruded_end(cursor_y).expect("Height phase");
-                (drag.anchor, end)
+            EditInteraction::ShapeHeight { anchor, plane, .. } => {
+                let end = self
+                    .interaction
+                    .shape_extruded_end(cursor_y)
+                    .expect("Height phase");
+                (anchor, end, plane.axis)
             }
+            _ => return,
         };
+        self.interaction = EditInteraction::Idle;
 
         // Budget check BEFORE the enumeration it bounds — a glancing
         // drag can legally describe hundreds of millions of cells, and
@@ -795,8 +813,8 @@ impl App {
             Tool::Line => line_voxels(anchor, end),
             Tool::Box => box_voxels(anchor, end),
             Tool::Sphere => sphere_voxels(anchor, end),
-            Tool::Cylinder => cylinder_voxels(anchor, end, Some(drag.plane.axis)),
-            _ => return, // anchor only set for shape tools, defensive
+            Tool::Cylinder => cylinder_voxels(anchor, end, Some(plane_axis)),
+            _ => return, // shape state only entered by shape tools, defensive
         };
 
         // Apply symmetry across world-origin planes. HashSet dedupes
@@ -985,16 +1003,43 @@ impl App {
         }
     }
 
-    /// Clear all box-selection state: the marquee, an in-progress
-    /// select-drag or move-drag anchor, and the translucent move ghost.
+    /// Clear all box-selection state: the marquee plus any in-progress
+    /// select-drag / move-drag gesture (whose ghost dies with it).
     /// Shared by the `Deselect` UI action, Esc, and Ctrl+D so the three
     /// entry points can't drift — Esc / Ctrl+D used to omit the move
-    /// anchor + ghost, stranding a ghost after a cancelled move.
+    /// anchor + ghost, stranding a ghost after a cancelled move. Other
+    /// gestures (a brush stroke, a shape phase) are none of Deselect's
+    /// business and stay untouched.
     pub(super) fn deselect(&mut self) {
-        self.selection_drag_anchor = None;
-        self.selection_move_anchor = None;
-        self.move_ghost_voxels.clear();
+        if matches!(
+            self.interaction,
+            EditInteraction::SelectDrag { .. } | EditInteraction::SelectMove { .. }
+        ) {
+            self.interaction = EditInteraction::Idle;
+        }
         self.editor.selection = None;
+    }
+
+    /// The tool a click acts as *right now*: Eyedropper while Alt is
+    /// held, the editor's selected tool otherwise.
+    ///
+    /// This is a derived read, not a mode switch. The previous shape —
+    /// writing `Eyedropper` into `editor.current_tool` on Alt-press and
+    /// restoring a stashed tool on release — needed three recovery
+    /// special cases (release, focus loss, explicit tool pick while Alt
+    /// was down), and missing any one of them left the eyedropper
+    /// latched in. Deriving the answer per read makes a stuck swap
+    /// unrepresentable; the modifiers reset on focus loss is the only
+    /// cleanup Alt needs. Every *behavior* site (apply, drag
+    /// eligibility, raycast fallback, previews, HUD) reads this;
+    /// `editor.current_tool` remains the persisted selection and what
+    /// the toolbar highlights.
+    pub(super) fn effective_tool(&self) -> Tool {
+        if self.modifiers.alt_key() {
+            Tool::Eyedropper
+        } else {
+            self.editor.current_tool
+        }
     }
 
     /// The platform's command modifier: ⌘ on macOS, Ctrl elsewhere.
@@ -1073,14 +1118,19 @@ impl App {
                 self.guard_then(PendingAction::NewProject);
             }
             // Esc: cancel the modal interaction first — an in-progress
-            // shape drag — and only deselect when there is none. Doing
-            // both at once meant bailing out of a shape also silently
-            // threw away the marquee the user had set up before it.
-            // Deselect follows the Photoshop / image-editor convention;
-            // Ctrl+D matches it for users coming from PS / vengi.
+            // shape gesture — and only deselect when there is none.
+            // Doing both at once meant bailing out of a shape also
+            // silently threw away the marquee the user had set up
+            // before it. Deselect follows the Photoshop / image-editor
+            // convention; Ctrl+D matches it for users coming from PS /
+            // vengi.
             KeyCode::Escape => {
-                if self.shape_drag.is_some() {
-                    self.shape_drag = None;
+                if matches!(
+                    self.interaction,
+                    EditInteraction::ShapeFootprint { .. }
+                        | EditInteraction::ShapeHeight { .. }
+                ) {
+                    self.cancel_interaction();
                     self.ui.set_status("Shape canceled");
                 } else {
                     self.deselect();
@@ -1175,5 +1225,293 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The gesture transition table, pinned cell by cell. `App::new()`
+    //! builds without a window or GPU — the gesture entry points touch
+    //! the renderer only through `if let Some`, so hits are injected
+    //! into `editor.hovered_voxel` and the transitions run for real
+    //! (world writes and undo entries included), not on a parallel
+    //! test-only reimplementation.
+
+    use voxelith::core::Voxel;
+    use voxelith::editor::{RaycastHit, Selection, Tool};
+    use winit::keyboard::{KeyCode, ModifiersState};
+
+    use super::super::{App, EditInteraction};
+
+    /// A hit on the top face of the voxel at `(x, y, z)`.
+    fn top_hit(x: i32, y: i32, z: i32) -> RaycastHit {
+        RaycastHit {
+            voxel_pos: (x, y, z),
+            adjacent_pos: (x, y + 1, z),
+            normal: (0, 1, 0),
+            distance: 5.0,
+            virtual_ground: false,
+        }
+    }
+
+    /// A hit whose normal is not axis-aligned (ray started inside a
+    /// voxel) — the input a shape press must refuse.
+    fn degenerate_hit() -> RaycastHit {
+        RaycastHit {
+            voxel_pos: (0, 0, 0),
+            adjacent_pos: (0, 0, 0),
+            normal: (0, 0, 0),
+            distance: 0.0,
+            virtual_ground: false,
+        }
+    }
+
+    fn app_with_tool(tool: Tool) -> App {
+        let mut app = App::new();
+        app.editor.select_tool(tool);
+        app
+    }
+
+    #[test]
+    fn a_brush_press_arms_a_stroke_and_locks_the_plane() {
+        let mut app = app_with_tool(Tool::Place);
+        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        // The press painted, and the stroke latched onto the hit face.
+        assert!(!app.world.get_voxel(0, 1, 0).is_air());
+        match &app.interaction {
+            EditInteraction::BrushStroke { plane: Some(p), .. } => {
+                assert_eq!((p.axis, p.sign), (1, 1), "top face = +Y plane");
+            }
+            other => panic!("expected a plane-locked BrushStroke, got {other:?}"),
+        }
+        app.on_left_release();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+    }
+
+    #[test]
+    fn a_press_over_empty_sky_still_arms_the_stroke_without_a_plane() {
+        let mut app = app_with_tool(Tool::Place);
+        app.editor.hovered_voxel = None;
+        app.on_left_press();
+        // Dragging into the world later must still drag-paint, so the
+        // hold is armed; the plane waits for the first in-world apply.
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::BrushStroke { plane: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_click_tool_press_is_a_plain_hold() {
+        let mut app = app_with_tool(Tool::Eyedropper);
+        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(9, 8, 7));
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        // Eyedropper sampled, but holds no plane and starts no gesture
+        // beyond "the button is down".
+        assert_eq!(app.editor.brush_color.color()[0], 9);
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::BrushStroke { plane: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_shape_press_enters_footprint_and_release_extrudes() {
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::ShapeFootprint { anchor: (0, 1, 0), .. }
+        ));
+        // Release with a plane hit → Height phase, footprint corner
+        // locked.
+        app.editor.hovered_voxel = Some(top_hit(2, 0, 2));
+        app.on_left_release();
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::ShapeHeight {
+                anchor: (0, 1, 0),
+                end_on_plane: (2, 1, 2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_footprint_release_off_world_cancels() {
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.editor.hovered_voxel = None;
+        app.on_left_release();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+    }
+
+    #[test]
+    fn the_second_click_commits_the_shape_as_one_undo_entry() {
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.editor.hovered_voxel = Some(top_hit(1, 0, 1));
+        app.on_left_release();
+        // Second click, cursor unmoved since release → height 0, a
+        // one-cell-thick 2×2 slab.
+        app.on_left_press();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+        assert_eq!(app.editor.history.undo_count(), 1);
+        assert!(!app.world.get_voxel(0, 1, 0).is_air());
+        assert!(!app.world.get_voxel(1, 1, 1).is_air());
+    }
+
+    #[test]
+    fn a_ghost_release_leaves_the_height_phase_pending() {
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.on_left_release();
+        assert!(matches!(app.interaction, EditInteraction::ShapeHeight { .. }));
+        // A release with no matching press in the viewport (egui ate
+        // the press) must not kill the pending extrusion.
+        app.on_left_release();
+        assert!(matches!(app.interaction, EditInteraction::ShapeHeight { .. }));
+    }
+
+    #[test]
+    fn a_shape_press_on_a_degenerate_normal_stays_a_plain_hold() {
+        let mut app = app_with_tool(Tool::Sphere);
+        app.editor.hovered_voxel = Some(degenerate_hit());
+        app.on_left_press();
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::BrushStroke { plane: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_select_drag_commits_the_marquee_on_release() {
+        let mut app = app_with_tool(Tool::Select);
+        app.editor.hovered_voxel = Some(top_hit(1, 0, 1));
+        app.on_left_press();
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::SelectDrag { anchor: (1, 0, 1) }
+        ));
+        app.editor.hovered_voxel = Some(top_hit(3, 0, 4));
+        app.on_left_release();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+        let sel = app.editor.selection.expect("marquee committed");
+        assert_eq!((sel.min, sel.max), ((1, 0, 1), (3, 0, 4)));
+    }
+
+    #[test]
+    fn a_press_inside_the_selection_moves_its_voxels() {
+        let mut app = app_with_tool(Tool::Select);
+        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
+        app.editor.selection = Some(Selection { min: (0, 0, 0), max: (0, 0, 0) });
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        match &app.interaction {
+            EditInteraction::SelectMove { anchor, ghost } => {
+                assert_eq!(*anchor, (0, 0, 0));
+                assert_eq!(ghost.len(), 1, "ghost snapshots the one solid voxel");
+            }
+            other => panic!("expected SelectMove, got {other:?}"),
+        }
+        // Drop two cells over on X: the voxel moves as one undo entry.
+        app.editor.hovered_voxel = Some(top_hit(2, 0, 0));
+        app.on_left_release();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+        assert!(app.world.get_voxel(0, 0, 0).is_air());
+        assert!(!app.world.get_voxel(2, 0, 0).is_air());
+        assert_eq!(app.editor.history.undo_count(), 1);
+        assert_eq!(app.editor.selection.unwrap().min, (2, 0, 0));
+    }
+
+    #[test]
+    fn escape_cancels_the_shape_but_keeps_the_marquee() {
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.selection = Some(Selection { min: (0, 0, 0), max: (1, 1, 1) });
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.handle_tool_shortcut(KeyCode::Escape);
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+        assert!(app.editor.selection.is_some(), "Esc mid-shape spares the marquee");
+        // A second Esc, with no gesture in flight, deselects.
+        app.handle_tool_shortcut(KeyCode::Escape);
+        assert!(app.editor.selection.is_none());
+    }
+
+    #[test]
+    fn cancel_returns_any_gesture_to_idle() {
+        // The focus-loss / scene-reset verb, over every state.
+        for tool in [Tool::Place, Tool::Box, Tool::Select] {
+            let mut app = app_with_tool(tool);
+            app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+            app.on_left_press();
+            app.cancel_interaction();
+            assert!(
+                matches!(app.interaction, EditInteraction::Idle),
+                "{tool:?} gesture must cancel to Idle"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_tools_reconciles_shape_and_select_gestures() {
+        // A shape gesture dies when the tool leaves the shape family…
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.editor.select_tool(Tool::Place);
+        app.update_brush_preview();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+
+        // …but survives a switch within it (Box → Sphere mid-drag).
+        let mut app = app_with_tool(Tool::Box);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.editor.select_tool(Tool::Sphere);
+        app.update_brush_preview();
+        assert!(matches!(app.interaction, EditInteraction::ShapeFootprint { .. }));
+
+        // A select drag dies with the Select tool.
+        let mut app = app_with_tool(Tool::Select);
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        app.editor.select_tool(Tool::Place);
+        app.update_brush_preview();
+        assert!(matches!(app.interaction, EditInteraction::Idle));
+    }
+
+    #[test]
+    fn arrow_nudges_are_ignored_mid_select_gesture() {
+        let mut app = app_with_tool(Tool::Select);
+        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
+        app.editor.selection = Some(Selection { min: (0, 0, 0), max: (0, 0, 0) });
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press(); // SelectMove in flight
+        app.step_selection((1, 0, 0));
+        assert!(!app.world.get_voxel(0, 0, 0).is_air(), "nudge must not fight the drag");
+    }
+
+    #[test]
+    fn alt_makes_the_eyedropper_effective_without_touching_the_selection() {
+        let mut app = app_with_tool(Tool::Place);
+        app.modifiers = ModifiersState::ALT;
+        assert_eq!(app.effective_tool(), Tool::Eyedropper);
+        assert_eq!(app.editor.current_tool, Tool::Place, "persisted tool untouched");
+        // With Alt down, a press samples instead of painting.
+        app.world.set_voxel(0, 0, 0, Voxel::from_rgb(42, 1, 1));
+        app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
+        app.on_left_press();
+        assert_eq!(app.editor.brush_color.color()[0], 42);
+        assert!(app.world.get_voxel(0, 1, 0).is_air(), "nothing painted");
+        // Alt up (or the modifiers reset on focus loss): back to Place.
+        app.modifiers = ModifiersState::empty();
+        assert_eq!(app.effective_tool(), Tool::Place);
     }
 }

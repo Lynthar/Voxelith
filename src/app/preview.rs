@@ -1,14 +1,23 @@
-//! Procgen preview state + debounced regen.
+//! Procgen preview state + debounced regen, arbitrated by an owner.
 //!
-//! Two independent preview sources can be enabled: the single-generator
-//! panel and the pipeline graph. Each runs its own debounced state
+//! Three sources can put geometry in the renderer's single preview
+//! overlay slot: the single-generator panel, the pipeline graph, and an
+//! agent batch parked for review. [`PreviewOwner`] records which of
+//! them the slot currently belongs to, and every write or clear goes
+//! through `preview_slot_set` / `preview_slot_release`, so a source can
+//! neither blank another source's geometry nor leave its own behind.
+//! (The previous arbitration was two sources force-resetting each
+//! other's `enabled` snapshots — a generator failure could blank a
+//! healthy graph preview, and switching one source off blanked the slot
+//! for a debounce interval even when the other source owned it.)
+//!
+//! The generator and graph branches each keep their own debounced state
 //! machine — slider drags don't trigger a regen until parameters have
-//! stayed stable for `DEBOUNCE`. Both sources share the renderer's
-//! preview overlay slot; when both are enabled and fire in the same
-//! tick, the graph wins (its tick runs second). When one toggles off
-//! while the other stays on, the slot is cleared and the still-active
-//! source is forced through its "just-toggled-on" path on the next
-//! tick so it re-renders into the freshly-cleared slot.
+//! stayed stable for `DEBOUNCE`. When both are enabled, the slot shows
+//! whichever regenerated last. An agent review outranks both: while a
+//! batch is parked, `tick_preview` stands down entirely (the human is
+//! being asked about *that* geometry), and answering the batch releases
+//! the slot back to whichever source is switched on.
 //!
 //! **Regen runs synchronously on the UI thread.** That's only viable
 //! because the panel's parameter caps keep the worst case to a few
@@ -20,7 +29,7 @@
 
 use std::time::{Duration, Instant};
 
-use voxelith::mesh::patch_to_mesh;
+use voxelith::mesh::{patch_to_mesh, ChunkMesh};
 use voxelith::procgen::{
     LSystemTree, PerlinTerrain, PipelineGraph, VoxelGenerator, WfcGenerator,
 };
@@ -35,11 +44,25 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 /// still legible against the dark background.
 const PREVIEW_ALPHA: f32 = 0.5;
 
-/// Tracks both preview sources' lifecycle. Each source is independent:
-/// turning one off doesn't disable the other, but they share the
-/// renderer's overlay slot.
+/// Which source the renderer's preview overlay slot currently shows.
+/// `AgentReview` is set by `agent_bridge::show_review_preview` and
+/// outranks the other two (their ticks stand down while a batch is
+/// parked); `Generator` / `Graph` trade the slot by regenerating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreviewOwner {
+    None,
+    Generator,
+    Graph,
+    AgentReview,
+}
+
+/// Tracks the preview sources' lifecycle. Each debounce branch is
+/// independent: turning one off doesn't disable the other. Who is
+/// actually on screen is `owner`'s to say.
 #[derive(Debug)]
 pub(super) struct PreviewState {
+    pub owner: PreviewOwner,
+
     // ---- Single-generator branch ----
     pub last_terrain: PerlinTerrain,
     pub last_tree: LSystemTree,
@@ -59,6 +82,7 @@ pub(super) struct PreviewState {
 impl PreviewState {
     pub fn new() -> Self {
         Self {
+            owner: PreviewOwner::None,
             last_terrain: PerlinTerrain::default(),
             last_tree: LSystemTree::default(),
             last_wfc: WfcGenerator::default(),
@@ -75,14 +99,36 @@ impl PreviewState {
 }
 
 impl App {
+    /// Put `mesh` in the overlay slot on `owner`'s behalf.
+    fn preview_slot_set(&mut self, owner: PreviewOwner, mesh: &ChunkMesh) {
+        if let Some(r) = &mut self.renderer {
+            r.set_preview_mesh(mesh);
+        }
+        self.preview.owner = owner;
+    }
+
+    /// Clear the overlay slot **if** `owner` is the one holding it.
+    /// A release from a source that isn't on screen changes nothing —
+    /// that's the point: a generator's failure or toggle-off must not
+    /// blank a graph preview the user is looking at (or vice versa).
+    fn preview_slot_release(&mut self, owner: PreviewOwner) {
+        if self.preview.owner != owner {
+            return;
+        }
+        if let Some(r) = &mut self.renderer {
+            r.clear_preview();
+        }
+        self.preview.owner = PreviewOwner::None;
+    }
+
     /// Drive both preview state machines once per frame.
     pub(super) fn tick_preview(&mut self) {
         // A batch waiting for approval owns the overlay slot: the human
         // is being asked about *that* geometry, and a debounced generator
         // repaint would quietly replace what they are deciding on with
-        // something else entirely. Answering the batch resets both state
-        // machines (`App::clear_review_preview`), so whichever source is
-        // switched on re-renders into the freed slot on the next tick.
+        // something else entirely. Answering the batch releases the slot
+        // (`App::clear_review_preview`), so whichever source is switched
+        // on re-renders into it on the next tick.
         if self.agent.pending.is_some() {
             return;
         }
@@ -94,21 +140,14 @@ impl App {
     fn tick_single_preview(&mut self) {
         let enabled = self.ui.procgen.preview_enabled;
 
-        // Off (or just-toggled-off): drop our state; if the graph
-        // preview is on, force it to re-render into the now-empty slot
-        // by resetting its `enabled` snapshot — its tick this same
-        // frame will hit the just-toggled-on path.
+        // Off (or just-toggled-off): drop this branch's state and hand
+        // the slot back if this branch was the one showing.
         if !enabled {
-            if self.single_enabled() {
-                if let Some(r) = &mut self.renderer {
-                    r.clear_preview();
-                }
+            if self.preview.single_enabled {
+                self.preview_slot_release(PreviewOwner::Generator);
                 self.preview.single_enabled = false;
                 self.preview.single_last_change = None;
                 self.preview.single_needs_regen = false;
-                if self.ui.procgen.graph_preview_enabled {
-                    self.preview.graph_enabled = false;
-                }
             }
             return;
         }
@@ -116,7 +155,7 @@ impl App {
         // Just-toggled-on: snapshot current params and queue an initial
         // regen. Without this, the user would see no preview until they
         // wiggle a slider.
-        if !self.single_enabled() {
+        if !self.preview.single_enabled {
             self.preview.single_enabled = true;
             self.preview.last_terrain = self.ui.procgen.terrain.clone();
             self.preview.last_tree = self.ui.procgen.tree.clone();
@@ -158,21 +197,16 @@ impl App {
         let enabled = self.ui.procgen.graph_preview_enabled;
 
         if !enabled {
-            if self.graph_enabled() {
-                if let Some(r) = &mut self.renderer {
-                    r.clear_preview();
-                }
+            if self.preview.graph_enabled {
+                self.preview_slot_release(PreviewOwner::Graph);
                 self.preview.graph_enabled = false;
                 self.preview.graph_last_change = None;
                 self.preview.graph_needs_regen = false;
-                if self.ui.procgen.preview_enabled {
-                    self.preview.single_enabled = false;
-                }
             }
             return;
         }
 
-        if !self.graph_enabled() {
+        if !self.preview.graph_enabled {
             self.preview.graph_enabled = true;
             self.preview.last_graph = self.ui.graph.clone();
             self.preview.graph_last_change = Some(Instant::now());
@@ -199,17 +233,9 @@ impl App {
         }
     }
 
-    fn single_enabled(&self) -> bool {
-        self.preview.single_enabled
-    }
-
-    fn graph_enabled(&self) -> bool {
-        self.preview.graph_enabled
-    }
-
     /// Run the currently-selected generator and upload the resulting
-    /// patch as the preview overlay. Failures and empty output clear
-    /// the overlay rather than leaving stale geometry around.
+    /// patch as the preview overlay. Failures and empty output release
+    /// the slot rather than leaving stale geometry around.
     fn regen_single_preview(&mut self) {
         let result = match self.ui.procgen.selected {
             GeneratorChoice::Terrain => self.ui.procgen.terrain.generate(),
@@ -220,16 +246,12 @@ impl App {
         let patch = match result {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
-                if let Some(r) = &mut self.renderer {
-                    r.clear_preview();
-                }
+                self.preview_slot_release(PreviewOwner::Generator);
                 return;
             }
             Err(e) => {
                 log::warn!("Preview generation failed: {}", e);
-                if let Some(r) = &mut self.renderer {
-                    r.clear_preview();
-                }
+                self.preview_slot_release(PreviewOwner::Generator);
                 // Unlike the graph path below, a single generator
                 // failing means the parameters in front of the user are
                 // invalid — say which. Silently dropping the overlay
@@ -242,14 +264,12 @@ impl App {
         };
 
         let mesh = patch_to_mesh(&patch.voxels, PREVIEW_ALPHA);
-        if let Some(r) = &mut self.renderer {
-            r.set_preview_mesh(&mesh);
-        }
+        self.preview_slot_set(PreviewOwner::Generator, &mesh);
     }
 
     /// Evaluate the pipeline graph and upload its output patch as the
     /// preview overlay. Graph errors (no Output node, missing inputs,
-    /// cycles) and empty output both clear the overlay — they're
+    /// cycles) and empty output both release the slot — they're
     /// in-progress states from the user's perspective, not failures
     /// worth surfacing in the status bar (the explicit "Run Pipeline"
     /// button still surfaces them).
@@ -261,47 +281,109 @@ impl App {
         // ones that end the process rather than the frame.
         if let Err(refusal) = voxelith::agent_ops::check_graph(&self.ui.graph) {
             log::debug!("Graph preview skipped: {}", refusal.message);
-            if let Some(r) = &mut self.renderer {
-                r.clear_preview();
-            }
+            self.preview_slot_release(PreviewOwner::Graph);
             return;
         }
         let patch = match self.ui.graph.evaluate() {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
-                if let Some(r) = &mut self.renderer {
-                    r.clear_preview();
-                }
+                self.preview_slot_release(PreviewOwner::Graph);
                 return;
             }
             Err(e) => {
                 log::debug!("Graph preview skipped: {}", e);
-                if let Some(r) = &mut self.renderer {
-                    r.clear_preview();
-                }
+                self.preview_slot_release(PreviewOwner::Graph);
                 return;
             }
         };
 
         let mesh = patch_to_mesh(&patch.voxels, PREVIEW_ALPHA);
-        if let Some(r) = &mut self.renderer {
-            r.set_preview_mesh(&mesh);
-        }
+        self.preview_slot_set(PreviewOwner::Graph, &mesh);
     }
 
-    /// Clear the overlay and force both preview state machines to
-    /// re-snapshot on the next tick. Called after a generator (single
-    /// or graph) writes into the world so the just-applied geometry
-    /// doesn't double-render with the preview on top.
+    /// Show `mesh` as an agent-review preview. The review outranks the
+    /// generator / graph branches: they stand down in `tick_preview`
+    /// while the batch is parked, so nothing repaints over it.
+    pub(super) fn show_review_preview_mesh(&mut self, mesh: &ChunkMesh) {
+        self.preview_slot_set(PreviewOwner::AgentReview, mesh);
+    }
+
+    /// Clear the overlay unconditionally and force both debounce
+    /// branches to re-snapshot on the next tick. Called after geometry
+    /// lands in the world (a committed generation, an accepted agent
+    /// batch, an import) so the just-applied voxels don't double-render
+    /// under a stale overlay — whoever owned the slot, that picture is
+    /// now wrong.
     pub(super) fn invalidate_preview(&mut self) {
         if let Some(r) = &mut self.renderer {
             r.clear_preview();
         }
+        self.preview.owner = PreviewOwner::None;
         self.preview.single_last_change = None;
         self.preview.single_needs_regen = false;
         self.preview.single_enabled = false;
         self.preview.graph_last_change = None;
         self.preview.graph_needs_regen = false;
         self.preview.graph_enabled = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The slot-ownership rules. `App::new()` builds without a
+    //! renderer; these functions touch it only through `if let Some`,
+    //! so the owner bookkeeping — the part the old cross-reset hack
+    //! got wrong — is exercised directly.
+
+    use voxelith::mesh::patch_to_mesh;
+    use voxelith::core::Voxel;
+
+    use super::super::App;
+    use super::PreviewOwner;
+
+    fn some_mesh() -> voxelith::mesh::ChunkMesh {
+        patch_to_mesh(&[((0, 0, 0), Voxel::from_rgb(1, 2, 3))], 0.5)
+    }
+
+    #[test]
+    fn a_release_from_a_non_owner_changes_nothing() {
+        // The exact failure the owner exists to prevent: a generator
+        // failing (or toggling off) while the graph's geometry is on
+        // screen must not blank the slot.
+        let mut app = App::new();
+        app.preview_slot_set(PreviewOwner::Graph, &some_mesh());
+        app.preview_slot_release(PreviewOwner::Generator);
+        assert_eq!(app.preview.owner, PreviewOwner::Graph);
+    }
+
+    #[test]
+    fn the_owner_releases_its_own_slot() {
+        let mut app = App::new();
+        app.preview_slot_set(PreviewOwner::Generator, &some_mesh());
+        app.preview_slot_release(PreviewOwner::Generator);
+        assert_eq!(app.preview.owner, PreviewOwner::None);
+    }
+
+    #[test]
+    fn a_regen_takes_the_slot_over() {
+        // Two enabled sources trade the slot by regenerating — last
+        // writer owns it, no force-reset of the other's state machine.
+        let mut app = App::new();
+        app.preview_slot_set(PreviewOwner::Generator, &some_mesh());
+        app.preview_slot_set(PreviewOwner::Graph, &some_mesh());
+        assert_eq!(app.preview.owner, PreviewOwner::Graph);
+    }
+
+    #[test]
+    fn an_agent_review_preempts_and_invalidate_clears_everyone() {
+        let mut app = App::new();
+        app.preview_slot_set(PreviewOwner::Graph, &some_mesh());
+        app.show_review_preview_mesh(&some_mesh());
+        assert_eq!(app.preview.owner, PreviewOwner::AgentReview);
+        // Answering the batch goes through invalidate_preview: slot
+        // free, both branches forced to re-snapshot on their next tick.
+        app.invalidate_preview();
+        assert_eq!(app.preview.owner, PreviewOwner::None);
+        assert!(!app.preview.single_enabled && !app.preview.graph_enabled);
     }
 }

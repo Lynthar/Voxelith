@@ -675,9 +675,9 @@ impl App {
             })
             .collect();
         let mesh = patch_to_mesh(&voxels, REVIEW_ALPHA);
-        if let Some(renderer) = &mut self.renderer {
-            renderer.set_preview_mesh(&mesh);
-        }
+        // Claims the overlay slot as `AgentReview` — the procgen ticks
+        // stand down while the batch is parked, so nothing repaints it.
+        self.show_review_preview_mesh(&mesh);
     }
 
     /// Hand the overlay slot back to the procgen previews.

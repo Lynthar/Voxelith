@@ -177,18 +177,10 @@ pub struct App {
     cursor_pos: (f32, f32),
     modifiers: ModifiersState,
 
-    /// True between left-button press and release; gates drag-paint
-    /// in `CursorMoved`.
-    left_button_held: bool,
-    /// Voxel position the most recent stroke step applied at, so we
-    /// don't re-apply on every CursorMoved while the cursor sits on
-    /// the same cell.
-    last_stroke_voxel: Option<(i32, i32, i32)>,
-    /// Screen-space position of the left-button press. Used as a
-    /// dead-zone origin: drag-paint only kicks in once the cursor
-    /// has moved past `DRAG_THRESHOLD_PX` pixels from here, so a
-    /// single click with hand-tremor doesn't paint a streak.
-    stroke_start_screen_pos: Option<(f32, f32)>,
+    /// The one in-flight edit gesture. See [`EditInteraction`] — every
+    /// press / release / cancel path reads and writes this instead of
+    /// a set of parallel latch fields.
+    pub(super) interaction: EditInteraction,
 
     /// Current project file path (None = unsaved).
     project_path: Option<PathBuf>,
@@ -222,41 +214,6 @@ pub struct App {
         Option<ShapeDragKey>,
     )>,
 
-    /// In-progress shape drag (Line / Box / Sphere / Cylinder).
-    /// Two-phase: Footprint while the left button is held (cursor
-    /// drags on a locked plane defining W×D), then Height after
-    /// release (cursor's vertical screen-space delta defines H along
-    /// the plane normal). A second click commits; Esc cancels.
-    /// Replaces the prior single-anchor `shape_drag_anchor` so the
-    /// 3D-bbox-from-two-raycast-points "flat shape" bug is gone:
-    /// W/D come from a 1:1 ray-vs-plane projection on the locked
-    /// face, H is its own dedicated screen-Y axis. See vengi
-    /// `ShapeBrush` for the same idea.
-    pub(super) shape_drag: Option<ShapeDrag>,
-
-    /// Set when the left button is held with the Select tool active
-    /// **outside** any existing selection — the anchor cell of a new
-    /// selection drag. Finalized into `editor.selection` by
-    /// `commit_selection` on mouse-up.
-    pub(super) selection_drag_anchor: Option<(i32, i32, i32)>,
-
-    /// Set when the left button is held with the Select tool active
-    /// **inside** an existing selection — the cell the press landed
-    /// on. While set, every cursor move computes `current - anchor`
-    /// as a translation delta, and `commit_selection` on mouse-up
-    /// runs `move_selection(delta)` so the selection's voxels
-    /// translate as one undoable Command.
-    pub(super) selection_move_anchor: Option<(i32, i32, i32)>,
-
-    /// Snapshot of the selection's non-air voxels (world-space)
-    /// captured when a move drag begins, so the per-frame ghost just
-    /// translates this set by the live delta instead of re-reading the
-    /// world each time the cursor crosses a cell. Empty when no move
-    /// drag is active; only read while `selection_move_anchor` is
-    /// `Some` and overwritten at the next pickup, so leftover data
-    /// between drags is harmless.
-    pub(super) move_ghost_voxels: Vec<((i32, i32, i32), Voxel)>,
-
     /// Cache key for the selection wireframe so we don't rebuild the
     /// 24-vertex line buffer on every `CursorMoved` when the AABB
     /// hasn't changed.
@@ -276,16 +233,6 @@ pub struct App {
     /// loaded, not every frame. Names don't affect the gizmo, so
     /// renaming a socket doesn't invalidate this.
     last_socket_viz: Vec<([f32; 3], [f32; 3])>,
-
-    /// Locked face plane for drag-paint. Captured on the first
-    /// `apply_tool` of a brush stroke (Place / Remove / Paint) and
-    /// cleared on left-button release. While set,
-    /// `update_raycast` ray-casts against this plane instead of the
-    /// voxel world — without it, each new voxel written would shift
-    /// the next ray-vs-voxels hit toward the camera and the stroke
-    /// would "stack" along the view direction (vengi-style fix; see
-    /// `vengi/AABBBrush.cpp`).
-    pub(super) stroke_plane: Option<StrokePlane>,
 
     /// Voxel data captured by the most recent Copy / Cut. Pasting
     /// composites these onto the world (only the non-air voxels;
@@ -473,23 +420,16 @@ impl App {
             cursor_captured: false,
             cursor_pos: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
-            left_button_held: false,
-            last_stroke_voxel: None,
-            stroke_start_screen_pos: None,
+            interaction: EditInteraction::Idle,
             project_path: None,
             last_grid_size,
             last_grid_spacing,
             preview: PreviewState::new(),
             agent: AgentBridgeState::new(),
             last_brush_preview_key: None,
-            shape_drag: None,
-            selection_drag_anchor: None,
-            selection_move_anchor: None,
-            move_ghost_voxels: Vec::new(),
             last_selection_box: None,
             last_ghost_delta: None,
             last_socket_viz: Vec::new(),
-            stroke_plane: None,
             clipboard: None,
             prefs,
             async_runtime: runtime::AsyncRuntime::new(),
@@ -671,41 +611,153 @@ pub(super) fn build_stroke_plane(hit: &RaycastHit) -> Option<StrokePlane> {
 /// responsive at the default camera distance.
 pub(super) const SHAPE_HEIGHT_PIXELS_PER_VOXEL: f32 = 8.0;
 
-/// In-progress shape drag (anchor + locked plane + current phase).
-/// First phase is Footprint (left button held, cursor on the locked
-/// plane defines W × D). Second phase is Height (left released, the
-/// cursor's vertical screen-space movement defines H along the
-/// plane normal until a second click commits).
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ShapeDrag {
-    /// First-press hit's `adjacent_pos`. Sits on the locked plane,
-    /// so `anchor[plane.axis] == plane.anchor_along_axis`.
-    pub anchor: (i32, i32, i32),
-    /// Locked face plane — same `StrokePlane` shape brush stroke
-    /// uses. All cells in the footprint have their `axis` component
-    /// pinned to this plane.
-    pub plane: StrokePlane,
-    pub phase: ShapePhase,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum ShapePhase {
-    /// Left button held; cursor's plane-locked hit is the
-    /// footprint's other corner.
-    Footprint,
-    /// Left button released; cursor's vertical screen movement
-    /// defines extruded height along the plane normal. A second
-    /// click commits.
-    Height {
-        /// Footprint's other corner at the moment the user
-        /// released the button (locked from then on — only height
-        /// changes during this phase).
+/// The one in-flight edit gesture, if any.
+///
+/// Replaces eight parallel latch fields (button-held flag, stroke
+/// plane, stroke dedup cell, press position, shape drag, two selection
+/// anchors, move ghost) whose cleanup lists had to be maintained by
+/// hand at every exit point — focus loss, release, Esc, tool switch,
+/// scene reset each carried a slightly different subset, and the
+/// combinations they missed ("both anchors at once") each needed a
+/// defensive branch. One value makes the illegal combinations
+/// unrepresentable and gives every exit the same verb: back to `Idle`.
+///
+/// The camera dimension deliberately stays outside this enum: a
+/// Height-phase pause with a middle-button orbit is a legal, useful
+/// overlap (inspecting the extrusion from another angle), so
+/// `cursor_captured` + `CameraController` keep owning navigation.
+#[derive(Debug, Default)]
+pub(super) enum EditInteraction {
+    /// No gesture in flight.
+    #[default]
+    Idle,
+    /// Left button held. A brush stroke for Place / Remove / Paint;
+    /// for the click tools (Eyedropper / Fill / Socket) it's a plain
+    /// press-hold that uses none of the fields but still counts as
+    /// "the button is down" for release bookkeeping and frame pacing.
+    BrushStroke {
+        /// Locked face plane for drag-paint — the vengi-style fix
+        /// that keeps a stroke on one face instead of stacking toward
+        /// the camera as new voxels occlude the ray. `None` until the
+        /// first apply hits something: a press over empty sky arms
+        /// the stroke, and the first in-world cell locks the plane.
+        plane: Option<StrokePlane>,
+        /// Cell the most recent stroke step applied at, so drag-paint
+        /// doesn't re-apply while the cursor sits in the same cell.
+        last_voxel: Option<(i32, i32, i32)>,
+        /// Screen position of the press — the dead-zone origin that
+        /// keeps single-click hand tremor from painting a streak.
+        start_screen: (f32, f32),
+    },
+    /// Shape phase one: left button held, the cursor's plane-locked
+    /// hit is the footprint's other corner (W × D on the locked
+    /// plane). `anchor` is the first press's `adjacent_pos`, sitting
+    /// on `plane` (`anchor[plane.axis] == plane.anchor_along_axis`).
+    ShapeFootprint {
+        anchor: (i32, i32, i32),
+        plane: StrokePlane,
+    },
+    /// Shape phase two: button released, the cursor's vertical screen
+    /// movement extrudes height along the plane normal. A second
+    /// click commits; Esc cancels. (vengi `ShapeBrush`'s two-phase
+    /// design — W/D from a 1:1 ray-vs-plane projection, H on its own
+    /// dedicated screen-Y axis.)
+    ShapeHeight {
+        anchor: (i32, i32, i32),
+        plane: StrokePlane,
+        /// Footprint's other corner at the moment the button was
+        /// released (locked from then on — only height changes).
         end_on_plane: (i32, i32, i32),
         /// Cursor's screen-Y at release. Height = `(release_y -
-        /// cursor_y) / SHAPE_HEIGHT_PIXELS_PER_VOXEL` (clamped to
-        /// ≥ 0 since the user can't extrude *into* the face).
+        /// cursor_y) / SHAPE_HEIGHT_PIXELS_PER_VOXEL`, clamped to
+        /// ≥ 0 (the user can't extrude *into* the face).
         release_screen_y: f32,
     },
+    /// Select tool, dragging out a new marquee from `anchor`.
+    /// Finalized into `editor.selection` on release.
+    SelectDrag { anchor: (i32, i32, i32) },
+    /// Select tool, dragging the existing selection's contents. Every
+    /// cursor move renders the ghost at `current - anchor`; release
+    /// runs `move_selection` with that delta as one undoable Command.
+    SelectMove {
+        anchor: (i32, i32, i32),
+        /// The selection's non-air voxels (world-space), snapshotted
+        /// at pick-up so the per-frame ghost translates this set
+        /// instead of re-reading the world each cell crossed. Dropped
+        /// with the state on commit / cancel. Empty when the box was
+        /// too big to sweep — the move itself is refused with a
+        /// message when it commits.
+        ghost: Vec<((i32, i32, i32), Voxel)>,
+    },
+}
+
+impl EditInteraction {
+    /// A gesture is in flight — drives full-rate frame pacing and the
+    /// "don't fight the drag" guards.
+    pub(super) fn is_active(&self) -> bool {
+        !matches!(self, EditInteraction::Idle)
+    }
+
+    /// The face plane the cursor's raycast is locked to, if any: a
+    /// brush stroke after its first in-world apply, or either shape
+    /// phase.
+    pub(super) fn locked_plane(&self) -> Option<StrokePlane> {
+        match self {
+            EditInteraction::BrushStroke { plane, .. } => *plane,
+            EditInteraction::ShapeFootprint { plane, .. }
+            | EditInteraction::ShapeHeight { plane, .. } => Some(*plane),
+            _ => None,
+        }
+    }
+
+    /// Build the shape-gesture cache key for `update_brush_preview`,
+    /// or `None` when no shape gesture is in flight. `hovered_cell` is
+    /// the cursor's current plane-locked `adjacent_pos` (Footprint
+    /// phase only; `None` falls back to the anchor).
+    pub(super) fn shape_cache_key(
+        &self,
+        cursor_y: f32,
+        hovered_cell: Option<(i32, i32, i32)>,
+    ) -> Option<ShapeDragKey> {
+        match *self {
+            EditInteraction::ShapeFootprint { anchor, .. } => {
+                Some(ShapeDragKey::Footprint {
+                    anchor,
+                    end_cell: hovered_cell.unwrap_or(anchor),
+                })
+            }
+            EditInteraction::ShapeHeight {
+                anchor,
+                end_on_plane,
+                release_screen_y,
+                ..
+            } => Some(ShapeDragKey::Height {
+                anchor,
+                end_on_plane,
+                height: shape_height_from_cursor(release_screen_y, cursor_y),
+            }),
+            _ => None,
+        }
+    }
+
+    /// 3D end corner of the shape after extrusion — `Some` only in
+    /// Height phase. Footprint callers use the cursor's plane-locked
+    /// `hovered_voxel.adjacent_pos` directly.
+    pub(super) fn shape_extruded_end(&self, cursor_y: f32) -> Option<(i32, i32, i32)> {
+        let EditInteraction::ShapeHeight {
+            plane,
+            end_on_plane,
+            release_screen_y,
+            ..
+        } = *self
+        else {
+            return None;
+        };
+        let h = shape_height_from_cursor(release_screen_y, cursor_y);
+        let mut e = [end_on_plane.0, end_on_plane.1, end_on_plane.2];
+        e[plane.axis] += plane.sign * h;
+        Some((e[0], e[1], e[2]))
+    }
 }
 
 /// Reduced cache key for `update_brush_preview` — drops the f32
@@ -726,49 +778,6 @@ pub(super) enum ShapeDragKey {
         end_on_plane: (i32, i32, i32),
         height: i32,
     },
-}
-
-impl ShapeDrag {
-    /// Build the cache key for `update_brush_preview`. `hovered_cell`
-    /// is the cursor's current plane-locked `adjacent_pos` (used in
-    /// Footprint phase only; `None` falls back to anchor).
-    pub fn cache_key(
-        &self,
-        cursor_y: f32,
-        hovered_cell: Option<(i32, i32, i32)>,
-    ) -> ShapeDragKey {
-        match self.phase {
-            ShapePhase::Footprint => ShapeDragKey::Footprint {
-                anchor: self.anchor,
-                end_cell: hovered_cell.unwrap_or(self.anchor),
-            },
-            ShapePhase::Height {
-                end_on_plane,
-                release_screen_y,
-            } => ShapeDragKey::Height {
-                anchor: self.anchor,
-                end_on_plane,
-                height: shape_height_from_cursor(release_screen_y, cursor_y),
-            },
-        }
-    }
-
-    /// 3D end corner of the shape after extrusion. Only valid in
-    /// `Height` phase — `Footprint` callers should use the cursor's
-    /// plane-locked `hovered_voxel.adjacent_pos` directly.
-    pub fn extruded_end(&self, cursor_y: f32) -> Option<(i32, i32, i32)> {
-        let ShapePhase::Height {
-            end_on_plane,
-            release_screen_y,
-        } = self.phase
-        else {
-            return None;
-        };
-        let h = shape_height_from_cursor(release_screen_y, cursor_y);
-        let mut e = [end_on_plane.0, end_on_plane.1, end_on_plane.2];
-        e[self.plane.axis] += self.plane.sign * h;
-        Some((e[0], e[1], e[2]))
-    }
 }
 
 /// Pure helper: `(release_y - cursor_y) / SHAPE_HEIGHT_PIXELS_PER_VOXEL`,
@@ -920,9 +929,7 @@ impl App {
         // immediately after this call; New Scene is the path that wants
         // the empty one this leaves behind.
         self.ui.graph = PipelineGraph::default();
-        self.shape_drag = None;
-        self.stroke_plane = None;
-        self.last_stroke_voxel = None;
+        self.cancel_interaction();
         self.last_generated_bounds = None;
         // A batch parked for approval was built against the world that
         // is being thrown away: its `old_voxel`s describe cells that no
@@ -1076,11 +1083,7 @@ impl App {
             .renderer
             .as_ref()
             .is_some_and(|r| r.camera_controller.is_navigating());
-        let gesturing = self.left_button_held
-            || self.cursor_captured
-            || self.shape_drag.is_some()
-            || self.selection_drag_anchor.is_some()
-            || self.selection_move_anchor.is_some();
+        let gesturing = self.cursor_captured || self.interaction.is_active();
         let active = navigating
             || gesturing
             || self.last_interaction.elapsed() < ACTIVE_GRACE;
@@ -1089,6 +1092,16 @@ impl App {
         } else {
             IDLE_FRAME_INTERVAL
         }
+    }
+
+    /// Abandon whatever gesture is in flight — back to `Idle` with the
+    /// stroke's undo entry sealed. The one verb every exit point uses:
+    /// focus loss, scene replacement, Esc's shape arm. `end_stroke` is
+    /// a no-op when no stroke is open, so callers don't need to know
+    /// which state they're cancelling — that's the point.
+    pub(super) fn cancel_interaction(&mut self) {
+        self.editor.history.end_stroke();
+        self.interaction = EditInteraction::Idle;
     }
 
     /// The document differs from the user's file, and the autosave
@@ -1177,14 +1190,33 @@ impl App {
     /// Eyedropper has no preview (its color != the sampled color would
     /// mislead).
     pub(super) fn update_brush_preview(&mut self) {
-        let tool = self.editor.current_tool;
+        let tool = self.effective_tool();
 
-        // If the user switched away from a shape tool while a drag
-        // was in progress (e.g. via the toolbar mid-Footprint),
-        // drop the drag so the next tool's preview isn't haunted by
-        // the orphaned state.
-        if !tool.is_shape() && self.shape_drag.is_some() {
-            self.shape_drag = None;
+        // Per-frame reconciliation of gesture vs. tool — the "tool
+        // switch cancels the gesture it orphans" rule, checked here
+        // because tool switches arrive through several doors (number
+        // keys, toolbar, Tools panel, Alt release). A shape gesture
+        // survives switches *within* the shape family (Box → Sphere
+        // mid-drag re-previews and commits as the new shape — long-
+        // standing behavior); a Select drag dies with the Select tool
+        // (it was never committed, and the marquee preview following
+        // the cursor under a brush tool would be nonsense). The
+        // generic BrushStroke hold is deliberately NOT reconciled:
+        // switching tools mid-stroke and continuing to paint as the
+        // new tool is established behavior the release path already
+        // handles (it seals the merged undo entry unconditionally).
+        match self.interaction {
+            EditInteraction::ShapeFootprint { .. } | EditInteraction::ShapeHeight { .. }
+                if !tool.is_shape() =>
+            {
+                self.cancel_interaction();
+            }
+            EditInteraction::SelectDrag { .. } | EditInteraction::SelectMove { .. }
+                if tool != Tool::Select =>
+            {
+                self.cancel_interaction();
+            }
+            _ => {}
         }
 
         let symmetry = self.editor.symmetry;
@@ -1199,12 +1231,12 @@ impl App {
         let show = !matches!(tool, Tool::Eyedropper | Tool::Select | Tool::Socket);
 
         // Cache key. `cell` is hover-derived for non-shape tools and
-        // for idle shapes; for an active ShapeDrag, `cell` is fixed
-        // to `(0,0,0)` since the drag's own `cache_key` already
+        // for idle shapes; for an active shape gesture, `cell` is fixed
+        // to `(0,0,0)` since the gesture's own cache key already
         // captures everything that affects the preview output
         // (including the current hovered cell in Footprint phase).
         let hovered_cell = self.editor.hovered_voxel.map(|h| h.adjacent_pos);
-        let drag_key = self.shape_drag.map(|d| d.cache_key(cursor_y, hovered_cell));
+        let drag_key = self.interaction.shape_cache_key(cursor_y, hovered_cell);
         let key = if show {
             if drag_key.is_some() {
                 Some((
@@ -1248,31 +1280,35 @@ impl App {
             return;
         }
 
-        // Compute the preview cell list. Active shape drag has its
-        // own dedicated branch (no dependency on `hovered_voxel` in
-        // Height phase, since the cursor lives in screen space); all
-        // other modes need a real hover.
-        let positions: Vec<(i32, i32, i32)> = if let Some(drag) = self.shape_drag {
-            let (anchor, end_3d) = match drag.phase {
-                ShapePhase::Footprint => {
-                    // Footprint: cursor's plane-locked hit is the
-                    // other corner. No hit (cursor off-world) → no
-                    // preview this frame.
-                    let Some(hit) = self.editor.hovered_voxel else {
-                        if let Some(r) = &mut self.renderer {
-                            r.clear_brush_preview();
-                        }
-                        return;
-                    };
-                    (drag.anchor, hit.adjacent_pos)
-                }
-                ShapePhase::Height { .. } => {
-                    // Height: extrude end_on_plane along the plane
-                    // normal by the cursor-Y delta.
-                    let end_3d = drag.extruded_end(cursor_y).expect("Height phase");
-                    (drag.anchor, end_3d)
-                }
-            };
+        // Compute the preview cell list. An active shape gesture has
+        // its own dedicated branch (no dependency on `hovered_voxel`
+        // in Height phase, since the cursor lives in screen space);
+        // all other modes need a real hover.
+        let shape_ends = match self.interaction {
+            EditInteraction::ShapeFootprint { anchor, .. } => {
+                // Footprint: cursor's plane-locked hit is the
+                // other corner. No hit (cursor off-world) → no
+                // preview this frame.
+                let Some(hit) = self.editor.hovered_voxel else {
+                    if let Some(r) = &mut self.renderer {
+                        r.clear_brush_preview();
+                    }
+                    return;
+                };
+                Some((anchor, hit.adjacent_pos))
+            }
+            EditInteraction::ShapeHeight { anchor, .. } => {
+                // Height: extrude end_on_plane along the plane
+                // normal by the cursor-Y delta.
+                let end_3d = self
+                    .interaction
+                    .shape_extruded_end(cursor_y)
+                    .expect("Height phase");
+                Some((anchor, end_3d))
+            }
+            _ => None,
+        };
+        let positions: Vec<(i32, i32, i32)> = if let Some((anchor, end_3d)) = shape_ends {
             // Budget check BEFORE enumerating: the enumeration is the
             // cost being bounded, and it re-runs on every cursor step.
             let cost = shape_cell_cost(tool, anchor, end_3d)
@@ -1287,11 +1323,12 @@ impl App {
                 }
                 return;
             }
+            let plane_axis = self.interaction.locked_plane().map(|p| p.axis);
             let raw = match tool {
                 Tool::Line => line_voxels(anchor, end_3d),
                 Tool::Box => box_voxels(anchor, end_3d),
                 Tool::Sphere => sphere_voxels(anchor, end_3d),
-                Tool::Cylinder => cylinder_voxels(anchor, end_3d, Some(drag.plane.axis)),
+                Tool::Cylinder => cylinder_voxels(anchor, end_3d, plane_axis),
                 _ => Vec::new(),
             };
             expand_with_symmetry(raw, symmetry)
@@ -1333,14 +1370,14 @@ impl App {
     }
 
     /// Refresh the box-selection wireframe **and** the move-drag voxel
-    /// ghost. Both overlays are driven from the same four states and
+    /// ghost. Both overlays are driven from the interaction state and
     /// share one cache gate:
     ///
-    /// 1. **New-selection drag** (`selection_drag_anchor` set):
-    ///    live AABB from anchor → current cell. No ghost.
-    /// 2. **Move-selection drag** (`selection_move_anchor` set):
-    ///    existing AABB translated by `current - anchor`, plus a
-    ///    translucent ghost of the picked-up voxels at the same delta.
+    /// 1. **`SelectDrag`**: live AABB from anchor → current cell.
+    ///    No ghost.
+    /// 2. **`SelectMove`**: existing AABB translated by
+    ///    `current - anchor`, plus a translucent ghost of the
+    ///    picked-up voxels at the same delta.
     /// 3. **Idle with a committed selection**: static AABB, no ghost.
     /// 4. **Nothing**: clear both slots.
     ///
@@ -1351,32 +1388,32 @@ impl App {
     pub(super) fn update_selection_visualization(&mut self) {
         // Resolve the wireframe box and, for a move drag, the live
         // translation delta the ghost follows.
-        let (preview, ghost_delta) = if let Some(anchor) = self.selection_drag_anchor {
-            // New-selection drag — anchor → current end cell.
-            let box_ = self
-                .editor
-                .hovered_voxel
-                .map(|hit| Selection::from_corners(anchor, Self::select_anchor_pos(&hit)));
-            (box_, None)
-        } else if let Some(move_anchor) = self.selection_move_anchor {
-            // Move drag — existing selection translated by the cursor
-            // delta. Falls back to the un-translated selection if
-            // there's no current hover (cursor off-world); the user
-            // sees the box stay put rather than vanish.
-            match (self.editor.selection, self.editor.hovered_voxel) {
-                (Some(sel), Some(hit)) => {
-                    let cur = Self::select_anchor_pos(&hit);
-                    let delta = (
-                        cur.0 - move_anchor.0,
-                        cur.1 - move_anchor.1,
-                        cur.2 - move_anchor.2,
-                    );
-                    (Some(sel.translated(delta)), Some(delta))
-                }
-                _ => (self.editor.selection, Some((0, 0, 0))),
+        let (preview, ghost_delta) = match self.interaction {
+            EditInteraction::SelectDrag { anchor } => {
+                // New-selection drag — anchor → current end cell.
+                let box_ = self
+                    .editor
+                    .hovered_voxel
+                    .map(|hit| Selection::from_corners(anchor, Self::select_anchor_pos(&hit)));
+                (box_, None)
             }
-        } else {
-            (self.editor.selection, None)
+            EditInteraction::SelectMove { anchor, .. } => {
+                // Move drag — existing selection translated by the
+                // cursor delta. Falls back to the un-translated
+                // selection if there's no current hover (cursor
+                // off-world); the user sees the box stay put rather
+                // than vanish.
+                match (self.editor.selection, self.editor.hovered_voxel) {
+                    (Some(sel), Some(hit)) => {
+                        let cur = Self::select_anchor_pos(&hit);
+                        let delta =
+                            (cur.0 - anchor.0, cur.1 - anchor.1, cur.2 - anchor.2);
+                        (Some(sel.translated(delta)), Some(delta))
+                    }
+                    _ => (self.editor.selection, Some((0, 0, 0))),
+                }
+            }
+            _ => (self.editor.selection, None),
         };
 
         if (preview, ghost_delta) == (self.last_selection_box, self.last_ghost_delta) {
@@ -1386,12 +1423,13 @@ impl App {
         self.last_ghost_delta = ghost_delta;
 
         // Build the translated ghost mesh (move drag only) before
-        // borrowing the renderer, so reading `move_ghost_voxels`
+        // borrowing the renderer, so reading the ghost snapshot
         // doesn't tangle with the `&mut renderer` borrow.
-        let ghost_mesh = match ghost_delta {
-            Some(delta) if !self.move_ghost_voxels.is_empty() => {
-                let voxels: Vec<((i32, i32, i32), Voxel)> = self
-                    .move_ghost_voxels
+        let ghost_mesh = match (ghost_delta, &self.interaction) {
+            (Some(delta), EditInteraction::SelectMove { ghost, .. })
+                if !ghost.is_empty() =>
+            {
+                let voxels: Vec<((i32, i32, i32), Voxel)> = ghost
                     .iter()
                     .map(|&((x, y, z), v)| ((x + delta.0, y + delta.1, z + delta.2), v))
                     .collect();
@@ -1418,7 +1456,7 @@ impl App {
     /// world every time the cursor crosses a cell. Extracts the same
     /// content as `copy_selection_to_clipboard`, but keeps absolute
     /// positions since the ghost renders in world space.
-    pub(super) fn begin_move_ghost(&mut self, sel: Selection) {
+    pub(super) fn move_ghost_snapshot(&self, sel: Selection) -> Vec<((i32, i32, i32), Voxel)> {
         // Same dense-sweep bound as the selection operations in
         // `input.rs`: this walks every cell of the AABB, air included,
         // and it runs at *pick-up* — before the user has even dragged.
@@ -1429,16 +1467,14 @@ impl App {
             * extent(sel.min.1, sel.max.1)
             * extent(sel.min.2, sel.max.2);
         if cells > Self::MAX_SELECTION_SWEEP_CELLS {
-            self.move_ghost_voxels.clear();
-            return;
+            return Vec::new();
         }
-        self.move_ghost_voxels = sel
-            .iter_cells()
+        sel.iter_cells()
             .filter_map(|(x, y, z)| {
                 let v = self.world.get_voxel(x, y, z);
                 (!v.is_air()).then_some(((x, y, z), v))
             })
-            .collect();
+            .collect()
     }
 
     /// Refresh the socket gizmo overlay from `editor.sockets`. Each

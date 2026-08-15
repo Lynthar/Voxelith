@@ -107,8 +107,6 @@ pub struct Editor {
     pub hovered_voxel: Option<RaycastHit>,
     /// Color palette
     pub palette: Vec<Voxel>,
-    /// Tool saved before Alt key was pressed (for temporary eyedropper)
-    pub tool_before_alt: Option<Tool>,
     /// Active symmetry mirroring for brush writes (Place / Remove /
     /// Paint / Fill all honor it; Eyedropper doesn't write so it's
     /// exempt). Persists across sessions via prefs.
@@ -142,7 +140,6 @@ impl Editor {
             brush_size: 1,
             hovered_voxel: None,
             palette: Self::default_palette(),
-            tool_before_alt: None,
             symmetry: SymmetryAxes::default(),
             selection: None,
             sockets: Vec::new(),
@@ -180,18 +177,12 @@ impl Editor {
     }
 
     /// Switch to `tool` because the user asked for it (number key,
-    /// toolbar, Tools panel).
-    ///
-    /// Also drops `tool_before_alt`, and that's the whole point of
-    /// routing every explicit switch through here. Alt holds a
-    /// temporary eyedropper and stashes the outgoing tool to restore on
-    /// release — but if the user picked a *new* tool while Alt was
-    /// down, that release used to roll their choice straight back. An
-    /// explicit pick supersedes the stash; only the Alt handler itself
-    /// writes `current_tool` directly.
+    /// toolbar, Tools panel). Alt's temporary eyedropper never comes
+    /// through here — it is derived per read on the app side
+    /// (`effective_tool`), so an explicit pick can't be rolled back by
+    /// an Alt release.
     pub fn select_tool(&mut self, tool: Tool) {
         self.current_tool = tool;
-        self.tool_before_alt = None;
     }
 
     /// Set brush color from palette index. Preserves the brush's
