@@ -30,9 +30,7 @@
 use std::time::{Duration, Instant};
 
 use voxelith::mesh::{patch_to_mesh, ChunkMesh};
-use voxelith::procgen::{
-    LSystemTree, PerlinTerrain, PipelineGraph, VoxelGenerator, WfcGenerator,
-};
+use voxelith::procgen::{LSystemTree, PerlinTerrain, PipelineGraph, VoxelGenerator, WfcGenerator};
 use voxelith::ui::GeneratorChoice;
 
 use super::App;
@@ -335,8 +333,8 @@ mod tests {
     //! so the owner bookkeeping — the part the old cross-reset hack
     //! got wrong — is exercised directly.
 
-    use voxelith::mesh::patch_to_mesh;
     use voxelith::core::Voxel;
+    use voxelith::mesh::patch_to_mesh;
 
     use super::super::App;
     use super::PreviewOwner;

@@ -43,8 +43,8 @@ use super::neighbors::{
     lock_neighbors, neighbor_arcs, voxel_at_local, NeighborArcs, NeighborGuards,
 };
 use super::{
-    ao_to_f32, apply_face_shading, compute_face_ao, face_quad_vertices_sized_ao,
-    unpack_ao, ChunkMesh, Face, Mesher,
+    ao_to_f32, apply_face_shading, compute_face_ao, face_quad_vertices_sized_ao, unpack_ao,
+    ChunkMesh, Face, Mesher,
 };
 use crate::core::{Chunk, ChunkPos, World, CHUNK_SIZE};
 
@@ -88,11 +88,8 @@ impl Mesher for GreedyMesher {
         // the momentary commit is that figure times the number of
         // workers, not per chunk in sequence.
         let estimated_faces = chunk.solid_count() as usize;
-        let mut mesh = ChunkMesh::with_capacity(
-            chunk_pos,
-            estimated_faces * 4,
-            estimated_faces * 6,
-        );
+        let mut mesh =
+            ChunkMesh::with_capacity(chunk_pos, estimated_faces * 4, estimated_faces * 6);
 
         let world_origin = chunk_pos.world_origin();
         for face in Face::ALL {
@@ -172,9 +169,7 @@ fn mesh_face_direction(
             for u_idx in 0..SIZE {
                 let (cx, cy, cz) = cell_for(face, d, u_idx, v_idx);
                 let voxel = chunk.get(cx, cy, cz);
-                if voxel.is_air()
-                    || !is_face_visible(chunk, neighbors, cx, cy, cz, face)
-                {
+                if voxel.is_air() || !is_face_visible(chunk, neighbors, cx, cy, cz, face) {
                     mask[v_idx * SIZE + u_idx] = 0;
                     continue;
                 }
@@ -195,16 +190,12 @@ fn mesh_face_direction(
                 let world_x = world_origin.0 + cx as i32;
                 let world_y = world_origin.1 + cy as i32;
                 let world_z = world_origin.2 + cz as i32;
-                let ao_int = compute_face_ao(
-                    (world_x, world_y, world_z),
-                    face,
-                    |p| {
-                        let lx = p.0 - world_origin.0;
-                        let ly = p.1 - world_origin.1;
-                        let lz = p.2 - world_origin.2;
-                        voxel_at_local(chunk, neighbors, lx, ly, lz).is_solid()
-                    },
-                );
+                let ao_int = compute_face_ao((world_x, world_y, world_z), face, |p| {
+                    let lx = p.0 - world_origin.0;
+                    let ly = p.1 - world_origin.1;
+                    let lz = p.2 - world_origin.2;
+                    voxel_at_local(chunk, neighbors, lx, ly, lz).is_solid()
+                });
                 let packed_ao = pack_ao(ao_int);
                 // Tint zone (0-3) in bits 40+ so voxels of different
                 // zones never merge — the zone must reach export
@@ -262,6 +253,7 @@ fn mesh_face_direction(
 /// to `mesh`. The mask key contains both color and 4 corner AO —
 /// they apply uniformly across the merged rectangle (cells with
 /// different AO can't merge).
+#[allow(clippy::too_many_arguments)] // flat quad geometry — a struct would just move nine names one level down
 fn emit_merged_quad(
     face: Face,
     d: usize,
@@ -292,14 +284,7 @@ fn emit_merged_quad(
         ao_to_f32(ao_int[3]),
     ];
     let mut vertices = face_quad_vertices_sized_ao(
-        world_x,
-        world_y,
-        world_z,
-        face,
-        w as f32,
-        h as f32,
-        color,
-        ao,
+        world_x, world_y, world_z, face, w as f32, h as f32, color, ao,
     );
     for vert in &mut vertices {
         vert.tint_zone = tint_zone;

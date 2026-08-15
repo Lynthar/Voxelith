@@ -27,12 +27,12 @@
 
 pub mod agent_ops;
 pub mod bake;
+pub mod core;
+pub mod editor;
 pub mod eval;
 pub mod exec;
-pub mod core;
-pub mod mesh;
-pub mod editor;
 pub mod io;
+pub mod mesh;
 pub mod procgen;
 
 // CPU ray-cast views of a world. Sits below the agent front ends and
@@ -59,9 +59,9 @@ pub mod render;
 pub mod ui;
 
 // Re-export commonly used types
-pub use core::{Voxel, Chunk, ChunkPos, World};
-pub use mesh::{ChunkMesh, NaiveMesher, Mesher};
+pub use core::{Chunk, ChunkPos, Voxel, World};
 pub use editor::Editor;
+pub use mesh::{ChunkMesh, Mesher, NaiveMesher};
 #[cfg(feature = "gui")]
 pub use render::Renderer;
 #[cfg(feature = "gui")]

@@ -68,19 +68,15 @@ jobs:
         run: cargo build --no-default-features --features mcp-http --all-targets --verbose
 
 
-      # Informational for now. The codebase carries a handful of
-      # pre-existing clippy lints and uses a deliberate narrow manual
-      # format that differs from rustfmt's defaults, so neither is a
-      # hard gate yet. Flip `continue-on-error` to false (and add
-      # `-- -D warnings` to clippy) once a dedicated cleanup pass lands —
-      # see docs/STATUS.md (Tooling / CI).
-      - name: Clippy (informational)
-        run: cargo clippy --all-targets
-        continue-on-error: true
+      # Hard gates since the 2026-08 cleanup pass: the tree is at zero
+      # clippy warnings and rustfmt-clean (hand-aligned tables carry
+      # `#[rustfmt::skip]`), and these keep it there — a new warning or
+      # an unformatted hunk fails the build instead of accruing.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Format check (informational)
+      - name: Format check
         run: cargo fmt --check
-        continue-on-error: true
 
   # The other half of the platform story. Two behaviors regress ONLY
   # here — the explicit first-frame request_redraw in handler::resumed

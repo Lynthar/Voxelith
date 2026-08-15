@@ -800,7 +800,7 @@ mod tests {
             brush_color: [12, 34, 56, 200],
             palette: vec![[1, 2, 3, 4], [255, 254, 253, 252]],
             selected_tool: 4,
-            brush_flags: 0b11, // emissive + metallic both set
+            brush_flags: 0b11,  // emissive + metallic both set
             brush_tint_zone: 2, // secondary faction zone
             sockets: vec![
                 SocketData {
@@ -907,7 +907,12 @@ mod tests {
         // the default scene instead of bricking startup.
         let mut world = World::new();
         for i in 0..40 {
-            world.set_voxel(i, i % 8, (i * 2) % 16, Voxel::from_rgb((i * 6) as u8, 100, 200));
+            world.set_voxel(
+                i,
+                i % 8,
+                (i * 2) % 16,
+                Voxel::from_rgb((i * 6) as u8, 100, 200),
+            );
         }
         world.set_voxel(40, 0, -40, Voxel::from_rgb(1, 2, 3)); // forces a 2nd chunk
         let project = Project::from_world(&world);
@@ -949,8 +954,7 @@ mod tests {
         // What the helper writes — the temp name carries the pid so two
         // processes saving the same project can't share (and truncate)
         // one temp file.
-        let tmp =
-            path.with_file_name(format!("proj.vxlt.tmp{}", std::process::id()));
+        let tmp = path.with_file_name(format!("proj.vxlt.tmp{}", std::process::id()));
 
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
@@ -964,7 +968,10 @@ mod tests {
 
         save_world_with_state(&world, state.clone(), Default::default(), &path).unwrap();
         assert!(path.exists(), "save produced no file");
-        assert!(!tmp.exists(), "temp file left behind after a successful save");
+        assert!(
+            !tmp.exists(),
+            "temp file left behind after a successful save"
+        );
 
         let (loaded_world, loaded_state, _) = load_world_with_state(&path).unwrap();
         assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
@@ -1000,11 +1007,8 @@ mod tests {
         out.extend_from_slice(&PROJECT_MAGIC);
         out.extend_from_slice(&PROJECT_VERSION.to_le_bytes());
         let mut enc = GzEncoder::new(&mut out, Compression::default());
-        let header = serde_json::to_string(&(
-            ProjectMetadata::default(),
-            EditorState::default(),
-        ))
-        .unwrap();
+        let header =
+            serde_json::to_string(&(ProjectMetadata::default(), EditorState::default())).unwrap();
         enc.write_all(&(header.len() as u32).to_le_bytes()).unwrap();
         enc.write_all(header.as_bytes()).unwrap();
         enc.write_all(&(chunks.len() as u32).to_le_bytes()).unwrap();
@@ -1109,11 +1113,11 @@ mod tests {
 
         // The same coordinate twice: the writer never does this, so the
         // count and the stream disagree.
-        let bytes = raw_project(&[
-            ((0, 0, 0), full_chunk_rle()),
-            ((0, 0, 0), full_chunk_rle()),
-        ]);
-        assert!(Project::load(&mut &bytes[..]).is_err(), "duplicate accepted");
+        let bytes = raw_project(&[((0, 0, 0), full_chunk_rle()), ((0, 0, 0), full_chunk_rle())]);
+        assert!(
+            Project::load(&mut &bytes[..]).is_err(),
+            "duplicate accepted"
+        );
 
         // Version 0 was never written by any build.
         let mut bytes = raw_project(&[]);

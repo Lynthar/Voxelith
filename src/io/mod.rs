@@ -19,19 +19,15 @@ mod vox;
 mod voxelize;
 
 pub use gltf::{
-    export_glb, export_glb_smoothed, export_glb_smoothed_with_transform,
-    export_glb_with_transform, ExportTransform, GlbError, GlbStats, Pivot, SocketNode,
-    UpAxis,
+    export_glb, export_glb_smoothed, export_glb_smoothed_with_transform, export_glb_with_transform,
+    ExportTransform, GlbError, GlbStats, Pivot, SocketNode, UpAxis,
 };
 pub use obj::{export_obj, export_obj_smoothed, ObjError, ObjStats};
 pub use project::{
-    DEFAULT_CAMERA_POSITION, EditorState, Project, ProjectError, ProjectMetadata, SocketData,
-    load_world, load_world_with_state, save_world_with_state,
+    load_world, load_world_with_state, save_world_with_state, EditorState, Project, ProjectError,
+    ProjectMetadata, SocketData, DEFAULT_CAMERA_POSITION,
 };
-pub use vox::{
-    VoxError, VoxModel, default_palette,
-    export_vox, import_vox,
-};
+pub use vox::{default_palette, export_vox, import_vox, VoxError, VoxModel};
 pub use voxelize::voxelize_glb;
 
 use std::io::{self, Read};

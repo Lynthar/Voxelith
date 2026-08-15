@@ -121,9 +121,7 @@ impl ViewKind {
     /// [`ViewKind::parse_list`], which is the one caller that has
     /// anything useful to say about a bad name.
     pub fn from_name(name: &str) -> Option<Self> {
-        ViewKind::ALL
-            .into_iter()
-            .find(|kind| kind.as_str() == name)
+        ViewKind::ALL.into_iter().find(|kind| kind.as_str() == name)
     }
 
     /// Parse a comma-separated list, where `all` means every view.
@@ -139,7 +137,10 @@ impl ViewKind {
             }
             let kind = ViewKind::from_name(&name.to_ascii_lowercase()).ok_or_else(|| {
                 let known: Vec<&str> = ViewKind::ALL.iter().map(|k| k.as_str()).collect();
-                format!("unknown view {name:?}; pick from {} or all", known.join(", "))
+                format!(
+                    "unknown view {name:?}; pick from {} or all",
+                    known.join(", ")
+                )
             })?;
             // Rendering the same view twice would just write the same
             // file twice — quietly drop the repeat rather than fail on
@@ -313,10 +314,8 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
     // back a picture of the background. This is the box's support
     // distance in `forward`: for an axis view, half the thickness the
     // camera actually looks through.
-    let depth = half.x * forward.x.abs()
-        + half.y * forward.y.abs()
-        + half.z * forward.z.abs()
-        + 2.0;
+    let depth =
+        half.x * forward.x.abs() + half.y * forward.y.abs() + half.z * forward.z.abs() + 2.0;
     let origin = center - forward * depth;
 
     let light_dir = key_light(forward);
@@ -444,11 +443,7 @@ fn cast(
         from.y.floor() as i32,
         from.z.floor() as i32,
     );
-    let step = (
-        sign(direction.x),
-        sign(direction.y),
-        sign(direction.z),
-    );
+    let step = (sign(direction.x), sign(direction.y), sign(direction.z));
     // An axis the ray is parallel to never moves. If it already sits
     // outside the box on that axis, no amount of stepping brings it
     // back — which is most of the frame in an axis view, where two of
@@ -533,11 +528,7 @@ fn cast(
 /// that says "this glows", and shading one like ordinary paint hides
 /// the very flag the agent set.
 fn shade(world: &World, hit: &Hit, forward: Vec3, light_dir: Vec3) -> [u8; 3] {
-    let base = [
-        hit.voxel.r as f32,
-        hit.voxel.g as f32,
-        hit.voxel.b as f32,
-    ];
+    let base = [hit.voxel.r as f32, hit.voxel.g as f32, hit.voxel.b as f32];
     if hit.voxel.is_emissive() {
         return [base[0] as u8, base[1] as u8, base[2] as u8];
     }
@@ -807,7 +798,10 @@ mod tests {
         assert!(side_of(ViewKind::Top, false) > 0.0, "top: +X is right");
         // …and the red one has to be on the other side, or the test
         // would pass on an image that drew only one voxel.
-        assert!(side_of(ViewKind::Front, true) < 0.0, "front: origin is left");
+        assert!(
+            side_of(ViewKind::Front, true) < 0.0,
+            "front: origin is left"
+        );
 
         // Left looks along +X and the two are in line, so the near one
         // — the red at the origin — is all that's visible.
@@ -872,9 +866,7 @@ mod tests {
         let world = cube(1, voxel);
         let view = render(&world, ViewKind::Front, 32).unwrap();
         assert!(
-            pixels_of(&view)
-                .chunks(3)
-                .any(|p| p == [250, 200, 40]),
+            pixels_of(&view).chunks(3).any(|p| p == [250, 200, 40]),
             "an emissive voxel should reach the image unshaded"
         );
     }

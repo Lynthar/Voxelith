@@ -19,7 +19,10 @@ impl App {
                 // differently from the X.
                 UiAction::Exit => self.guard_then(PendingAction::Exit),
                 UiAction::Undo => {
-                    if self.editor.undo(&mut self.document.world, &mut self.document.graph) {
+                    if self
+                        .editor
+                        .undo(&mut self.document.world, &mut self.document.graph)
+                    {
                         // Voxel entries are flagged by the mesh rebuild;
                         // a graph-only transition reaches no chunk, so
                         // the step has to say so itself.
@@ -27,7 +30,10 @@ impl App {
                     }
                 }
                 UiAction::Redo => {
-                    if self.editor.redo(&mut self.document.world, &mut self.document.graph) {
+                    if self
+                        .editor
+                        .redo(&mut self.document.world, &mut self.document.graph)
+                    {
                         self.document.bump();
                     }
                 }
@@ -99,8 +105,7 @@ impl App {
                             }
                             CameraView::Side => {
                                 renderer.camera_controller.pitch = 0.0;
-                                renderer.camera_controller.yaw =
-                                    std::f32::consts::FRAC_PI_2;
+                                renderer.camera_controller.yaw = std::f32::consts::FRAC_PI_2;
                             }
                         }
                         // Same rationale as ResetCamera: apply now so the

@@ -37,6 +37,7 @@ pub struct ToolSpec {
 }
 
 /// Every tool, in toolbar order.
+#[rustfmt::skip] // one row per tool — the table reads as a table
 pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { tool: Tool::Place, icon: "+", note: "", separator_before: false },
     ToolSpec { tool: Tool::Remove, icon: "-", note: "", separator_before: false },
@@ -235,8 +236,7 @@ mod tests {
     fn every_tool_has_exactly_one_spec() {
         use crate::editor::Tool::*;
         let all = [
-            Place, Remove, Paint, Eyedropper, Fill, Line, Box, Sphere, Cylinder,
-            Select, Socket,
+            Place, Remove, Paint, Eyedropper, Fill, Line, Box, Sphere, Cylinder, Select, Socket,
         ];
         for tool in all {
             let count = TOOL_SPECS.iter().filter(|s| s.tool == tool).count();

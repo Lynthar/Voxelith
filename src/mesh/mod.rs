@@ -189,13 +189,19 @@ pub(crate) fn apply_face_shading(color: [f32; 4], face: Face) -> [f32; 4] {
         Face::NegX | Face::PosZ => 0.75,
         Face::NegY => 0.6,
     };
-    [color[0] * shade, color[1] * shade, color[2] * shade, color[3]]
+    [
+        color[0] * shade,
+        color[1] * shade,
+        color[2] * shade,
+        color[3],
+    ]
 }
 
 /// Build the 4 vertices of a `w × h` face with explicit per-vertex
 /// AO values. Wraps `face_quad_vertices_sized` and writes
 /// `ao[i]` into `vertices[i].ao`. Per-vertex AO order matches
 /// `face_vertex_signs` (used by `compute_face_ao`).
+#[allow(clippy::too_many_arguments)] // flat quad geometry — a struct would just move eight names one level down
 pub(crate) fn face_quad_vertices_sized_ao(
     x: f32,
     y: f32,

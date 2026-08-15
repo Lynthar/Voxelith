@@ -57,10 +57,7 @@ impl SocketMesh {
     /// rotation here matches `Socket::rotation` exactly (shortest arc
     /// from +Y to the normal) so the drawn pin and the exported node
     /// orientation can't drift apart.
-    pub fn new(
-        device: &wgpu::Device,
-        sockets: &[([f32; 3], [f32; 3])],
-    ) -> Option<Self> {
+    pub fn new(device: &wgpu::Device, sockets: &[([f32; 3], [f32; 3])]) -> Option<Self> {
         if sockets.is_empty() {
             return None;
         }

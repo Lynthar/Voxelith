@@ -60,12 +60,10 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     // process, which here is the editor and everything unsaved in it.
     // Splitting the two steps lets us decode only the textures a
     // material actually samples, under explicit limits.
-    let gltf::Gltf { document, blob } =
-        gltf::Gltf::from_slice(bytes).context("Parsing GLB")?;
+    let gltf::Gltf { document, blob } = gltf::Gltf::from_slice(bytes).context("Parsing GLB")?;
     // `None` base path: any image or buffer referencing an external
     // file URI is refused rather than read off the local disk.
-    let buffers = gltf::import_buffers(&document, None, blob)
-        .context("Reading GLB buffers")?;
+    let buffers = gltf::import_buffers(&document, None, blob).context("Reading GLB buffers")?;
     let textures = decode_base_color_textures(&document, &buffers);
 
     // Prefer the explicit default scene; fall back to the first scene;
@@ -73,7 +71,9 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     // produce GLBs with no scene node — rare but seen in the wild).
     let mut triangles = Vec::new();
     let mut limits = WalkLimits::default();
-    let scene = document.default_scene().or_else(|| document.scenes().next());
+    let scene = document
+        .default_scene()
+        .or_else(|| document.scenes().next());
     if let Some(scene) = scene {
         for node in scene.nodes() {
             walk_node(
@@ -114,8 +114,7 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     let max_extent = extent.max_element().max(1e-6);
     let voxel_size = max_extent / resolution as f32;
 
-    let accumulator =
-        rasterize_triangles(&triangles, aabb_min, aabb_max, voxel_size, resolution);
+    let accumulator = rasterize_triangles(&triangles, aabb_min, aabb_max, voxel_size, resolution);
     let surface = finalize_surface(accumulator);
     let filled = fill_interior(&surface);
     let mut patch = build_patch(filled);
@@ -124,9 +123,9 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
         // who picked the file gets to see. A truncated import that
         // looks like a complete one is how someone exports a model with
         // half its geometry.
-        patch
-            .notes
-            .push("only part of this file was voxelized — see the log for which limit it hit".into());
+        patch.notes.push(
+            "only part of this file was voxelized — see the log for which limit it hit".into(),
+        );
     }
     Ok(patch)
 }
@@ -193,8 +192,7 @@ fn decode_base_color_textures(
             log::warn!("Skipping texture {index}: buffer out of range");
             continue;
         };
-        let Some(encoded) = buffer.get(view.offset()..view.offset() + view.length())
-        else {
+        let Some(encoded) = buffer.get(view.offset()..view.offset() + view.length()) else {
             log::warn!("Skipping texture {index}: view out of range");
             continue;
         };
@@ -336,9 +334,7 @@ fn walk_node(
 
 fn mat4_from_transform(t: gltf::scene::Transform) -> Mat4 {
     match t {
-        gltf::scene::Transform::Matrix { matrix } => {
-            Mat4::from_cols_array_2d(&matrix)
-        }
+        gltf::scene::Transform::Matrix { matrix } => Mat4::from_cols_array_2d(&matrix),
         gltf::scene::Transform::Decomposed {
             translation,
             rotation,
@@ -402,13 +398,11 @@ fn extract_from_mesh(
         // with the texture and factor rather than replacing them. Most
         // exported meshes omit it entirely and let the texture (or the
         // bare factor) carry the color.
-        let vertex_colors: Option<Vec<[f32; 4]>> = reader
-            .read_colors(0)
-            .map(|c| c.into_rgba_f32().collect());
+        let vertex_colors: Option<Vec<[f32; 4]>> =
+            reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
 
-        let tex_coords: Option<Vec<[f32; 2]>> = reader
-            .read_tex_coords(0)
-            .map(|tc| tc.into_f32().collect());
+        let tex_coords: Option<Vec<[f32; 2]>> =
+            reader.read_tex_coords(0).map(|tc| tc.into_f32().collect());
 
         let material = primitive.material();
         let pbr = material.pbr_metallic_roughness();
@@ -431,9 +425,8 @@ fn extract_from_mesh(
             compose_base_color(vertex, tex_sample, base_factor)
         };
 
-        let world_pos = |i: usize| -> Vec3 {
-            transform.transform_point3(Vec3::from_array(positions[i]))
-        };
+        let world_pos =
+            |i: usize| -> Vec3 { transform.transform_point3(Vec3::from_array(positions[i])) };
 
         // glTF triangle primitives may be indexed or unindexed; treat
         // the unindexed case as identity indices to keep emission
@@ -584,8 +577,7 @@ fn rasterize_triangles(
         // longest edge measured in voxels, guaranteeing ≥1 sample per
         // voxel it crosses.
         let area = 0.5 * (tri.v1 - tri.v0).cross(tri.v2 - tri.v0).length();
-        let target_samples =
-            ((area / voxel_area * 4.0).ceil() as usize).max(4);
+        let target_samples = ((area / voxel_area * 4.0).ceil() as usize).max(4);
         let area_n = (target_samples as f32).sqrt().ceil() as usize;
 
         let longest_edge = (tri.v1 - tri.v0)
@@ -616,17 +608,13 @@ fn rasterize_triangles(
                 );
                 let entry = grid.entry(cell).or_insert([0; 5]);
                 entry[0] +=
-                    (tri.c0[0] as f32 * w + tri.c1[0] as f32 * u + tri.c2[0] as f32 * v)
-                        as u32;
+                    (tri.c0[0] as f32 * w + tri.c1[0] as f32 * u + tri.c2[0] as f32 * v) as u32;
                 entry[1] +=
-                    (tri.c0[1] as f32 * w + tri.c1[1] as f32 * u + tri.c2[1] as f32 * v)
-                        as u32;
+                    (tri.c0[1] as f32 * w + tri.c1[1] as f32 * u + tri.c2[1] as f32 * v) as u32;
                 entry[2] +=
-                    (tri.c0[2] as f32 * w + tri.c1[2] as f32 * u + tri.c2[2] as f32 * v)
-                        as u32;
+                    (tri.c0[2] as f32 * w + tri.c1[2] as f32 * u + tri.c2[2] as f32 * v) as u32;
                 entry[3] +=
-                    (tri.c0[3] as f32 * w + tri.c1[3] as f32 * u + tri.c2[3] as f32 * v)
-                        as u32;
+                    (tri.c0[3] as f32 * w + tri.c1[3] as f32 * u + tri.c2[3] as f32 * v) as u32;
                 entry[4] += 1;
             }
         }
@@ -644,9 +632,7 @@ fn rasterize_triangles(
 /// into the glTF export's `COLOR_0.a` to confuse an engine shader — or,
 /// for a fully transparent black texel, produced a solid voxel that
 /// packs to exactly the "no face here" sentinel.
-fn finalize_surface(
-    grid: HashMap<(i32, i32, i32), ColorAccum>,
-) -> HashMap<(i32, i32, i32), Voxel> {
+fn finalize_surface(grid: HashMap<(i32, i32, i32), ColorAccum>) -> HashMap<(i32, i32, i32), Voxel> {
     grid.into_iter()
         .map(|(pos, [r, g, b, _a, count])| {
             let count = count.max(1); // can't be 0, but be paranoid
@@ -660,9 +646,7 @@ fn finalize_surface(
 
 // -------------------- interior fill --------------------
 
-fn fill_interior(
-    surface: &HashMap<(i32, i32, i32), Voxel>,
-) -> HashMap<(i32, i32, i32), Voxel> {
+fn fill_interior(surface: &HashMap<(i32, i32, i32), Voxel>) -> HashMap<(i32, i32, i32), Voxel> {
     if surface.is_empty() {
         return HashMap::new();
     }
@@ -747,12 +731,11 @@ fn fill_interior(
     // Default interior color = mean of all surface colors. Users
     // rarely see interior voxels (only when they remove surface cells)
     // but the mean keeps post-edit colors visually consistent.
-    let (r_sum, g_sum, b_sum, count) =
-        surface
-            .values()
-            .fold((0u64, 0u64, 0u64, 0u64), |(r, g, b, c), v| {
-                (r + v.r as u64, g + v.g as u64, b + v.b as u64, c + 1)
-            });
+    let (r_sum, g_sum, b_sum, count) = surface
+        .values()
+        .fold((0u64, 0u64, 0u64, 0u64), |(r, g, b, c), v| {
+            (r + v.r as u64, g + v.g as u64, b + v.b as u64, c + 1)
+        });
     let fill_voxel = if count > 0 {
         Voxel::from_rgb(
             (r_sum / count) as u8,
@@ -890,8 +873,7 @@ mod tests {
         // The regressed case: a white COLOR_0 beside a texture must not
         // wash the texture out (old code picked vertex *or* texture).
         let tex = [0.2, 0.4, 0.6, 1.0];
-        let out =
-            compose_base_color(Some([1.0, 1.0, 1.0, 1.0]), Some(tex), [1.0, 1.0, 1.0, 1.0]);
+        let out = compose_base_color(Some([1.0, 1.0, 1.0, 1.0]), Some(tex), [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(out, pack_rgba(tex));
     }
 
@@ -950,13 +932,7 @@ mod tests {
             c1: c,
             c2: c,
         };
-        let grid = rasterize_triangles(
-            &[tri],
-            Vec3::ZERO,
-            Vec3::new(10.0, 10.0, 0.0),
-            1.0,
-            10,
-        );
+        let grid = rasterize_triangles(&[tri], Vec3::ZERO, Vec3::new(10.0, 10.0, 0.0), 1.0, 10);
         let widest = grid.keys().map(|&(x, _, _)| x).max().unwrap();
         let tallest = grid.keys().map(|&(_, y, _)| y).max().unwrap();
         assert_eq!(widest, 9, "10 cells across means indices 0..=9");
@@ -973,7 +949,7 @@ mod tests {
     fn a_self_referencing_node_is_pruned_rather_than_followed() {
         let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"children":[0]}]}"#;
         let mut chunk = json.to_vec();
-        while chunk.len() % 4 != 0 {
+        while !chunk.len().is_multiple_of(4) {
             chunk.push(b' ');
         }
         let mut glb = Vec::new();
@@ -1067,8 +1043,10 @@ mod tests {
             }
         }
         // Surface count unchanged (98 cells for a 5×5×5 hollow shell).
-        let surface_count =
-            filled.iter().filter(|(p, _)| surface.contains_key(p)).count();
+        let surface_count = filled
+            .iter()
+            .filter(|(p, _)| surface.contains_key(p))
+            .count();
         assert_eq!(surface_count, surface.len());
     }
 
@@ -1105,7 +1083,7 @@ mod tests {
         // Two samples land on the same cell with different colors;
         // the cell should end up at their per-channel mean.
         let mut grid: HashMap<(i32, i32, i32), ColorAccum> = HashMap::new();
-        grid.insert((1, 2, 3), [200 + 100, 0 + 100, 100 + 200, 255 + 255, 2]);
+        grid.insert((1, 2, 3), [200 + 100, 100, 100 + 200, 255 + 255, 2]);
         let surface = finalize_surface(grid);
         let v = surface.get(&(1, 2, 3)).expect("cell exists");
         assert_eq!(v.r, 150);

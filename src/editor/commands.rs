@@ -71,7 +71,10 @@ pub struct VoxelChange {
 impl Command {
     /// Create a batch voxel command
     pub fn set_voxels(changes: Vec<VoxelChange>) -> Self {
-        Command::SetVoxels { changes, graph: None }
+        Command::SetVoxels {
+            changes,
+            graph: None,
+        }
     }
 
     /// Create a batch that also replaces the document's pipeline graph
@@ -122,8 +125,7 @@ impl Command {
     /// Check if command would actually change anything
     pub fn is_noop(&self) -> bool {
         let Command::SetVoxels { changes, graph } = self;
-        let voxels_noop =
-            changes.is_empty() || changes.iter().all(|c| c.old_voxel == c.new_voxel);
+        let voxels_noop = changes.is_empty() || changes.iter().all(|c| c.old_voxel == c.new_voxel);
         let graph_noop = graph.as_ref().is_none_or(|g| g.before == g.after);
         voxels_noop && graph_noop
     }
@@ -273,12 +275,7 @@ impl CommandHistory {
     ///
     /// Voxel-only, like [`execute`](Self::execute) — brush strokes are
     /// the only caller and never carry a graph rider.
-    pub fn execute_merge(
-        &mut self,
-        command: Command,
-        world: &mut World,
-        merge_window: Duration,
-    ) {
+    pub fn execute_merge(&mut self, command: Command, world: &mut World, merge_window: Duration) {
         debug_assert!(
             command.graph_rider().is_none(),
             "graph-carrying commands go through execute_with_graph"
@@ -290,7 +287,7 @@ impl CommandHistory {
 
         let in_window = self
             .last_push_at
-            .map_or(false, |t| t.elapsed() < merge_window);
+            .is_some_and(|t| t.elapsed() < merge_window);
 
         if self.stroke_open && in_window {
             if let Some(prev) = self.undo_stack.back_mut() {
@@ -485,7 +482,10 @@ mod tests {
         let mut sorted = seen.clone();
         sorted.dedup();
         assert_eq!(sorted.len(), seen.len(), "a generation repeated: {seen:?}");
-        assert!(seen.windows(2).all(|w| w[0] < w[1]), "not monotonic: {seen:?}");
+        assert!(
+            seen.windows(2).all(|w| w[0] < w[1]),
+            "not monotonic: {seen:?}"
+        );
     }
 
     #[test]

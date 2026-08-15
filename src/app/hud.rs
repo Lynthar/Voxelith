@@ -9,8 +9,9 @@
 //!
 //! The numbers shown must come from the *same* math the commit paths
 //! use, so the HUD can never disagree with what a click would
-//! produce: shape height goes through `ShapeDrag::extruded_end`
-//! (`commit_shape`'s source of truth), the footprint end cell is the
+//! produce: shape height goes through
+//! `EditInteraction::shape_extruded_end` (`commit_shape`'s source of
+//! truth), the footprint end cell is the
 //! plane-locked `hovered_voxel.adjacent_pos` (same as
 //! `update_brush_preview`), and the move delta mirrors
 //! `update_selection_visualization`.
@@ -98,8 +99,7 @@ impl App {
                 // plane the drag-paint is pinned to.
                 detail = Some(format!("plane {}", plane_label(p.axis, p.sign)));
             }
-            EditInteraction::BrushStroke { plane: None, .. }
-            | EditInteraction::Idle => {}
+            EditInteraction::BrushStroke { plane: None, .. } | EditInteraction::Idle => {}
         }
 
         let symmetry = if tool_uses_symmetry(tool) {

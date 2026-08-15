@@ -138,11 +138,7 @@ pub fn mirror_pos(sel: Selection, axis: Axis, pos: (i32, i32, i32)) -> (i32, i32
 ///
 /// The function is generic over the mapping so rotation / mirror /
 /// translation all share the same overlap bookkeeping.
-pub fn build_remap_changes<F>(
-    world: &World,
-    sel: Selection,
-    mapping: F,
-) -> Vec<VoxelChange>
+pub fn build_remap_changes<F>(world: &World, sel: Selection, mapping: F) -> Vec<VoxelChange>
 where
     F: Fn((i32, i32, i32)) -> (i32, i32, i32),
 {
@@ -183,7 +179,11 @@ where
             if old_voxel == new_voxel {
                 None
             } else {
-                Some(VoxelChange { pos, old_voxel, new_voxel })
+                Some(VoxelChange {
+                    pos,
+                    old_voxel,
+                    new_voxel,
+                })
             }
         })
         .collect()
@@ -207,11 +207,7 @@ pub fn rotate_selection_changes(
 /// Convenience: mirror `sel`'s contents across the midplane
 /// perpendicular to `axis`. Returns the changes; the AABB is
 /// unchanged so the caller doesn't update `editor.selection`.
-pub fn mirror_selection_changes(
-    world: &World,
-    sel: Selection,
-    axis: Axis,
-) -> Vec<VoxelChange> {
+pub fn mirror_selection_changes(world: &World, sel: Selection, axis: Axis) -> Vec<VoxelChange> {
     build_remap_changes(world, sel, |p| mirror_pos(sel, axis, p))
 }
 
@@ -344,7 +340,11 @@ mod tests {
                 let cw = rotate_pos(s, axis, Quarter::Cw, cell);
                 let s_cw = rotated_aabb(s, axis, Quarter::Cw);
                 let back = rotate_pos(s_cw, axis, Quarter::Ccw, cw);
-                assert_eq!(back, cell, "CW then CCW around {:?} should round-trip {:?}", axis, cell);
+                assert_eq!(
+                    back, cell,
+                    "CW then CCW around {:?} should round-trip {:?}",
+                    axis, cell
+                );
             }
         }
     }
@@ -376,7 +376,11 @@ mod tests {
                     assert!(
                         new_sel.contains(p),
                         "rotate {:?} {:?}: {:?} → {:?} not in {:?}",
-                        axis, q, cell, p, new_sel
+                        axis,
+                        q,
+                        cell,
+                        p,
+                        new_sel
                     );
                 }
             }

@@ -23,10 +23,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::core::Voxel;
 
-use super::{
-    GenError, GenResult, GeneratorCategory, GeneratorMeta,
-    VoxelGenerator, VoxelPatch,
-};
+use super::{GenError, GenResult, GeneratorCategory, GeneratorMeta, VoxelGenerator, VoxelPatch};
 
 /// Cubic side length of each tile, in voxels.
 pub const WFC_TILE_SIZE: usize = 4;
@@ -62,23 +59,16 @@ pub struct Tileset {
 /// distinct visual / structural theme. New themes go here +
 /// [`Self::build`] + [`Self::label`]; UI dropdowns pick from
 /// [`Self::ALL`].
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum WfcTileset {
     /// Stone walls, floors, T-junctions, doorways. Single ground
     /// layer with walls rising the full tile height.
+    #[default]
     Dungeon,
     /// Grass plots, asphalt roads with sidewalks, intersections,
     /// and small buildings rising above grass. Connector IDs
     /// `0 = grass-side`, `1 = road-side`.
     City,
-}
-
-impl Default for WfcTileset {
-    fn default() -> Self {
-        Self::Dungeon
-    }
 }
 
 impl WfcTileset {
@@ -104,13 +94,13 @@ impl WfcTileset {
 /// 4 T-junctions / 1 cross / 2 walls-with-door / 4 floor-with-door-mouth.
 /// Connector IDs (matched by complement — see the module docs):
 /// - `0` = "open" (no wall on that face — fits any other `0`, including
-///         the grid boundary)
+///   the grid boundary)
 /// - `1` = "wall" (wall continues across the face — only other walls fit)
 /// - `2` = "doorway mouth" (a wall's open door side; complemented only by
-///         `3`, so a mouth must seat against a door-socket floor and can
-///         never face another mouth or the grid edge)
+///   `3`, so a mouth must seat against a door-socket floor and can
+///   never face another mouth or the grid edge)
 /// - `3` = "doorway socket" (the floor side that receives a door mouth;
-///         carried by the `floor_door_*` tiles)
+///   carried by the `floor_door_*` tiles)
 ///
 /// Floor is weighted heaviest so output is mostly open ground;
 /// T-junctions, cross, and door tiles are progressively rarer to keep
@@ -326,7 +316,10 @@ fn city_tileset() -> Tileset {
     // Roads: straight + 4 corners + 4 T + 1 cross. Each is built
     // by `road_y0_pattern` from the four flags marking which faces
     // the asphalt strip exits.
-    let road_specs: &[(&'static str, [u8; 4], (bool, bool, bool, bool), f32)] = &[
+    // (name, connectors, which faces the asphalt strip exits, weight).
+    type RoadSpec = (&'static str, [u8; 4], (bool, bool, bool, bool), f32);
+    #[rustfmt::skip] // hand-aligned columns: the flag grid IS the road shape
+    let road_specs: &[RoadSpec] = &[
         ("road_x",            [1, 1, 0, 0], (true,  true,  false, false), 1.5),
         ("road_z",            [0, 0, 1, 1], (false, false, true,  true ), 1.5),
         ("road_corner_pxpz",  [1, 0, 1, 0], (true,  false, true,  false), 0.4),
@@ -437,8 +430,7 @@ fn road_y0_pattern(
     // appears framed by walkway, even on faces with no road exit.
     for x in 0..TILE_SIZE {
         for z in 0..TILE_SIZE {
-            let on_perimeter =
-                x == 0 || x == TILE_SIZE - 1 || z == 0 || z == TILE_SIZE - 1;
+            let on_perimeter = x == 0 || x == TILE_SIZE - 1 || z == 0 || z == TILE_SIZE - 1;
             if on_perimeter && p[idx(x, 0, z)] == grass {
                 p[idx(x, 0, z)] = sidewalk;
             }
@@ -458,13 +450,7 @@ fn idx(x: usize, y: usize, z: usize) -> usize {
 /// always present so all extensions meet cleanly. Used for the 2
 /// straight walls and the 4 corners. Solid cells are filled with
 /// `color`; the rest stay `Voxel::AIR`.
-fn wall_pattern(
-    px: bool,
-    nx: bool,
-    pz: bool,
-    nz: bool,
-    color: Voxel,
-) -> [Voxel; TILE_VOLUME] {
+fn wall_pattern(px: bool, nx: bool, pz: bool, nz: bool, color: Voxel) -> [Voxel; TILE_VOLUME] {
     let mut p = [Voxel::AIR; TILE_VOLUME];
 
     // Central pillar.
@@ -601,15 +587,22 @@ impl VoxelGenerator for WfcGenerator {
         let w = self.width as usize;
         let d = self.depth as usize;
         let n_cells = w * d;
-        let all_allowed: u64 =
-            if n_tiles == 64 { !0 } else { (1u64 << n_tiles) - 1 };
+        let all_allowed: u64 = if n_tiles == 64 {
+            !0
+        } else {
+            (1u64 << n_tiles) - 1
+        };
 
-        let mut cells: Vec<Cell> =
-            vec![Cell { allowed: all_allowed, collapsed: false }; n_cells];
+        let mut cells: Vec<Cell> = vec![
+            Cell {
+                allowed: all_allowed,
+                collapsed: false
+            };
+            n_cells
+        ];
         let mut rng = StdRng::seed_from_u64(self.seed as u64);
 
-        let weights: Vec<f32> =
-            tileset.tiles.iter().map(|t| t.weight).collect();
+        let weights: Vec<f32> = tileset.tiles.iter().map(|t| t.weight).collect();
 
         // Treat the grid boundary as connector 0: any face pointing off
         // the grid must carry connector 0, so wall ends and door mouths
@@ -638,10 +631,8 @@ impl VoxelGenerator for WfcGenerator {
                         // this cell only if its edge-facing connector is the
                         // complement of 0 (i.e. 0 itself).
                         let mut filtered = 0u64;
-                        for i in 0..n_tiles {
-                            if allowed & (1u64 << i) != 0
-                                && tiles[i].connectors[face] == 0
-                            {
+                        for (i, tile) in tiles.iter().enumerate().take(n_tiles) {
+                            if allowed & (1u64 << i) != 0 && tile.connectors[face] == 0 {
                                 filtered |= 1u64 << i;
                             }
                         }
@@ -696,12 +687,7 @@ impl VoxelGenerator for WfcGenerator {
                         for vx in 0..TILE_SIZE {
                             let voxel = tile.cells[idx(vx, vy, vz)];
                             if !voxel.is_air() {
-                                patch.set(
-                                    ox + vx as i32,
-                                    oy + vy as i32,
-                                    oz + vz as i32,
-                                    voxel,
-                                );
+                                patch.set(ox + vx as i32, oy + vy as i32, oz + vz as i32, voxel);
                             }
                         }
                     }
@@ -804,13 +790,7 @@ fn connector_complement(id: u8) -> u8 {
 /// by some tile still allowed in the source cell can survive). Whenever
 /// a domain shrinks we re-queue that cell, since *its* neighbors may
 /// now be over-constrained in turn.
-fn propagate(
-    cells: &mut [Cell],
-    w: usize,
-    d: usize,
-    start: usize,
-    tiles: &[Tile],
-) {
+fn propagate(cells: &mut [Cell], w: usize, d: usize, start: usize, tiles: &[Tile]) {
     let mut stack = vec![start];
     while let Some(idx) = stack.pop() {
         let allowed = cells[idx].allowed;
@@ -827,12 +807,8 @@ fn propagate(
 
         // Face order: 0=+X, 1=-X, 2=+Z, 3=-Z.
         // Each entry: (dx, dz, my_face, neighbor_face).
-        let dirs: [(i32, i32, usize, usize); 4] = [
-            (1, 0, 0, 1),
-            (-1, 0, 1, 0),
-            (0, 1, 2, 3),
-            (0, -1, 3, 2),
-        ];
+        let dirs: [(i32, i32, usize, usize); 4] =
+            [(1, 0, 0, 1), (-1, 0, 1, 0), (0, 1, 2, 3), (0, -1, 3, 2)];
         for (dx, dz, my_face, neighbor_face) in dirs {
             let nx = cx as i32 + dx;
             let nz = cz as i32 + dz;
@@ -851,9 +827,9 @@ fn propagate(
             // Connectors my cell currently exposes on `my_face`. The
             // bitset is over connector IDs (assumed to fit in u32).
             let mut my_conns: u32 = 0;
-            for i in 0..tiles.len() {
+            for (i, tile) in tiles.iter().enumerate() {
                 if allowed & (1u64 << i) != 0 {
-                    my_conns |= 1u32 << tiles[i].connectors[my_face];
+                    my_conns |= 1u32 << tile.connectors[my_face];
                 }
             }
 
@@ -863,11 +839,11 @@ fn propagate(
             // directional doorway pair 2/3 match only each other) so a
             // door mouth can't seat against another mouth (#32).
             let mut new_allowed: u64 = 0;
-            for j in 0..tiles.len() {
+            for (j, tile) in tiles.iter().enumerate() {
                 if cells[nidx].allowed & (1u64 << j) == 0 {
                     continue;
                 }
-                let c = connector_complement(tiles[j].connectors[neighbor_face]);
+                let c = connector_complement(tile.connectors[neighbor_face]);
                 if my_conns & (1u32 << c) != 0 {
                     new_allowed |= 1u64 << j;
                 }
@@ -937,7 +913,9 @@ mod tests {
                     assert!(
                         door.cells[idx(x, y, z)].is_air(),
                         "expected portal cell ({},{},{}) to be empty",
-                        x, y, z
+                        x,
+                        y,
+                        z
                     );
                 }
             }
@@ -948,7 +926,8 @@ mod tests {
                 assert!(
                     !door.cells[idx(x, 3, z)].is_air(),
                     "lintel cell ({}, 3, {}) should be solid",
-                    x, z
+                    x,
+                    z
                 );
             }
         }
@@ -1019,7 +998,8 @@ mod tests {
                 assert!(
                     a.connectors != b.connectors || a.cells != b.cells,
                     "tiles {} and {} are identical",
-                    a.name, b.name
+                    a.name,
+                    b.name
                 );
             }
         }
@@ -1057,7 +1037,9 @@ mod tests {
                     assert!(
                         road.cells[idx(x, y, z)].is_air(),
                         "road_x cell ({}, {}, {}) should be empty",
-                        x, y, z
+                        x,
+                        y,
+                        z
                     );
                 }
             }
@@ -1075,7 +1057,9 @@ mod tests {
                     assert!(
                         !b.cells[idx(x, y, z)].is_air(),
                         "building cube cell ({}, {}, {}) should be solid",
-                        x, y, z
+                        x,
+                        y,
+                        z
                     );
                 }
             }
@@ -1122,20 +1106,29 @@ mod tests {
 
     #[test]
     fn test_seed_changes_output() {
-        let a = WfcGenerator { seed: 1, ..Default::default() };
-        let b = WfcGenerator { seed: 99, ..Default::default() };
+        let a = WfcGenerator {
+            seed: 1,
+            ..Default::default()
+        };
+        let b = WfcGenerator {
+            seed: 99,
+            ..Default::default()
+        };
         // Different seeds should pick different tile arrangements.
-        assert_ne!(
-            a.generate().unwrap().voxels,
-            b.generate().unwrap().voxels
-        );
+        assert_ne!(a.generate().unwrap().voxels, b.generate().unwrap().voxels);
     }
 
     #[test]
     fn test_invalid_params_rejected() {
-        let g = WfcGenerator { width: 0, ..Default::default() };
+        let g = WfcGenerator {
+            width: 0,
+            ..Default::default()
+        };
         assert!(g.generate().is_err());
-        let g = WfcGenerator { depth: 0, ..Default::default() };
+        let g = WfcGenerator {
+            depth: 0,
+            ..Default::default()
+        };
         assert!(g.generate().is_err());
     }
 
@@ -1174,11 +1167,20 @@ mod tests {
         // contradiction across the grid.
         let tiles = [conn_tile([0, 0, 0, 0]), conn_tile([1, 1, 1, 1])];
         let mut cells = vec![
-            Cell { allowed: 0, collapsed: false },    // empty (dead end)
-            Cell { allowed: 0b11, collapsed: false }, // full domain
+            Cell {
+                allowed: 0,
+                collapsed: false,
+            }, // empty (dead end)
+            Cell {
+                allowed: 0b11,
+                collapsed: false,
+            }, // full domain
         ];
         propagate(&mut cells, 1, 2, 0, &tiles);
-        assert_eq!(cells[1].allowed, 0b11, "empty domain cascaded into a neighbor");
+        assert_eq!(
+            cells[1].allowed, 0b11,
+            "empty domain cascaded into a neighbor"
+        );
     }
 
     #[test]
@@ -1188,11 +1190,20 @@ mod tests {
         // rather than zeroing the neighbor into a failure.
         let tiles = [conn_tile([0, 0, 0, 0]), conn_tile([1, 1, 1, 1])];
         let mut cells = vec![
-            Cell { allowed: 0b10, collapsed: true }, // tile 1
-            Cell { allowed: 0b01, collapsed: true }, // tile 0 (incompatible)
+            Cell {
+                allowed: 0b10,
+                collapsed: true,
+            }, // tile 1
+            Cell {
+                allowed: 0b01,
+                collapsed: true,
+            }, // tile 0 (incompatible)
         ];
         propagate(&mut cells, 1, 2, 0, &tiles);
-        assert_eq!(cells[1].allowed, 0b01, "collapsed cell's domain was overwritten");
+        assert_eq!(
+            cells[1].allowed, 0b01,
+            "collapsed cell's domain was overwritten"
+        );
     }
 
     #[test]
@@ -1218,8 +1229,14 @@ mod tests {
 
         // Cell 0 = the door-wall (collapsed); cell 1 is its +Z neighbor.
         let mut cells = vec![
-            Cell { allowed: wall_bit, collapsed: true },
-            Cell { allowed: full, collapsed: false },
+            Cell {
+                allowed: wall_bit,
+                collapsed: true,
+            },
+            Cell {
+                allowed: full,
+                collapsed: false,
+            },
         ];
         propagate(&mut cells, 1, 2, 0, tiles);
 
@@ -1247,7 +1264,6 @@ mod tests {
                 origin: (0, 0, 0),
                 seed,
                 tileset: WfcTileset::Dungeon,
-                ..Default::default()
             };
             let p = g.generate().unwrap();
             for ((_, y, _), _) in &p.voxels {

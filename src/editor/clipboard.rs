@@ -372,8 +372,7 @@ mod tests {
         // 2 source clears + 2 dest writes = 4 changes (no extra
         // entry for the air gap).
         assert_eq!(changes.len(), 4);
-        let positions: std::collections::HashSet<_> =
-            changes.iter().map(|c| c.pos).collect();
+        let positions: std::collections::HashSet<_> = changes.iter().map(|c| c.pos).collect();
         assert!(!positions.contains(&(1, 0, 0))); // air gap untouched
         assert!(positions.contains(&(0, 0, 0)));
         assert!(positions.contains(&(2, 0, 0)));

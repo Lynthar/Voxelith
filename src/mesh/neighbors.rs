@@ -156,7 +156,14 @@ mod tests {
                     }
                     let idx = neighbor_index(dx, dy, dz);
                     assert!(idx < 26, "{} >= 26 for ({},{},{})", idx, dx, dy, dz);
-                    assert!(seen.insert(idx), "duplicate index {} at ({},{},{})", idx, dx, dy, dz);
+                    assert!(
+                        seen.insert(idx),
+                        "duplicate index {} at ({},{},{})",
+                        idx,
+                        dx,
+                        dy,
+                        dz
+                    );
                 }
             }
         }

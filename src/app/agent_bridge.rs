@@ -285,11 +285,7 @@ impl App {
             url: self.agent.server.as_ref().map(RunningBridge::url),
             approval: self.agent.approval,
             applied: self.agent.applied,
-            pending: self
-                .agent
-                .pending
-                .as_ref()
-                .map(PendingReview::summary),
+            pending: self.agent.pending.as_ref().map(PendingReview::summary),
         }
     }
 
@@ -559,8 +555,10 @@ impl App {
             history_mark: self.history_mark(),
             parked_at: Instant::now(),
         };
-        self.ui
-            .set_status(format!("Agent batch {} — waiting for you", pending.summary()));
+        self.ui.set_status(format!(
+            "Agent batch {} — waiting for you",
+            pending.summary()
+        ));
         self.agent.pending = Some(pending);
     }
 

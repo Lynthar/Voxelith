@@ -204,16 +204,16 @@ impl Chunk {
 
     /// Iterate over all voxels with their positions
     pub fn iter_voxels(&self) -> impl Iterator<Item = (LocalPos, &Voxel)> {
-        self.voxels.iter().enumerate().map(|(i, v)| {
-            (LocalPos::from_index(i), v)
-        })
+        self.voxels
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (LocalPos::from_index(i), v))
     }
 
     /// Iterate over all solid voxels with their positions
     pub fn iter_solid(&self) -> impl Iterator<Item = (LocalPos, &Voxel)> {
         self.iter_voxels().filter(|(_, v)| v.is_solid())
     }
-
 }
 
 impl Index<LocalPos> for Chunk {

@@ -36,7 +36,7 @@ use winit::{keyboard::ModifiersState, window::Window};
 use std::collections::HashSet;
 
 use voxelith::{
-    core::Voxel,
+    core::{CellAabb, Voxel},
     editor::{
         box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Clipboard, Editor,
         EditorTool, RaycastHit, Selection, SymmetryAxes, Tool,
@@ -106,11 +106,7 @@ pub(super) const MAX_SHAPE_PREVIEW_CELLS: i64 = 262_144;
 /// volumetric tools scan their full AABB, so the AABB *is* their cost.
 /// `i64` throughout: the i32 product wraps for exactly the drags this
 /// exists to refuse.
-pub(super) fn shape_cell_cost(
-    tool: Tool,
-    a: (i32, i32, i32),
-    b: (i32, i32, i32),
-) -> i64 {
+pub(super) fn shape_cell_cost(tool: Tool, a: (i32, i32, i32), b: (i32, i32, i32)) -> i64 {
     let extent = |p: i32, q: i32| (p as i64 - q as i64).abs() + 1;
     let (ex, ey, ez) = (extent(a.0, b.0), extent(a.1, b.1), extent(a.2, b.2));
     match tool {
@@ -128,9 +124,7 @@ pub(super) fn symmetry_factor(symmetry: SymmetryAxes) -> i64 {
 /// Inclusive AABB `(min, max)` enclosing a set of cell positions, or
 /// `None` for an empty set. Used to remember a generation's footprint
 /// for the "Frame Generated" camera action.
-pub(super) fn bounds_of(
-    positions: impl IntoIterator<Item = (i32, i32, i32)>,
-) -> Option<((i32, i32, i32), (i32, i32, i32))> {
+pub(super) fn bounds_of(positions: impl IntoIterator<Item = (i32, i32, i32)>) -> Option<CellAabb> {
     let mut it = positions.into_iter();
     let first = it.next()?;
     let (mut min, mut max) = (first, first);
@@ -140,6 +134,18 @@ pub(super) fn bounds_of(
     }
     Some((min, max))
 }
+
+/// Cache key for the brush hover overlay: `(active cell, tool, brush
+/// color, brush size, symmetry, shape drag key)`. See the field doc on
+/// [`App::last_brush_preview_key`] for what each part invalidates.
+type BrushPreviewKey = (
+    (i32, i32, i32),
+    Tool,
+    Voxel,
+    u8,
+    SymmetryAxes,
+    Option<ShapeDragKey>,
+);
 
 /// Main application state.
 pub struct App {
@@ -210,14 +216,7 @@ pub struct App {
     /// empty). The trailing `Option<ShapeDragKey>` carries the
     /// shape drag's enough-to-detect-change snapshot during a
     /// Footprint or Height phase.
-    last_brush_preview_key: Option<(
-        (i32, i32, i32),
-        Tool,
-        Voxel,
-        u8,
-        SymmetryAxes,
-        Option<ShapeDragKey>,
-    )>,
+    last_brush_preview_key: Option<BrushPreviewKey>,
 
     /// Cache key for the selection wireframe so we don't rebuild the
     /// 24-vertex line buffer on every `CursorMoved` when the AABB
@@ -282,7 +281,7 @@ pub struct App {
     /// set at each generation chokepoint. Not cleared on undo — framing
     /// stale bounds just frames where the geometry was, and the action
     /// guards on `None`.
-    pub(super) last_generated_bounds: Option<((i32, i32, i32), (i32, i32, i32))>,
+    pub(super) last_generated_bounds: Option<CellAabb>,
 }
 
 /// An action that throws the current scene away, held until the
@@ -310,9 +309,7 @@ impl PendingAction {
     fn describe(&self) -> &'static str {
         match self {
             PendingAction::NewProject => "start a new project",
-            PendingAction::OpenPicker | PendingAction::OpenPath(_) => {
-                "open another project"
-            }
+            PendingAction::OpenPicker | PendingAction::OpenPath(_) => "open another project",
             PendingAction::ImportVox => "import a .vox model",
             PendingAction::Exit => "quit",
             PendingAction::Generate(_) => "replace the scene",
@@ -345,12 +342,14 @@ pub(super) fn brush_from_stored(color: [u8; 4]) -> Voxel {
 
 impl App {
     pub fn new() -> Self {
-        let mut prefs = Prefs::load();
+        let prefs = Prefs::load();
 
         let mut editor = Editor::new();
         editor.brush_color = brush_from_stored(prefs.editor.brush_color);
         editor.brush_color.flags = prefs.editor.brush_flags;
-        editor.brush_color.set_tint_zone(prefs.editor.brush_tint_zone);
+        editor
+            .brush_color
+            .set_tint_zone(prefs.editor.brush_tint_zone);
         editor.brush_size = prefs.editor.brush_size.max(1);
         editor.current_tool = tool_from_index(prefs.editor.selected_tool);
         editor.symmetry = SymmetryAxes {
@@ -484,10 +483,8 @@ impl App {
             // high-DPI displays, eventually larger than the monitor.
             let size = window.inner_size();
             let scale = window.scale_factor().max(0.1);
-            let logical_w =
-                ((size.width as f64 / scale).round() as u32).clamp(640, 4096);
-            let logical_h =
-                ((size.height as f64 / scale).round() as u32).clamp(480, 4096);
+            let logical_w = ((size.width as f64 / scale).round() as u32).clamp(640, 4096);
+            let logical_h = ((size.height as f64 / scale).round() as u32).clamp(480, 4096);
             self.prefs.window = WindowPrefs {
                 width: logical_w,
                 height: logical_h,
@@ -497,7 +494,6 @@ impl App {
             log::error!("Failed to save prefs: {}", e);
         }
     }
-
 }
 
 /// Expand `cells` with every symmetry mirror combination, deduped.
@@ -688,12 +684,10 @@ impl EditInteraction {
         hovered_cell: Option<(i32, i32, i32)>,
     ) -> Option<ShapeDragKey> {
         match *self {
-            EditInteraction::ShapeFootprint { anchor, .. } => {
-                Some(ShapeDragKey::Footprint {
-                    anchor,
-                    end_cell: hovered_cell.unwrap_or(anchor),
-                })
-            }
+            EditInteraction::ShapeFootprint { anchor, .. } => Some(ShapeDragKey::Footprint {
+                anchor,
+                end_cell: hovered_cell.unwrap_or(anchor),
+            }),
             EditInteraction::ShapeHeight {
                 anchor,
                 end_on_plane,
@@ -790,7 +784,6 @@ fn tool_to_index(t: Tool) -> u8 {
 }
 
 impl App {
-
     /// Initialize the application with a window.
     pub(super) fn init(&mut self, window: Window) {
         let window = Arc::new(window);
@@ -802,14 +795,11 @@ impl App {
         // surprising. CursorMoved overwrites this on the first real
         // mouse move.
         let physical = window.inner_size();
-        self.cursor_pos = (
-            physical.width as f32 / 2.0,
-            physical.height as f32 / 2.0,
-        );
+        self.cursor_pos = (physical.width as f32 / 2.0, physical.height as f32 / 2.0);
         self.window = Some(window.clone());
 
-        let renderer = pollster::block_on(Renderer::new(window.clone()))
-            .expect("Failed to create renderer");
+        let renderer =
+            pollster::block_on(Renderer::new(window.clone())).expect("Failed to create renderer");
 
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -825,13 +815,8 @@ impl App {
         // texture, so its pipeline must not declare a depth format
         // either. Mismatch trips wgpu validation
         // ("Incompatible depth-stencil attachment format").
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &renderer.device,
-            renderer.config.format,
-            None,
-            1,
-            false,
-        );
+        let egui_renderer =
+            egui_wgpu::Renderer::new(&renderer.device, renderer.config.format, None, 1, false);
 
         self.renderer = Some(renderer);
         self.egui_state = Some(egui_state);
@@ -959,8 +944,7 @@ impl App {
     /// Path of the crash-recovery autosave, next to `prefs.ron` in the
     /// platform config dir. `None` if the OS exposes no config dir.
     fn autosave_path() -> Option<PathBuf> {
-        Prefs::config_path()
-            .and_then(|p| p.parent().map(|d| d.join("autosave.vxlt")))
+        Prefs::config_path().and_then(|p| p.parent().map(|d| d.join("autosave.vxlt")))
     }
 
     /// Per-frame autosave tick. Cheap when idle (one bool + one elapsed
@@ -995,8 +979,9 @@ impl App {
         // does: two running Voxeliths share one config dir, and a shared
         // temp name lets their autosaves interleave into garbage.
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-        let result = voxelith::io::save_world_with_state(&self.document.world, state, metadata, &tmp)
-            .and_then(|()| std::fs::rename(&tmp, &path).map_err(Into::into));
+        let result =
+            voxelith::io::save_world_with_state(&self.document.world, state, metadata, &tmp)
+                .and_then(|()| std::fs::rename(&tmp, &path).map_err(Into::into));
         match result {
             Ok(()) => {
                 log::info!("Autosaved to {}", path.display());
@@ -1031,8 +1016,12 @@ impl App {
     ///
     /// No-op when the world is empty (nothing meaningful to focus on).
     pub(super) fn recenter_camera_on_scene(&mut self) {
-        let Some(center) = self.document.world.scene_center() else { return };
-        let Some(renderer) = &mut self.renderer else { return };
+        let Some(center) = self.document.world.scene_center() else {
+            return;
+        };
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
         renderer.camera.target = center;
         renderer
             .camera_controller
@@ -1054,9 +1043,7 @@ impl App {
             .as_ref()
             .is_some_and(|r| r.camera_controller.is_navigating());
         let gesturing = self.cursor_captured || self.interaction.is_active();
-        let active = navigating
-            || gesturing
-            || self.last_interaction.elapsed() < ACTIVE_GRACE;
+        let active = navigating || gesturing || self.last_interaction.elapsed() < ACTIVE_GRACE;
         if active {
             Duration::ZERO
         } else {
@@ -1123,10 +1110,7 @@ impl App {
 
         self.document.world.clear_dirty_flags();
 
-        self.last_rebuild = Some((
-            started.elapsed().as_secs_f32() * 1000.0,
-            dirty.len(),
-        ));
+        self.last_rebuild = Some((started.elapsed().as_secs_f32() * 1000.0, dirty.len()));
     }
 
     /// Refresh the translucent brush/shape hover overlay. Called every
@@ -1193,14 +1177,7 @@ impl App {
         let drag_key = self.interaction.shape_cache_key(cursor_y, hovered_cell);
         let key = if show {
             if drag_key.is_some() {
-                Some((
-                    (0, 0, 0),
-                    tool,
-                    color,
-                    size,
-                    symmetry,
-                    drag_key,
-                ))
+                Some(((0, 0, 0), tool, color, size, symmetry, drag_key))
             } else {
                 self.editor.hovered_voxel.map(|h| {
                     // Key on the cell the preview is actually DRAWN at:
@@ -1265,8 +1242,8 @@ impl App {
         let positions: Vec<(i32, i32, i32)> = if let Some((anchor, end_3d)) = shape_ends {
             // Budget check BEFORE enumerating: the enumeration is the
             // cost being bounded, and it re-runs on every cursor step.
-            let cost = shape_cell_cost(tool, anchor, end_3d)
-                .saturating_mul(symmetry_factor(symmetry));
+            let cost =
+                shape_cell_cost(tool, anchor, end_3d).saturating_mul(symmetry_factor(symmetry));
             if cost > MAX_SHAPE_PREVIEW_CELLS {
                 self.ui.set_status(format!(
                     "Shape too large to preview ({cost} cells) — commits up to \
@@ -1360,8 +1337,7 @@ impl App {
                 match (self.editor.selection, self.editor.hovered_voxel) {
                     (Some(sel), Some(hit)) => {
                         let cur = Self::select_anchor_pos(&hit);
-                        let delta =
-                            (cur.0 - anchor.0, cur.1 - anchor.1, cur.2 - anchor.2);
+                        let delta = (cur.0 - anchor.0, cur.1 - anchor.1, cur.2 - anchor.2);
                         (Some(sel.translated(delta)), Some(delta))
                     }
                     _ => (self.editor.selection, Some((0, 0, 0))),
@@ -1380,9 +1356,7 @@ impl App {
         // borrowing the renderer, so reading the ghost snapshot
         // doesn't tangle with the `&mut renderer` borrow.
         let ghost_mesh = match (ghost_delta, &self.interaction) {
-            (Some(delta), EditInteraction::SelectMove { ghost, .. })
-                if !ghost.is_empty() =>
-            {
+            (Some(delta), EditInteraction::SelectMove { ghost, .. }) if !ghost.is_empty() => {
                 let voxels: Vec<((i32, i32, i32), Voxel)> = ghost
                     .iter()
                     .map(|&((x, y, z), v)| ((x + delta.0, y + delta.1, z + delta.2), v))
@@ -1515,10 +1489,7 @@ impl Default for App {
 /// cross-platform work-area query to subtract a taskbar with. A
 /// monitor reporting a zero dimension tells us nothing, so in that
 /// case the saved size stands.
-fn fit_window_to_monitor(
-    (w, h): (u32, u32),
-    (mon_w, mon_h): (u32, u32),
-) -> (u32, u32) {
+fn fit_window_to_monitor((w, h): (u32, u32), (mon_w, mon_h): (u32, u32)) -> (u32, u32) {
     if mon_w == 0 || mon_h == 0 || (w <= mon_w && h <= mon_h) {
         return (w, h);
     }
@@ -1534,8 +1505,14 @@ mod tests {
     fn a_size_that_fits_is_left_alone() {
         // Including the exact-fit case: a maximized window saves its
         // full inner size, and it must survive round-trips unchanged.
-        assert_eq!(fit_window_to_monitor((1280, 720), (1920, 1080)), (1280, 720));
-        assert_eq!(fit_window_to_monitor((1920, 1080), (1920, 1080)), (1920, 1080));
+        assert_eq!(
+            fit_window_to_monitor((1280, 720), (1920, 1080)),
+            (1280, 720)
+        );
+        assert_eq!(
+            fit_window_to_monitor((1920, 1080), (1920, 1080)),
+            (1920, 1080)
+        );
     }
 
     #[test]
@@ -1549,7 +1526,10 @@ mod tests {
     fn overflow_on_one_axis_margins_both() {
         // The window has to move fully back inside the monitor, not
         // just clip the offending axis.
-        assert_eq!(fit_window_to_monitor((1920, 2160), (1920, 1080)), (1728, 972));
+        assert_eq!(
+            fit_window_to_monitor((1920, 2160), (1920, 1080)),
+            (1728, 972)
+        );
     }
 
     #[test]

@@ -45,8 +45,8 @@
 use serde::Serialize;
 
 use crate::core::World;
-use crate::io::ProjectMetadata;
 use crate::editor::{Command, CommandHistory, Selection, Socket, VoxelChange};
+use crate::io::ProjectMetadata;
 use crate::procgen::PipelineGraph;
 
 mod compile;
@@ -652,7 +652,9 @@ mod tests {
     #[test]
     fn a_preview_reports_a_dry_run_the_batch_never_asked_for() {
         let session = AgentSession::new();
-        let preview = session.preview_ops(&parse(BATCH)).expect("batch should run");
+        let preview = session
+            .preview_ops(&parse(BATCH))
+            .expect("batch should run");
         assert!(preview.report.dry_run);
     }
 
@@ -674,7 +676,9 @@ mod tests {
     fn a_graph_only_batch_is_one_undoable_entry() {
         let mut session = AgentSession::new();
         let before = session.graph.clone();
-        session.apply_ops(&graph_batch()).expect("batch should apply");
+        session
+            .apply_ops(&graph_batch())
+            .expect("batch should apply");
 
         assert!(
             !session.graph.nodes.is_empty(),
@@ -715,7 +719,11 @@ mod tests {
             ]}}"#
         ));
         session.apply_ops(&batch).expect("batch should apply");
-        assert_eq!(session.history.undo_count(), 1, "one entry for the whole batch");
+        assert_eq!(
+            session.history.undo_count(),
+            1,
+            "one entry for the whole batch"
+        );
         assert!(!session.world.get_voxel(1, 1, 1).is_air());
 
         assert!(session.undo());

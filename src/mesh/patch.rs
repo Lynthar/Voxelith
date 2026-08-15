@@ -18,21 +18,13 @@ use super::{apply_face_shading, face_quad_vertices, ChunkMesh, Face};
 /// The list may contain duplicate positions; later entries win
 /// (consistent with `HashMap` insertion). Air voxels are skipped.
 /// Faces between two solid voxels in the list are culled.
-pub fn patch_to_mesh(
-    voxels: &[((i32, i32, i32), Voxel)],
-    alpha: f32,
-) -> ChunkMesh {
+pub fn patch_to_mesh(voxels: &[((i32, i32, i32), Voxel)], alpha: f32) -> ChunkMesh {
     // Index for O(1) neighbor lookup. `chunk_pos: ChunkPos::ZERO` is a
     // placeholder — the preview path doesn't go through Renderer's
     // per-chunk mesh map, the field just exists on `ChunkMesh`.
-    let map: HashMap<(i32, i32, i32), Voxel> =
-        voxels.iter().copied().collect();
+    let map: HashMap<(i32, i32, i32), Voxel> = voxels.iter().copied().collect();
 
-    let mut mesh = ChunkMesh::with_capacity(
-        ChunkPos::ZERO,
-        map.len() * 4,
-        map.len() * 6,
-    );
+    let mut mesh = ChunkMesh::with_capacity(ChunkPos::ZERO, map.len() * 4, map.len() * 6);
 
     for (&(x, y, z), &voxel) in &map {
         if voxel.is_air() {
@@ -48,15 +40,11 @@ pub fn patch_to_mesh(
 
             // A face is hidden only if there's a *solid* voxel in the
             // patch right next to it. Air or absent neighbor -> draw.
-            let visible = match map.get(&neighbor) {
-                Some(v) if v.is_solid() => false,
-                _ => true,
-            };
+            let visible = !matches!(map.get(&neighbor), Some(v) if v.is_solid());
 
             if visible {
                 let shaded = apply_face_shading(color, face);
-                let vertices =
-                    face_quad_vertices(x as f32, y as f32, z as f32, face, shaded);
+                let vertices = face_quad_vertices(x as f32, y as f32, z as f32, face, shaded);
                 mesh.add_quad(vertices);
             }
         }

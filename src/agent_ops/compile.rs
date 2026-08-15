@@ -18,11 +18,11 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use crate::core::{ChunkPos, Voxel, World};
-use crate::procgen::PipelineGraph;
 use crate::editor::{
     box_voxels, cylinder_voxels, line_voxels, mirror_selection_changes, rotate_selection_changes,
     sphere_voxels, Selection, VoxelChange,
 };
+use crate::procgen::PipelineGraph;
 
 use super::describe::solid_voxel_count;
 use super::registry;
@@ -223,7 +223,11 @@ impl Scratch {
                     ));
                 }
                 for entry in voxels {
-                    self.write((entry.0, entry.1, entry.2), entry.3.to_voxel()?, *write_mode)?;
+                    self.write(
+                        (entry.0, entry.1, entry.2),
+                        entry.3.to_voxel()?,
+                        *write_mode,
+                    )?;
                 }
                 Ok(())
             }
@@ -322,7 +326,9 @@ impl Scratch {
         if current == voxel {
             return Ok(());
         }
-        if !self.world.has_chunk(ChunkPos::from_world_pos(pos.0, pos.1, pos.2))
+        if !self
+            .world
+            .has_chunk(ChunkPos::from_world_pos(pos.0, pos.1, pos.2))
             && self.world.chunk_count() >= self.base_chunks + MAX_NEW_CHUNKS
         {
             return Err(OpsError::new(
@@ -775,11 +781,7 @@ fn graph_error(error: crate::procgen::GraphError) -> OpsError {
 /// so a key present in the request and absent from the round trip is a
 /// key nothing read. Arrays line up index for index — `nodes` comes back
 /// in the order it went in.
-fn reject_unknown_graph_keys(
-    sent: &Value,
-    understood: &Value,
-    path: &str,
-) -> Result<(), OpsError> {
+fn reject_unknown_graph_keys(sent: &Value, understood: &Value, path: &str) -> Result<(), OpsError> {
     match (sent, understood) {
         (Value::Object(sent), Value::Object(understood)) => {
             for (key, value) in sent {
@@ -813,8 +815,7 @@ fn reject_unknown_graph_keys(
 pub(super) fn is_enclosed(world: &World, pos: (i32, i32, i32)) -> bool {
     world.get_voxel(pos.0, pos.1, pos.2).is_solid()
         && FACE_NEIGHBORS.iter().all(|&delta| {
-            face_neighbor(pos, delta)
-                .is_some_and(|n| world.get_voxel(n.0, n.1, n.2).is_solid())
+            face_neighbor(pos, delta).is_some_and(|n| world.get_voxel(n.0, n.1, n.2).is_solid())
         })
 }
 
@@ -998,7 +999,11 @@ mod tests {
             let (ox, oy, oz) = pos.world_origin();
             for (local, voxel) in chunk.read().iter_solid() {
                 out.push((
-                    (ox + local.x as i32, oy + local.y as i32, oz + local.z as i32),
+                    (
+                        ox + local.x as i32,
+                        oy + local.y as i32,
+                        oz + local.z as i32,
+                    ),
                     *voxel,
                 ));
             }
@@ -1025,7 +1030,13 @@ mod tests {
         assert_eq!(report.changed_voxels, 8);
         assert_eq!(session.world.get_voxel(0, 0, 0).color(), [10, 20, 30, 255]);
         assert_eq!(session.world.get_voxel(1, 1, 1).color(), [10, 20, 30, 255]);
-        assert_eq!(report.world_aabb, Some(Aabb { min: [0, 0, 0], max: [1, 1, 1] }));
+        assert_eq!(
+            report.world_aabb,
+            Some(Aabb {
+                min: [0, 0, 0],
+                max: [1, 1, 1]
+            })
+        );
     }
 
     #[test]
@@ -1039,8 +1050,14 @@ mod tests {
         );
         // 5³ minus the 3³ interior.
         assert_eq!(report.changed_voxels, 125 - 27);
-        assert!(session.world.get_voxel(2, 2, 2).is_air(), "interior must be empty");
-        assert!(session.world.get_voxel(2, 2, 0).is_solid(), "face must be solid");
+        assert!(
+            session.world.get_voxel(2, 2, 2).is_air(),
+            "interior must be empty"
+        );
+        assert!(
+            session.world.get_voxel(2, 2, 0).is_solid(),
+            "face must be solid"
+        );
     }
 
     #[test]
@@ -1090,7 +1107,10 @@ mod tests {
         for y in 0..5 {
             assert!(session.world.get_voxel(0, y, 0).is_solid(), "missing y={y}");
         }
-        assert!(session.world.get_voxel(0, 5, 0).is_air(), "height is 5 cells, 0..=4");
+        assert!(
+            session.world.get_voxel(0, 5, 0).is_air(),
+            "height is 5 cells, 0..=4"
+        );
     }
 
     #[test]
@@ -1191,7 +1211,11 @@ mod tests {
                 {"op":"box","min":[0,0,0],"max":[2,0,0],"voxel":{"rgb":[0,255,0]},"write_mode":"only_air"}
             ]}"#,
         );
-        assert_eq!(session.world.get_voxel(0, 0, 0).color(), [255, 0, 0, 255], "occupied cell kept");
+        assert_eq!(
+            session.world.get_voxel(0, 0, 0).color(),
+            [255, 0, 0, 255],
+            "occupied cell kept"
+        );
         assert_eq!(session.world.get_voxel(1, 0, 0).color(), [0, 255, 0, 255]);
     }
 
@@ -1205,8 +1229,15 @@ mod tests {
                 {"op":"box","min":[0,0,0],"max":[2,0,0],"voxel":{"rgb":[0,0,255]},"write_mode":"only_solid"}
             ]}"#,
         );
-        assert_eq!(session.world.get_voxel(0, 0, 0).color(), [0, 0, 255, 255], "repainted");
-        assert!(session.world.get_voxel(1, 0, 0).is_air(), "must not grow into air");
+        assert_eq!(
+            session.world.get_voxel(0, 0, 0).color(),
+            [0, 0, 255, 255],
+            "repainted"
+        );
+        assert!(
+            session.world.get_voxel(1, 0, 0).is_air(),
+            "must not grow into air"
+        );
     }
 
     #[test]
@@ -1256,7 +1287,13 @@ mod tests {
             ]}"#,
         );
         // 4×1×1 rotated about Y is 1×1×4, anchored at the same min.
-        assert_eq!(report.selection, Some(Aabb { min: [0, 0, 0], max: [0, 0, 3] }));
+        assert_eq!(
+            report.selection,
+            Some(Aabb {
+                min: [0, 0, 0],
+                max: [0, 0, 3]
+            })
+        );
         assert_eq!(session.selection.map(Aabb::from), report.selection);
         assert!(session.world.get_voxel(0, 0, 3).is_solid());
         assert!(session.world.get_voxel(3, 0, 0).is_air());
@@ -1275,7 +1312,10 @@ mod tests {
         );
         assert_eq!(
             session.selection.map(Aabb::from),
-            Some(Aabb { min: [10, 10, 10], max: [11, 11, 11] })
+            Some(Aabb {
+                min: [10, 10, 10],
+                max: [11, 11, 11]
+            })
         );
     }
 
@@ -1393,14 +1433,21 @@ mod tests {
                 r#"{{"version":1,"ops":[
                     {{"op":"mirror_copy","axis":"x","region":{{"min":[{},{},{}],"max":[{},{},{}]}}}}
                 ]}}"#,
-                before.min[0], before.min[1], before.min[2],
-                before.max[0], before.max[1], before.max[2],
+                before.min[0],
+                before.min[1],
+                before.min[2],
+                before.max[0],
+                before.max[1],
+                before.max[2],
             ),
         );
         assert_eq!(mirrored.voxel_count, grown.voxel_count * 2);
         let after = mirrored.world_aabb.expect("still there");
         assert_eq!(after.max[0] - after.min[0] + 1, width * 2);
-        assert_eq!(after.min[0], before.min[0], "the original half must not move");
+        assert_eq!(
+            after.min[0], before.min[0],
+            "the original half must not move"
+        );
     }
 
     // -------- graphs --------
@@ -1428,7 +1475,10 @@ mod tests {
             "bookkeeping the agent never sent is derived on the way in"
         );
         // Every voxel came through the filter.
-        let (min, _) = session.world.scene_aabb().expect("the graph built something");
+        let (min, _) = session
+            .world
+            .scene_aabb()
+            .expect("the graph built something");
         assert!(min.1 >= 1, "filter leaked y={}", min.1);
     }
 
@@ -1452,13 +1502,16 @@ mod tests {
         let mut session = AgentSession::new();
         apply(
             &mut session,
-            &GRAPH_BATCH.replace(
-                r#""op":"graph""#,
-                r#""op":"graph","translate":[100,0,0]"#,
-            ),
+            &GRAPH_BATCH.replace(r#""op":"graph""#, r#""op":"graph","translate":[100,0,0]"#),
         );
-        let (min, _) = session.world.scene_aabb().expect("the graph built something");
-        assert!(min.0 >= 90, "translated x should be far from the origin: {min:?}");
+        let (min, _) = session
+            .world
+            .scene_aabb()
+            .expect("the graph built something");
+        assert!(
+            min.0 >= 90,
+            "translated x should be far from the origin: {min:?}"
+        );
     }
 
     #[test]
@@ -1573,7 +1626,8 @@ mod tests {
                 {"id":1,"kind":"output","input":0}]}"#,
         )
         .expect("a .vxlt could hold this too");
-        let error = super::check_graph(&graph).expect_err("a four-billion-cell span is past the ceiling");
+        let error =
+            super::check_graph(&graph).expect_err("a four-billion-cell span is past the ceiling");
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 
@@ -1653,11 +1707,7 @@ mod tests {
         // Each source is legal on its own; evaluation holds all of them
         // at once, and none of it has reached the cell budget yet.
         let mut nodes: Vec<String> = (0..=MAX_GRAPH_SOURCES)
-            .map(|i| {
-                format!(
-                    r#"{{"id":{i},"kind":"builtin.perlin_terrain","width":8,"depth":8}}"#
-                )
-            })
+            .map(|i| format!(r#"{{"id":{i},"kind":"builtin.perlin_terrain","width":8,"depth":8}}"#))
             .collect();
         nodes.push(format!(
             r#"{{"id":{},"kind":"output","input":0}}"#,
@@ -1668,10 +1718,7 @@ mod tests {
             nodes.join(",")
         );
         let mut session = AgentSession::new();
-        assert_eq!(
-            refuse(&mut session, &batch).code,
-            ErrorCode::GraphTooLarge
-        );
+        assert_eq!(refuse(&mut session, &batch).code, ErrorCode::GraphTooLarge);
     }
 
     #[test]
@@ -1682,7 +1729,10 @@ mod tests {
             &GRAPH_BATCH.replace(r#""ops":["#, r#""options":{"dry_run":true},"ops":["#),
         );
         assert!(report.dry_run);
-        assert!(report.changed_voxels > 0, "it still reports what would land");
+        assert!(
+            report.changed_voxels > 0,
+            "it still reports what would land"
+        );
         assert_eq!(session.world.chunk_count(), 0);
         assert!(
             session.graph.nodes.is_empty(),
@@ -1966,7 +2016,9 @@ mod tests {
         let voxel = Voxel::from_rgb(1, 2, 3);
         scratch.write((0, 0, 0), voxel, WriteMode::Replace).unwrap();
         // Masked out (the cell is air), but it was still visited.
-        scratch.write((1, 0, 0), voxel, WriteMode::OnlySolid).unwrap();
+        scratch
+            .write((1, 0, 0), voxel, WriteMode::OnlySolid)
+            .unwrap();
         assert_eq!(scratch.cells, 2);
         assert_eq!(scratch.changes.len(), 1);
     }
@@ -2020,11 +2072,22 @@ mod tests {
             ]}"#,
         );
         assert_eq!(error.op_index, Some(1), "the failing op is named");
-        assert_eq!(snapshot(&session.world), before, "op 0 must not have landed");
-        assert_eq!(session.history.undo_count(), undo_depth, "no undo entry pushed");
+        assert_eq!(
+            snapshot(&session.world),
+            before,
+            "op 0 must not have landed"
+        );
+        assert_eq!(
+            session.history.undo_count(),
+            undo_depth,
+            "no undo entry pushed"
+        );
         assert_eq!(
             session.selection.map(Aabb::from),
-            Some(Aabb { min: [0, 0, 0], max: [1, 1, 1] }),
+            Some(Aabb {
+                min: [0, 0, 0],
+                max: [1, 1, 1]
+            }),
             "selection must survive a failed batch"
         );
     }
@@ -2052,7 +2115,11 @@ mod tests {
         assert_ne!(snapshot(&session.world), before);
 
         assert!(session.undo());
-        assert_eq!(snapshot(&session.world), before, "undo must restore exactly");
+        assert_eq!(
+            snapshot(&session.world),
+            before,
+            "undo must restore exactly"
+        );
         assert!(session.redo());
         assert_ne!(snapshot(&session.world), before);
     }
@@ -2066,7 +2133,11 @@ mod tests {
         assert_eq!(apply(&mut session, batch).changed_voxels, 64);
         let again = apply(&mut session, batch);
         assert_eq!(again.changed_voxels, 0, "identity writes aren't changes");
-        assert_eq!(session.history.undo_count(), 1, "a no-op batch pushes no undo entry");
+        assert_eq!(
+            session.history.undo_count(),
+            1,
+            "a no-op batch pushes no undo entry"
+        );
     }
 
     #[test]
@@ -2170,8 +2241,8 @@ mod tests {
         let a: Vec<_> = first.finish().changes.iter().map(|c| c.pos).collect();
         let b: Vec<_> = second.finish().changes.iter().map(|c| c.pos).collect();
         assert_eq!(a, b);
-        assert!(a.windows(2).all(|w| {
-            (w[0].2, w[0].1, w[0].0) < (w[1].2, w[1].1, w[1].0)
-        }));
+        assert!(a
+            .windows(2)
+            .all(|w| { (w[0].2, w[0].1, w[0].0) < (w[1].2, w[1].1, w[1].0) }));
     }
 }

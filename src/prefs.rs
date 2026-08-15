@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui::{ProcgenSettings, ViewportSettings};
 
-
 /// Maximum entries kept in the recent-files MRU.
 pub const MAX_RECENT_FILES: usize = 10;
 
@@ -208,7 +207,7 @@ impl Prefs {
             std::fs::create_dir_all(parent)?;
         }
         let data = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(path, data)
     }
 
@@ -247,9 +246,7 @@ impl Prefs {
             self.last_import_dir = Some(parent.to_path_buf());
         }
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -438,8 +438,7 @@ impl VoxScene {
                         // sign-extend to a colossal usize and make
                         // `with_capacity` abort.
                         let num_voxels = i32::from_le_bytes(buf).max(0) as usize;
-                        let mut voxels =
-                            Vec::with_capacity(num_voxels.min(MAX_VOXEL_HINT));
+                        let mut voxels = Vec::with_capacity(num_voxels.min(MAX_VOXEL_HINT));
                         for _ in 0..num_voxels {
                             let mut voxel_data = [0u8; 4];
                             body.read_exact(&mut voxel_data)?;
@@ -634,15 +633,7 @@ impl VoxScene {
                         translation.2 + rotated_t.2,
                     );
                     let new_r = rotation_compose(rotation, *local_r);
-                    self.flatten_node(
-                        world,
-                        *child_id,
-                        new_t,
-                        new_r,
-                        path,
-                        depth + 1,
-                        limits,
-                    );
+                    self.flatten_node(world, *child_id, new_t, new_r, path, depth + 1, limits);
                 }
                 SceneNode::Group { children } => {
                     for &child_id in children {
@@ -770,11 +761,7 @@ fn rotate_world_z_up_to_y_up(src: &World) -> World {
 /// subtracted per output axis afterwards; the reflection above already
 /// keeps the model inside its own box, so the placement stays
 /// box-preserving for both parities.
-fn rotate_cell(
-    rotation: [[i32; 3]; 3],
-    p: [i32; 3],
-    size: [i32; 3],
-) -> (i32, i32, i32) {
+fn rotate_cell(rotation: [[i32; 3]; 3], p: [i32; 3], size: [i32; 3]) -> (i32, i32, i32) {
     let mut out = [0i32; 3];
     for (row, out_axis) in out.iter_mut().enumerate() {
         // Exactly one column per row is non-zero (validated in
@@ -848,9 +835,7 @@ fn parse_translation(s: &str) -> Option<(i32, i32, i32)> {
 /// - `i32` num frames (≥ 1; we use frame 0)
 /// - per frame: DICT with optional `_r` (rotation byte string),
 ///   `_t` (translation "x y z"), `_f` (frame index)
-fn read_ntrn_chunk<R: Read>(
-    reader: &mut R,
-) -> Result<Option<(i32, SceneNode)>, VoxError> {
+fn read_ntrn_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
     let node_id = i32::from_le_bytes(i32buf);
@@ -910,9 +895,7 @@ fn read_ntrn_chunk<R: Read>(
 
 /// Read an `nGRP` chunk. Layout: `i32` node id + DICT + `i32` num
 /// children + N × `i32` child node ids.
-fn read_ngrp_chunk<R: Read>(
-    reader: &mut R,
-) -> Result<Option<(i32, SceneNode)>, VoxError> {
+fn read_ngrp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
     let node_id = i32::from_le_bytes(i32buf);
@@ -936,9 +919,7 @@ fn read_ngrp_chunk<R: Read>(
 /// several parts. Only the first is kept — placing all of them stacked
 /// every frame of an animated `.vox` into one blob, which is not what
 /// the file says. Same "first frame wins" rule as `read_ntrn_chunk`.
-fn read_nshp_chunk<R: Read>(
-    reader: &mut R,
-) -> Result<Option<(i32, SceneNode)>, VoxError> {
+fn read_nshp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
     let node_id = i32::from_le_bytes(i32buf);
@@ -1016,7 +997,11 @@ impl VoxModel {
                     oy + local_pos.y as i32,
                     oz + local_pos.z as i32,
                 );
-                let (x, y, z) = if convert_axes { voxelith_to_mv(raw) } else { raw };
+                let (x, y, z) = if convert_axes {
+                    voxelith_to_mv(raw)
+                } else {
+                    raw
+                };
 
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
@@ -1046,7 +1031,7 @@ impl VoxModel {
         let mut color_to_index: HashMap<[u8; 3], u8> = HashMap::new();
         let mut palette = default_palette();
         let mut next_index = 1u8; // 0 is reserved for empty
-        // Distinct colors we had to quantize because the palette filled.
+                                  // Distinct colors we had to quantize because the palette filled.
         let mut overflow_colors: std::collections::HashSet<[u8; 3]> =
             std::collections::HashSet::new();
 
@@ -1066,7 +1051,11 @@ impl VoxModel {
                     oy + local_pos.y as i32,
                     oz + local_pos.z as i32,
                 );
-                let mv = if convert_axes { voxelith_to_mv(raw) } else { raw };
+                let mv = if convert_axes {
+                    voxelith_to_mv(raw)
+                } else {
+                    raw
+                };
                 let x = mv.0 - min_x;
                 let y = mv.1 - min_y;
                 let z = mv.2 - min_z;
@@ -1133,24 +1122,25 @@ impl VoxModel {
         let xyzi_content = 4 + (self.voxels.len() * 4) as i32; // count + voxels
         let rgba_content = 256 * 4; // 256 colors x 4 bytes
 
-        let children_size =
-            12 + size_content +  // SIZE chunk
+        let children_size = 12 + size_content +  // SIZE chunk
             12 + xyzi_content +  // XYZI chunk
-            12 + rgba_content;   // RGBA chunk
+            12 + rgba_content; // RGBA chunk
 
         // Write MAIN chunk header
         ChunkHeader {
             id: *b"MAIN",
             content_size: 0,
             children_size,
-        }.write(writer)?;
+        }
+        .write(writer)?;
 
         // Write SIZE chunk
         ChunkHeader {
             id: *b"SIZE",
             content_size: size_content,
             children_size: 0,
-        }.write(writer)?;
+        }
+        .write(writer)?;
         writer.write_all(&(self.size.0 as i32).to_le_bytes())?;
         writer.write_all(&(self.size.1 as i32).to_le_bytes())?;
         writer.write_all(&(self.size.2 as i32).to_le_bytes())?;
@@ -1160,7 +1150,8 @@ impl VoxModel {
             id: *b"XYZI",
             content_size: xyzi_content,
             children_size: 0,
-        }.write(writer)?;
+        }
+        .write(writer)?;
         writer.write_all(&(self.voxels.len() as i32).to_le_bytes())?;
         for &(x, y, z, c) in &self.voxels {
             writer.write_all(&[x, y, z, c])?;
@@ -1171,7 +1162,8 @@ impl VoxModel {
             id: *b"RGBA",
             content_size: rgba_content,
             children_size: 0,
-        }.write(writer)?;
+        }
+        .write(writer)?;
         // VOX format: palette index 1-255 maps to file indices 0-254,
         // file index 255 is unused
         for i in 1..=255 {
@@ -1189,11 +1181,15 @@ fn find_closest_color(palette: &[[u8; 4]; 256], color: [u8; 3], end: u8) -> u8 {
     let mut best_index = 1u8;
     let mut best_dist = u32::MAX;
 
-    for i in 1..(end as usize).max(2) {
-        let p = palette[i];
-        let dr = (color[0] as i32 - p[0] as i32).abs() as u32;
-        let dg = (color[1] as i32 - p[1] as i32).abs() as u32;
-        let db = (color[2] as i32 - p[2] as i32).abs() as u32;
+    for (i, &p) in palette
+        .iter()
+        .enumerate()
+        .take((end as usize).max(2))
+        .skip(1)
+    {
+        let dr = (color[0] as i32 - p[0] as i32).unsigned_abs();
+        let dg = (color[1] as i32 - p[1] as i32).unsigned_abs();
+        let db = (color[2] as i32 - p[2] as i32).unsigned_abs();
         let dist = dr * dr + dg * dg + db * db;
 
         if dist < best_dist {
@@ -1267,7 +1263,7 @@ mod tests {
         // MagicaVoxel up is +Z; Voxelith up is +Y.
         assert_eq!(mv_to_voxelith((0, 0, 1)), (0, 1, 0)); // MV +Z (up) -> Voxelith +Y (up)
         assert_eq!(voxelith_to_mv((0, 1, 0)), (0, 0, 1)); // and back
-        // Exact inverses in both directions, for arbitrary points.
+                                                          // Exact inverses in both directions, for arbitrary points.
         for p in [(1, 2, 3), (-4, 5, -6), (0, 0, 0), (7, -8, 9)] {
             assert_eq!(mv_to_voxelith(voxelith_to_mv(p)), p);
             assert_eq!(voxelith_to_mv(mv_to_voxelith(p)), p);
@@ -1388,10 +1384,7 @@ mod tests {
 
     /// Total solid voxels across the world.
     fn solid_voxels(world: &World) -> u32 {
-        world
-            .chunks()
-            .map(|(_, c)| c.read().solid_count())
-            .sum()
+        world.chunks().map(|(_, c)| c.read().solid_count()).sum()
     }
 
     /// Wrap chunk bytes in a v200 `MAIN` container.
@@ -1534,7 +1527,10 @@ mod tests {
             Some(MIRROR_X),
         );
         let world = import_vox(&mut odd.as_slice(), false).expect("import");
-        assert!(world.get_voxel(11, 0, 0).is_solid(), "odd-sized mirror moved");
+        assert!(
+            world.get_voxel(11, 0, 0).is_solid(),
+            "odd-sized mirror moved"
+        );
         assert_eq!(solid_voxels(&world), 1);
     }
 
@@ -1542,11 +1538,7 @@ mod tests {
     fn v200_unrotated_placement_is_unchanged() {
         // Control for the two above: with no rotation, a cell sits at
         // `translation + p - pivot` regardless of parity.
-        let even = build_v200_placed(
-            &build_model((2, 1, 1), &[(0, 0, 0, 1)]),
-            (10, 0, 0),
-            None,
-        );
+        let even = build_v200_placed(&build_model((2, 1, 1), &[(0, 0, 0, 1)]), (10, 0, 0), None);
         let world = import_vox(&mut even.as_slice(), false).expect("import");
         assert!(world.get_voxel(9, 0, 0).is_solid());
     }
@@ -1575,8 +1567,7 @@ mod tests {
             b"nTRN",
             &build_ntrn_content(0, 1, (0, 0, 0), None),
         ));
-        chunks
-            .extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[2, 3])));
+        chunks.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[2, 3])));
         chunks.extend_from_slice(&build_chunk(
             b"nTRN",
             &build_ntrn_content(2, 10, (0, 0, 0), None),
@@ -1587,10 +1578,16 @@ mod tests {
         ));
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(10, &[0])));
 
-        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
-            .expect("v200 import");
-        assert!(world.get_voxel(0, 0, 0).is_solid(), "first instance missing");
-        assert!(world.get_voxel(5, 0, 0).is_solid(), "second instance missing");
+        let world =
+            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
+        assert!(
+            world.get_voxel(0, 0, 0).is_solid(),
+            "first instance missing"
+        );
+        assert!(
+            world.get_voxel(5, 0, 0).is_solid(),
+            "second instance missing"
+        );
     }
 
     #[test]
@@ -1606,11 +1603,10 @@ mod tests {
             &build_ntrn_content(0, 1, (0, 0, 0), None),
         ));
         chunks.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[2])));
-        chunks
-            .extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[0, 1])));
+        chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[0, 1])));
 
-        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
-            .expect("v200 import");
+        let world =
+            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
         // Both models are 1³ at the origin, so "only the first" shows
         // up as exactly one solid voxel in the world.
         assert_eq!(solid_voxels(&world), 1);
@@ -1629,8 +1625,8 @@ mod tests {
         chunks.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[2])));
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[-1])));
 
-        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
-            .expect("v200 import");
+        let world =
+            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
         assert_eq!(solid_voxels(&world), 0);
     }
 
@@ -1696,8 +1692,8 @@ mod tests {
         // to the flood fill and the greedy mesher's zero-key sentinel.
         let mut chunks = build_unit_model(1);
         chunks.extend_from_slice(&build_rgba_chunk([10, 20, 30, 0]));
-        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
-            .expect("v150-style import");
+        let world =
+            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v150-style import");
         let v = world.get_voxel(0, 0, 0);
         assert!(v.is_solid());
         assert_eq!(v.color(), [10, 20, 30, 255]);
@@ -1740,6 +1736,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)] // the row/col indices are part of the failure messages
     fn rotation_byte_never_panics_and_rejects_junk() {
         // Every byte must be decodable or cleanly rejected — this test
         // sweeps all 256, so a debug build would panic on the bad ones
@@ -2027,12 +2024,7 @@ mod tests {
             let r = i as u8;
             let g = ((i.wrapping_mul(7)) & 0xFF) as u8;
             let b = ((i.wrapping_mul(13)) & 0xFF) as u8;
-            world.set_voxel(
-                i as i32 % 16,
-                0,
-                i as i32 / 16,
-                Voxel::from_rgb(r, g, b),
-            );
+            world.set_voxel(i as i32 % 16, 0, i as i32 / 16, Voxel::from_rgb(r, g, b));
         }
         let mut buffer = Vec::new();
         let overflow = export_vox(&world, &mut buffer, false).unwrap();

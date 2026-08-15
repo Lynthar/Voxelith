@@ -300,8 +300,7 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
             // agent reads as "symmetric" when `mismatched` says
             // otherwise two lines up. Six covers the whole range this
             // pass will ever measure.
-            ratio: ((mismatched as f64 / voxel_count as f64) * 1_000_000.0).round()
-                / 1_000_000.0,
+            ratio: ((mismatched as f64 / voxel_count as f64) * 1_000_000.0).round() / 1_000_000.0,
         }
     });
 
@@ -717,9 +716,8 @@ mod tests {
     #[test]
     fn enclosed_counts_the_interior_hollow_would_remove() {
         // A solid 3³ block has exactly one fully-surrounded cell.
-        let cube = filled((0..3).flat_map(|x| {
-            (0..3).flat_map(move |y| (0..3).map(move |z| (x, y, z)))
-        }));
+        let cube =
+            filled((0..3).flat_map(|x| (0..3).flat_map(move |y| (0..3).map(move |z| (x, y, z)))));
         assert_eq!(measure(&cube).enclosed, 1);
         // A 3×3 slab has none — every cell is on a face.
         let slab = filled((0..3).flat_map(|x| (0..3).map(move |z| (x, 0, z))));
@@ -733,9 +731,7 @@ mod tests {
     #[test]
     fn enclosed_solids_sealed_air_and_open_space_are_three_different_readings() {
         let cube = |n: i32| {
-            (0..n).flat_map(move |x| {
-                (0..n).flat_map(move |y| (0..n).map(move |z| (x, y, z)))
-            })
+            (0..n).flat_map(move |x| (0..n).flat_map(move |y| (0..n).map(move |z| (x, y, z))))
         };
 
         // Solid 3³: one solid cell has no exposed face, and no air is
@@ -775,9 +771,16 @@ mod tests {
         // A span with the same box: two legs and a deck. Two cells on
         // the ground, and the space under it is open, not a cavity.
         let span = filled(
-            [(0, 0, 0), (0, 1, 0), (0, 2, 0), (5, 0, 0), (5, 1, 0), (5, 2, 0)]
-                .into_iter()
-                .chain((0..6).map(|x| (x, 3, 0))),
+            [
+                (0, 0, 0),
+                (0, 1, 0),
+                (0, 2, 0),
+                (5, 0, 0),
+                (5, 1, 0),
+                (5, 2, 0),
+            ]
+            .into_iter()
+            .chain((0..6).map(|x| (x, 3, 0))),
         );
         let span = measure(&span);
         assert_eq!(span.footprint, 2);
@@ -814,7 +817,9 @@ mod tests {
         let mut session = AgentSession::new();
         for x in 0..3 {
             for y in 0..2 {
-                session.world.set_voxel(x, y, 0, Voxel::from_rgb(100, 100, 100));
+                session
+                    .world
+                    .set_voxel(x, y, 0, Voxel::from_rgb(100, 100, 100));
             }
         }
         session.world.set_voxel(0, 0, 0, Voxel::from_rgb(200, 0, 0));
@@ -828,12 +833,20 @@ mod tests {
         lamp.set_emissive(true);
         lamp.set_tint_zone(1);
         session.world.set_voxel(5, 0, 0, lamp);
-        session.sockets.push(Socket::new("muzzle", [1.0, 2.0, 0.5], [0.0, 1.0, 0.0]));
+        session
+            .sockets
+            .push(Socket::new("muzzle", [1.0, 2.0, 0.5], [0.0, 1.0, 0.0]));
         session.selection = Some(Selection::from_corners((0, 0, 0), (2, 1, 0)));
 
         let description = session.describe();
         assert_eq!(description.voxel_count, 7);
-        assert_eq!(description.world_aabb, Some(Aabb { min: [0, 0, 0], max: [5, 1, 0] }));
+        assert_eq!(
+            description.world_aabb,
+            Some(Aabb {
+                min: [0, 0, 0],
+                max: [5, 1, 0]
+            })
+        );
         assert_eq!(description.size, Some([6, 2, 1]));
         assert_eq!(description.emissive, 1);
         assert_eq!(description.metallic, 0);
@@ -842,7 +855,10 @@ mod tests {
         assert_eq!(description.sockets[0].name, "muzzle");
         assert_eq!(
             description.selection,
-            Some(Aabb { min: [0, 0, 0], max: [2, 1, 0] })
+            Some(Aabb {
+                min: [0, 0, 0],
+                max: [2, 1, 0]
+            })
         );
 
         // Colors, most common first.
@@ -873,9 +889,15 @@ mod tests {
         // Looking along Z: X to the right, Y down the page from the top
         // — the top row is the highest Y, the way a person draws a wall.
         let session = wall();
-        let art = session.slice(&request(r#"{"axis":"z","index":0}"#)).unwrap();
+        let art = session
+            .slice(&request(r#"{"axis":"z","index":0}"#))
+            .unwrap();
         let lines: Vec<&str> = art.lines().collect();
-        assert!(lines[0].contains("z=0"), "header names the plane: {}", lines[0]);
+        assert!(
+            lines[0].contains("z=0"),
+            "header names the plane: {}",
+            lines[0]
+        );
         assert!(
             lines[0].contains("y=1..0"),
             "header states the row order, got: {}",
@@ -888,7 +910,9 @@ mod tests {
     fn a_top_down_view_runs_z_downward() {
         let session = wall();
         let art = session
-            .slice(&request(r#"{"axis":"y","index":0,"region":{"min":[0,0,0],"max":[2,0,1]}}"#))
+            .slice(&request(
+                r#"{"axis":"y","index":0,"region":{"min":[0,0,0],"max":[2,0,1]}}"#,
+            ))
             .unwrap();
         let lines: Vec<&str> = art.lines().collect();
         assert!(lines[0].contains("z=0..1"), "got: {}", lines[0]);
@@ -958,8 +982,12 @@ mod tests {
     #[test]
     fn a_span_wider_than_i32_is_reported_rather_than_wrapped() {
         let mut session = AgentSession::new();
-        session.world.set_voxel(-2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
-        session.world.set_voxel(2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session
+            .world
+            .set_voxel(-2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session
+            .world
+            .set_voxel(2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
 
         let description = session.describe();
         assert_eq!(description.size, Some([4_000_000_001, 1, 1]));
@@ -972,8 +1000,12 @@ mod tests {
     #[test]
     fn symmetry_survives_a_pair_of_coordinates_that_sum_past_i32() {
         let mut session = AgentSession::new();
-        session.world.set_voxel(1_500_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
-        session.world.set_voxel(2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session
+            .world
+            .set_voxel(1_500_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session
+            .world
+            .set_voxel(2_000_000_000, 0, 0, Voxel::from_rgb(120, 120, 120));
 
         let structure = session.describe().structure.expect("measurable");
         let x = structure.symmetry.iter().find(|s| s.axis == "x").unwrap();
@@ -990,10 +1022,17 @@ mod tests {
     #[test]
     fn a_cell_at_the_edge_of_i32_has_no_neighbour_past_it() {
         let mut session = AgentSession::new();
-        session.world.set_voxel(i32::MAX, 0, 0, Voxel::from_rgb(120, 120, 120));
-        session.world.set_voxel(i32::MAX, 2, 0, Voxel::from_rgb(120, 120, 120));
+        session
+            .world
+            .set_voxel(i32::MAX, 0, 0, Voxel::from_rgb(120, 120, 120));
+        session
+            .world
+            .set_voxel(i32::MAX, 2, 0, Voxel::from_rgb(120, 120, 120));
 
-        let structure = session.describe().structure.expect("two voxels is measurable");
+        let structure = session
+            .describe()
+            .structure
+            .expect("two voxels is measurable");
         assert_eq!(structure.components, 2);
         // Neither cell is walled in — the +x side isn't a cell at all.
         assert_eq!(structure.enclosed, 0);

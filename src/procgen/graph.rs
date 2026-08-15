@@ -21,8 +21,7 @@ use thiserror::Error;
 use crate::core::Voxel;
 
 use super::{
-    GenError, GenResult, LSystemTree, PerlinTerrain, VoxelGenerator, VoxelPatch,
-    WfcGenerator,
+    GenError, GenResult, LSystemTree, PerlinTerrain, VoxelGenerator, VoxelPatch, WfcGenerator,
 };
 
 /// Node identifier. Stable within a graph (we never reuse an id after
@@ -192,10 +191,12 @@ impl Default for FilterPredicate {
 /// Combine's set ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MaskMode {
     /// Keep `subject` voxel at `(x, y, z)` iff `mask` has at least one
     /// voxel in the same column with `y_mask < y`. Use for "trees
     /// only above terrain surface".
+    #[default]
     AboveColumn,
     /// Keep `subject` voxel at `(x, y, z)` iff `mask` has at least one
     /// voxel in the same column with `y_mask > y`. Use for "stalactites
@@ -209,12 +210,6 @@ impl MaskMode {
             Self::AboveColumn => "Above column",
             Self::BelowColumn => "Below column",
         }
-    }
-}
-
-impl Default for MaskMode {
-    fn default() -> Self {
-        Self::AboveColumn
     }
 }
 
@@ -459,10 +454,8 @@ impl PipelineGraph {
     pub fn relayout(&mut self) {
         for (i, node) in self.nodes.iter_mut().enumerate() {
             node.position = [
-                NODE_LAYOUT_ORIGIN[0]
-                    + ((i % NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DX,
-                NODE_LAYOUT_ORIGIN[1]
-                    + ((i / NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DY,
+                NODE_LAYOUT_ORIGIN[0] + ((i % NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DX,
+                NODE_LAYOUT_ORIGIN[1] + ((i / NODE_LAYOUT_COLS) as f32) * NODE_LAYOUT_DY,
             ];
         }
     }
@@ -471,11 +464,7 @@ impl PipelineGraph {
     /// "this graph came from a pre-position prefs file". Used by the
     /// app's hydrate path to call `relayout` once.
     pub fn all_at_origin(&self) -> bool {
-        !self.nodes.is_empty()
-            && self
-                .nodes
-                .iter()
-                .all(|n| n.position == [0.0, 0.0])
+        !self.nodes.is_empty() && self.nodes.iter().all(|n| n.position == [0.0, 0.0])
     }
 
     /// Remove a node by id. Also clears any input slot in other nodes
@@ -504,9 +493,7 @@ impl PipelineGraph {
     pub fn input_count(kind: &NodeKind) -> usize {
         match kind {
             NodeKind::Terrain(_) | NodeKind::Tree(_) | NodeKind::Wfc(_) => 0,
-            NodeKind::Translate { .. }
-            | NodeKind::Filter { .. }
-            | NodeKind::Output { .. } => 1,
+            NodeKind::Translate { .. } | NodeKind::Filter { .. } | NodeKind::Output { .. } => 1,
             NodeKind::Mask { .. } | NodeKind::Combine { .. } => 2,
         }
     }
@@ -526,12 +513,10 @@ impl PipelineGraph {
     /// on a `translate` (or any slot on a terrain) has made a mistake,
     /// and answering "not connected" would leave it believing a wire it
     /// asked for exists.
-    pub fn get_input(
-        &self,
-        target: NodeId,
-        slot: usize,
-    ) -> Result<Option<NodeId>, GraphError> {
-        let node = self.get(target).ok_or(GraphError::DanglingReference(target))?;
+    pub fn get_input(&self, target: NodeId, slot: usize) -> Result<Option<NodeId>, GraphError> {
+        let node = self
+            .get(target)
+            .ok_or(GraphError::DanglingReference(target))?;
         if slot >= Self::input_count(&node.kind) {
             return Err(GraphError::InvalidSlot { node: target, slot });
         }
@@ -639,9 +624,7 @@ impl PipelineGraph {
 
         let mut cache: HashMap<NodeId, VoxelPatch> = HashMap::new();
         for id in order {
-            let node = self
-                .get(id)
-                .ok_or(GraphError::DanglingReference(id))?;
+            let node = self.get(id).ok_or(GraphError::DanglingReference(id))?;
             let patch = self.eval_node(node, &cache)?;
             for input in node.kind.inputs() {
                 if let Some(left) = readers.get_mut(&input) {
@@ -735,7 +718,11 @@ impl PipelineGraph {
                     .ok_or(GraphError::DanglingReference(in_id))?;
                 Ok(filter_patch(in_patch, predicate))
             }
-            NodeKind::Mask { subject, mask, mode } => {
+            NodeKind::Mask {
+                subject,
+                mask,
+                mode,
+            } => {
                 let s_id = subject.ok_or(GraphError::MissingInput { node: node.id })?;
                 let m_id = mask.ok_or(GraphError::MissingInput { node: node.id })?;
                 let s_patch = cache
@@ -1048,7 +1035,10 @@ mod tests {
             g.add(NodeKind::Output {
                 input: Some(source),
             });
-            g.evaluate().expect("a source straight to output").voxels.len()
+            g.evaluate()
+                .expect("a source straight to output")
+                .voxels
+                .len()
         };
         // Two disjoint copies of the same source: nothing was dropped
         // early, and nothing was double-counted.
@@ -1190,10 +1180,7 @@ mod tests {
                 dz: 0,
             });
         }
-        assert!(matches!(
-            g.validate(),
-            Err(GraphError::TooManyNodes { .. })
-        ));
+        assert!(matches!(g.validate(), Err(GraphError::TooManyNodes { .. })));
     }
 
     #[test]
@@ -1296,14 +1283,8 @@ mod tests {
 
     #[test]
     fn test_combine_union_b_wins_overlap() {
-        let a = manual_patch(vec![
-            ((0, 0, 0), solid(1)),
-            ((1, 0, 0), solid(1)),
-        ]);
-        let b = manual_patch(vec![
-            ((1, 0, 0), solid(2)),
-            ((2, 0, 0), solid(2)),
-        ]);
+        let a = manual_patch(vec![((0, 0, 0), solid(1)), ((1, 0, 0), solid(1))]);
+        let b = manual_patch(vec![((1, 0, 0), solid(2)), ((2, 0, 0), solid(2))]);
         let r = combine_patches(a, b, CombineOp::Union);
         let map: HashMap<_, _> = r.voxels.into_iter().collect();
         assert_eq!(map.len(), 3);
@@ -1314,10 +1295,7 @@ mod tests {
 
     #[test]
     fn test_combine_difference_excludes_b_cells() {
-        let a = manual_patch(vec![
-            ((0, 0, 0), solid(1)),
-            ((1, 0, 0), solid(1)),
-        ]);
+        let a = manual_patch(vec![((0, 0, 0), solid(1)), ((1, 0, 0), solid(1))]);
         let b = manual_patch(vec![((1, 0, 0), solid(2))]);
         let r = combine_patches(a, b, CombineOp::Difference);
         let map: HashMap<_, _> = r.voxels.into_iter().collect();
@@ -1358,11 +1336,7 @@ mod tests {
     fn test_filter_color_exact_match() {
         let red = Voxel::from_rgb(200, 30, 30);
         let blue = Voxel::from_rgb(30, 30, 200);
-        let p = manual_patch(vec![
-            ((0, 0, 0), red),
-            ((1, 0, 0), blue),
-            ((2, 0, 0), red),
-        ]);
+        let p = manual_patch(vec![((0, 0, 0), red), ((1, 0, 0), blue), ((2, 0, 0), red)]);
         let r = filter_patch(
             p,
             &FilterPredicate::MatchesColor([red.r, red.g, red.b, red.a]),
@@ -1523,14 +1497,8 @@ mod tests {
 
     #[test]
     fn test_combine_intersect_keeps_a_voxels() {
-        let a = manual_patch(vec![
-            ((0, 0, 0), solid(1)),
-            ((1, 0, 0), solid(1)),
-        ]);
-        let b = manual_patch(vec![
-            ((1, 0, 0), solid(99)),
-            ((2, 0, 0), solid(99)),
-        ]);
+        let a = manual_patch(vec![((0, 0, 0), solid(1)), ((1, 0, 0), solid(1))]);
+        let b = manual_patch(vec![((1, 0, 0), solid(99)), ((2, 0, 0), solid(99))]);
         let r = combine_patches(a, b, CombineOp::Intersect);
         let map: HashMap<_, _> = r.voxels.into_iter().collect();
         assert_eq!(map.len(), 1);
@@ -1541,10 +1509,7 @@ mod tests {
     #[test]
     fn test_empty_graph_no_output() {
         let g = PipelineGraph::default();
-        assert!(matches!(
-            g.evaluate(),
-            Err(GenError::Failed(_))
-        ));
+        assert!(matches!(g.evaluate(), Err(GenError::Failed(_))));
     }
 
     #[test]
@@ -1764,7 +1729,9 @@ mod tests {
             b: Some(translated_b),
             op: CombineOp::Union,
         });
-        g.add(NodeKind::Output { input: Some(combine) });
+        g.add(NodeKind::Output {
+            input: Some(combine),
+        });
 
         let patch = g.evaluate().unwrap();
         // We should see voxels at both x ranges (≈0 and ≈100).

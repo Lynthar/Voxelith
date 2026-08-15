@@ -64,8 +64,7 @@ impl App {
         let renderer = self.renderer.as_mut().unwrap();
 
         // Refresh grid mesh if settings changed
-        if grid_size != self.last_grid_size
-            || (grid_spacing - self.last_grid_spacing).abs() > 0.01
+        if grid_size != self.last_grid_size || (grid_spacing - self.last_grid_spacing).abs() > 0.01
         {
             renderer.update_grid(grid_size, grid_spacing);
             self.last_grid_size = grid_size;
@@ -139,11 +138,9 @@ impl App {
                 renderer.draw_axes(&mut render_pass);
             }
 
-            let use_wireframe =
-                wireframe_mode && renderer.pipeline.wireframe_pipeline.is_some();
+            let use_wireframe = wireframe_mode && renderer.pipeline.wireframe_pipeline.is_some();
             if use_wireframe {
-                render_pass
-                    .set_pipeline(renderer.pipeline.wireframe_pipeline.as_ref().unwrap());
+                render_pass.set_pipeline(renderer.pipeline.wireframe_pipeline.as_ref().unwrap());
             } else {
                 render_pass.set_pipeline(&renderer.pipeline.render_pipeline);
             }
@@ -189,8 +186,7 @@ impl App {
             pixels_per_point: window.scale_factor() as f32,
         };
 
-        let paint_jobs =
-            egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        let paint_jobs = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
         for (id, delta) in full_output.textures_delta.set {
             egui_renderer.update_texture(&renderer.device, &renderer.queue, id, &delta);

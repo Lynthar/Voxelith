@@ -31,7 +31,6 @@ pub enum ExportKind {
     Glb(Surface),
 }
 
-
 /// One-shot UI actions that need to be processed by the application.
 ///
 /// Not `Copy` because `OpenRecent` carries a `PathBuf`. Actions are
@@ -83,7 +82,9 @@ pub enum UiAction {
     /// is keyboard-only — UI buttons go through this default path.
     /// `at_cursor` pastes at the hovered cell (Ctrl+Shift+V) instead
     /// of the selection origin.
-    PasteClipboard { at_cursor: bool },
+    PasteClipboard {
+        at_cursor: bool,
+    },
     DeleteSelection,
     /// Set the selection to the AABB of every non-air voxel in
     /// the world.
@@ -99,10 +100,15 @@ pub enum UiAction {
     /// `quarter` (90° / -90° / 180°). Anchor is `selection.min`;
     /// the AABB may swap dimensions but its `min` corner stays put.
     /// One Ctrl+Z reverses the entire rotation.
-    RotateSelection { axis: Axis, quarter: Quarter },
+    RotateSelection {
+        axis: Axis,
+        quarter: Quarter,
+    },
     /// Mirror the selection's voxel contents across the midplane
     /// perpendicular to `axis`. AABB unchanged.
-    MirrorSelection { axis: Axis },
+    MirrorSelection {
+        axis: Axis,
+    },
 
     // Generate operations
     GenerateTestCube,
@@ -224,7 +230,7 @@ pub fn group_thousands(n: usize) -> String {
     let len = s.len();
     let mut out = String::with_capacity(len + len / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

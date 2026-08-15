@@ -5,10 +5,10 @@
 //! - `Chunk`: Fixed-size 3D grid of voxels
 //! - `World`: Collection of chunks with spatial indexing
 
-mod voxel;
 mod chunk;
+mod voxel;
 mod world;
 
-pub use voxel::Voxel;
 pub use chunk::{Chunk, ChunkPos, LocalPos, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_VOLUME};
-pub use world::World;
+pub use voxel::Voxel;
+pub use world::{CellAabb, World};

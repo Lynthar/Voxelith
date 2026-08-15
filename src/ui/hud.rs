@@ -71,35 +71,32 @@ pub(super) fn show_hud_overlay(ctx: &Context, hud: &HudState) {
         .order(Order::Background)
         .interactable(false)
         .show(ctx, |ui| {
-            hud_frame()
-                .show(ui, |ui| {
-                    ui.set_max_width(240.0);
-                    ui.spacing_mut().item_spacing.y = 2.0;
+            hud_frame().show(ui, |ui| {
+                ui.set_max_width(240.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
 
-                    let title = match hud.phase {
-                        Some(p) => format!("{} — {}", hud.tool, p),
-                        None => hud.tool.to_string(),
-                    };
-                    // Colors mirror the status bar's coding (tool =
-                    // light blue, symmetry = light yellow, selection
-                    // = yellow) so the two readouts visibly refer to
-                    // the same state.
-                    ui.label(RichText::new(title).strong().color(Color32::LIGHT_BLUE));
-                    if let Some(d) = &hud.detail {
-                        ui.label(RichText::new(d).color(Color32::from_gray(220)));
-                    }
-                    if let Some(s) = &hud.symmetry {
-                        ui.label(RichText::new(s).color(Color32::LIGHT_YELLOW));
-                    }
-                    if let Some(s) = &hud.selection {
-                        ui.label(
-                            RichText::new(s).color(Color32::from_rgb(255, 230, 60)),
-                        );
-                    }
-                    if let Some(h) = hud.hints {
-                        ui.label(RichText::new(h).small().weak());
-                    }
-                });
+                let title = match hud.phase {
+                    Some(p) => format!("{} — {}", hud.tool, p),
+                    None => hud.tool.to_string(),
+                };
+                // Colors mirror the status bar's coding (tool =
+                // light blue, symmetry = light yellow, selection
+                // = yellow) so the two readouts visibly refer to
+                // the same state.
+                ui.label(RichText::new(title).strong().color(Color32::LIGHT_BLUE));
+                if let Some(d) = &hud.detail {
+                    ui.label(RichText::new(d).color(Color32::from_gray(220)));
+                }
+                if let Some(s) = &hud.symmetry {
+                    ui.label(RichText::new(s).color(Color32::LIGHT_YELLOW));
+                }
+                if let Some(s) = &hud.selection {
+                    ui.label(RichText::new(s).color(Color32::from_rgb(255, 230, 60)));
+                }
+                if let Some(h) = hud.hints {
+                    ui.label(RichText::new(h).small().weak());
+                }
+            });
         });
 }
 
@@ -136,11 +133,8 @@ pub(super) fn show_perf_overlay(ctx: &Context, stats: &RenderStats) {
                 );
                 if let Some((ms, chunks)) = stats.last_rebuild {
                     ui.label(
-                        RichText::new(format!(
-                            "rebuild {:.1} ms ({} chunks)",
-                            ms, chunks
-                        ))
-                        .color(Color32::from_gray(200)),
+                        RichText::new(format!("rebuild {:.1} ms ({} chunks)", ms, chunks))
+                            .color(Color32::from_gray(200)),
                     );
                 }
             });

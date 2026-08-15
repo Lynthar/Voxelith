@@ -109,18 +109,13 @@ impl App {
     /// Distance is clamped to the orbit zoom range `[2, 500]` so a
     /// following scroll behaves; a scene larger than that hits the cap
     /// (consistent with the reach/fog tuning noted in `CLAUDE.md`).
-    pub(super) fn frame_camera_on_aabb(
-        &mut self,
-        min: (i32, i32, i32),
-        max: (i32, i32, i32),
-    ) {
+    pub(super) fn frame_camera_on_aabb(&mut self, min: (i32, i32, i32), max: (i32, i32, i32)) {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
         // Cells occupy [n, n+1), so the box spans min .. max+1 in world.
         let wmin = glam::Vec3::new(min.0 as f32, min.1 as f32, min.2 as f32);
-        let wmax =
-            glam::Vec3::new(max.0 as f32 + 1.0, max.1 as f32 + 1.0, max.2 as f32 + 1.0);
+        let wmax = glam::Vec3::new(max.0 as f32 + 1.0, max.1 as f32 + 1.0, max.2 as f32 + 1.0);
         let center = (wmin + wmax) * 0.5;
         let extent = wmax - wmin;
 
@@ -361,7 +356,8 @@ impl App {
                 // of stacking toward the camera. The lock dies with
                 // the `BrushStroke` state on release.
                 if let EditInteraction::BrushStroke {
-                    plane: plane @ None, ..
+                    plane: plane @ None,
+                    ..
                 } = &mut self.interaction
                 {
                     *plane = build_stroke_plane(&hit);
@@ -465,8 +461,10 @@ impl App {
                 if let Some(sel) = self.editor.selection {
                     if sel.contains(cell) {
                         let ghost = self.move_ghost_snapshot(sel);
-                        self.interaction =
-                            EditInteraction::SelectMove { anchor: cell, ghost };
+                        self.interaction = EditInteraction::SelectMove {
+                            anchor: cell,
+                            ghost,
+                        };
                         return;
                     }
                 }
@@ -499,9 +497,11 @@ impl App {
                 ];
                 let normal = [nx as f32, ny as f32, nz as f32];
                 let name = voxelith::editor::next_socket_name(&self.document.sockets);
-                self.document
-                    .sockets
-                    .push(voxelith::editor::Socket::new(name.clone(), position, normal));
+                self.document.sockets.push(voxelith::editor::Socket::new(
+                    name.clone(),
+                    position,
+                    normal,
+                ));
                 // Sockets are document data no mesh rebuild notices —
                 // placing one has to raise the unsaved flags itself, or
                 // "place a socket, quit" lost it without a prompt.
@@ -528,9 +528,7 @@ impl App {
     /// `Selection::size` wraps for exactly the boxes this guards.
     fn selection_sweep_cells(sel: &Selection) -> i64 {
         let extent = |a: i32, b: i32| (b as i64 - a as i64) + 1;
-        extent(sel.min.0, sel.max.0)
-            * extent(sel.min.1, sel.max.1)
-            * extent(sel.min.2, sel.max.2)
+        extent(sel.min.0, sel.max.0) * extent(sel.min.1, sel.max.1) * extent(sel.min.2, sel.max.2)
     }
 
     /// True (with a status message) when `sel` is too big for a dense
@@ -558,8 +556,7 @@ impl App {
         match (self.editor.selection, self.editor.hovered_voxel) {
             (Some(_sel), Some(hit)) => {
                 let cur = Self::select_anchor_pos(&hit);
-                let delta =
-                    (cur.0 - anchor.0, cur.1 - anchor.1, cur.2 - anchor.2);
+                let delta = (cur.0 - anchor.0, cur.1 - anchor.1, cur.2 - anchor.2);
                 if delta != (0, 0, 0) {
                     self.move_selection(delta);
                 }
@@ -626,11 +623,7 @@ impl App {
     /// produce a single-cell at the anchor, which is almost never
     /// what the user wants. (The caller took the state, so doing
     /// nothing here IS the cancel.)
-    fn shape_footprint_released(
-        &mut self,
-        anchor: (i32, i32, i32),
-        plane: StrokePlane,
-    ) {
+    fn shape_footprint_released(&mut self, anchor: (i32, i32, i32), plane: StrokePlane) {
         let Some(hit) = self.editor.hovered_voxel else {
             self.ui
                 .set_status("Shape canceled (cursor off-plane on release)");
@@ -661,8 +654,7 @@ impl App {
         if self.refuse_oversized_sweep(sel, "Rotate") {
             return;
         }
-        let (new_sel, changes) =
-            rotate_selection_changes(&self.document.world, sel, axis, quarter);
+        let (new_sel, changes) = rotate_selection_changes(&self.document.world, sel, axis, quarter);
         let count = changes.len();
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
@@ -854,7 +846,8 @@ impl App {
     /// clipboard. No-op (with a status hint) if there's no selection.
     pub(super) fn copy_selection(&mut self) {
         let Some(sel) = self.editor.selection else {
-            self.ui.set_status("No selection — drag with the Select tool first");
+            self.ui
+                .set_status("No selection — drag with the Select tool first");
             return;
         };
         if self.refuse_oversized_sweep(sel, "Copy") {
@@ -877,7 +870,8 @@ impl App {
     /// half the cut, which is the textbook reverse-intuitive bug.
     pub(super) fn cut_selection(&mut self) {
         let Some(sel) = self.editor.selection else {
-            self.ui.set_status("No selection — drag with the Select tool first");
+            self.ui
+                .set_status("No selection — drag with the Select tool first");
             return;
         };
         if self.refuse_oversized_sweep(sel, "Cut") {
@@ -894,7 +888,8 @@ impl App {
         }
 
         if count == 0 {
-            self.ui.set_status("Selection had no solid voxels — clipboard empty");
+            self.ui
+                .set_status("Selection had no solid voxels — clipboard empty");
         } else {
             self.ui.set_status(format!("Cut {} voxels", count));
         }
@@ -904,7 +899,8 @@ impl App {
     /// touching the clipboard.
     pub(super) fn delete_selection(&mut self) {
         let Some(sel) = self.editor.selection else {
-            self.ui.set_status("No selection — drag with the Select tool first");
+            self.ui
+                .set_status("No selection — drag with the Select tool first");
             return;
         };
         if self.refuse_oversized_sweep(sel, "Delete") {
@@ -917,7 +913,8 @@ impl App {
             self.editor.history.execute(cmd, &mut self.document.world);
         }
         if count == 0 {
-            self.ui.set_status("Selection had no solid voxels to delete");
+            self.ui
+                .set_status("Selection had no solid voxels to delete");
         } else {
             self.ui.set_status(format!("Deleted {} voxels", count));
         }
@@ -936,7 +933,8 @@ impl App {
     /// re-marqueeing — abuses vengi's `autoSelectSolidVoxels` trick.
     pub(super) fn paste_clipboard(&mut self, prefer_cursor: bool) {
         let Some(clipboard) = self.clipboard.as_ref() else {
-            self.ui.set_status("Clipboard is empty — Copy / Cut a selection first");
+            self.ui
+                .set_status("Clipboard is empty — Copy / Cut a selection first");
             return;
         };
         if clipboard.is_empty() {
@@ -955,7 +953,8 @@ impl App {
         };
 
         let Some(dest) = dest else {
-            self.ui.set_status("Move the cursor over the world to paste");
+            self.ui
+                .set_status("Move the cursor over the world to paste");
             return;
         };
 
@@ -975,7 +974,8 @@ impl App {
         });
 
         if count == 0 {
-            self.ui.set_status("Pasted (no changes — destination already matched)");
+            self.ui
+                .set_status("Pasted (no changes — destination already matched)");
         } else {
             self.ui.set_status(format!("Pasted {} voxels", count));
         }
@@ -990,7 +990,8 @@ impl App {
             Some((min, max)) => {
                 self.editor.selection = Some(Selection { min, max });
                 let (w, h, d) = (max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1);
-                self.ui.set_status(format!("Selected all: {}×{}×{}", w, h, d));
+                self.ui
+                    .set_status(format!("Selected all: {}×{}×{}", w, h, d));
             }
             None => {
                 // Through `deselect`, not by assigning `None`: a
@@ -1079,8 +1080,7 @@ impl App {
         // order, and R / M / F / arrows / Esc / Delete depend on state
         // a table row can't express.
         if self.primary_modifier() {
-            if let Some(spec) = voxelith::ui::keymap::find_chord(key, self.modifiers.shift_key())
-            {
+            if let Some(spec) = voxelith::ui::keymap::find_chord(key, self.modifiers.shift_key()) {
                 self.ui.state.request((spec.make)());
                 return;
             }
@@ -1106,8 +1106,7 @@ impl App {
             KeyCode::Escape => {
                 if matches!(
                     self.interaction,
-                    EditInteraction::ShapeFootprint { .. }
-                        | EditInteraction::ShapeHeight { .. }
+                    EditInteraction::ShapeFootprint { .. } | EditInteraction::ShapeHeight { .. }
                 ) {
                     self.cancel_interaction();
                     self.ui.set_status("Shape canceled");
@@ -1233,7 +1232,9 @@ mod tests {
     #[test]
     fn a_brush_press_arms_a_stroke_and_locks_the_plane() {
         let mut app = app_with_tool(Tool::Place);
-        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
+        app.document
+            .world
+            .set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         // The press painted, and the stroke latched onto the hit face.
@@ -1264,7 +1265,9 @@ mod tests {
     #[test]
     fn a_click_tool_press_is_a_plain_hold() {
         let mut app = app_with_tool(Tool::Eyedropper);
-        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(9, 8, 7));
+        app.document
+            .world
+            .set_voxel(0, 0, 0, Voxel::from_rgb(9, 8, 7));
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         // Eyedropper sampled, but holds no plane and starts no gesture
@@ -1283,7 +1286,10 @@ mod tests {
         app.on_left_press();
         assert!(matches!(
             app.interaction,
-            EditInteraction::ShapeFootprint { anchor: (0, 1, 0), .. }
+            EditInteraction::ShapeFootprint {
+                anchor: (0, 1, 0),
+                ..
+            }
         ));
         // Release with a plane hit → Height phase, footprint corner
         // locked.
@@ -1331,11 +1337,17 @@ mod tests {
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         app.on_left_release();
-        assert!(matches!(app.interaction, EditInteraction::ShapeHeight { .. }));
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::ShapeHeight { .. }
+        ));
         // A release with no matching press in the viewport (egui ate
         // the press) must not kill the pending extrusion.
         app.on_left_release();
-        assert!(matches!(app.interaction, EditInteraction::ShapeHeight { .. }));
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::ShapeHeight { .. }
+        ));
     }
 
     #[test]
@@ -1368,8 +1380,13 @@ mod tests {
     #[test]
     fn a_press_inside_the_selection_moves_its_voxels() {
         let mut app = app_with_tool(Tool::Select);
-        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
-        app.editor.selection = Some(Selection { min: (0, 0, 0), max: (0, 0, 0) });
+        app.document
+            .world
+            .set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
+        app.editor.selection = Some(Selection {
+            min: (0, 0, 0),
+            max: (0, 0, 0),
+        });
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         match &app.interaction {
@@ -1392,12 +1409,18 @@ mod tests {
     #[test]
     fn escape_cancels_the_shape_but_keeps_the_marquee() {
         let mut app = app_with_tool(Tool::Box);
-        app.editor.selection = Some(Selection { min: (0, 0, 0), max: (1, 1, 1) });
+        app.editor.selection = Some(Selection {
+            min: (0, 0, 0),
+            max: (1, 1, 1),
+        });
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         app.handle_tool_shortcut(KeyCode::Escape);
         assert!(matches!(app.interaction, EditInteraction::Idle));
-        assert!(app.editor.selection.is_some(), "Esc mid-shape spares the marquee");
+        assert!(
+            app.editor.selection.is_some(),
+            "Esc mid-shape spares the marquee"
+        );
         // A second Esc, with no gesture in flight, deselects.
         app.handle_tool_shortcut(KeyCode::Escape);
         assert!(app.editor.selection.is_none());
@@ -1434,7 +1457,10 @@ mod tests {
         app.on_left_press();
         app.editor.select_tool(Tool::Sphere);
         app.update_brush_preview();
-        assert!(matches!(app.interaction, EditInteraction::ShapeFootprint { .. }));
+        assert!(matches!(
+            app.interaction,
+            EditInteraction::ShapeFootprint { .. }
+        ));
 
         // A select drag dies with the Select tool.
         let mut app = app_with_tool(Tool::Select);
@@ -1448,12 +1474,20 @@ mod tests {
     #[test]
     fn arrow_nudges_are_ignored_mid_select_gesture() {
         let mut app = app_with_tool(Tool::Select);
-        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
-        app.editor.selection = Some(Selection { min: (0, 0, 0), max: (0, 0, 0) });
+        app.document
+            .world
+            .set_voxel(0, 0, 0, Voxel::from_rgb(5, 5, 5));
+        app.editor.selection = Some(Selection {
+            min: (0, 0, 0),
+            max: (0, 0, 0),
+        });
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press(); // SelectMove in flight
         app.step_selection((1, 0, 0));
-        assert!(!app.document.world.get_voxel(0, 0, 0).is_air(), "nudge must not fight the drag");
+        assert!(
+            !app.document.world.get_voxel(0, 0, 0).is_air(),
+            "nudge must not fight the drag"
+        );
     }
 
     #[test]
@@ -1461,13 +1495,22 @@ mod tests {
         let mut app = app_with_tool(Tool::Place);
         app.modifiers = ModifiersState::ALT;
         assert_eq!(app.effective_tool(), Tool::Eyedropper);
-        assert_eq!(app.editor.current_tool, Tool::Place, "persisted tool untouched");
+        assert_eq!(
+            app.editor.current_tool,
+            Tool::Place,
+            "persisted tool untouched"
+        );
         // With Alt down, a press samples instead of painting.
-        app.document.world.set_voxel(0, 0, 0, Voxel::from_rgb(42, 1, 1));
+        app.document
+            .world
+            .set_voxel(0, 0, 0, Voxel::from_rgb(42, 1, 1));
         app.editor.hovered_voxel = Some(top_hit(0, 0, 0));
         app.on_left_press();
         assert_eq!(app.editor.brush_color.color()[0], 42);
-        assert!(app.document.world.get_voxel(0, 1, 0).is_air(), "nothing painted");
+        assert!(
+            app.document.world.get_voxel(0, 1, 0).is_air(),
+            "nothing painted"
+        );
         // Alt up (or the modifiers reset on focus loss): back to Place.
         app.modifiers = ModifiersState::empty();
         assert_eq!(app.effective_tool(), Tool::Place);

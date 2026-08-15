@@ -62,10 +62,7 @@ impl ApplicationHandler for App {
                 Some(monitor) => {
                     let logical: winit::dpi::LogicalSize<u32> =
                         monitor.size().to_logical(monitor.scale_factor());
-                    super::fit_window_to_monitor(
-                        saved,
-                        (logical.width, logical.height),
-                    )
+                    super::fit_window_to_monitor(saved, (logical.width, logical.height))
                 }
                 None => saved,
             };
@@ -380,13 +377,11 @@ impl ApplicationHandler for App {
                             dx * dx + dy * dy >= DRAG_THRESHOLD_PX_SQ
                         };
                         if drag_eligible && past_dead_zone {
-                            let current =
-                                self.editor.hovered_voxel.map(|h| h.voxel_pos);
+                            let current = self.editor.hovered_voxel.map(|h| h.voxel_pos);
                             if current.is_some() && current != last_voxel {
                                 self.apply_tool();
-                                if let super::EditInteraction::BrushStroke {
-                                    last_voxel, ..
-                                } = &mut self.interaction
+                                if let super::EditInteraction::BrushStroke { last_voxel, .. } =
+                                    &mut self.interaction
                                 {
                                     *last_voxel = current;
                                 }

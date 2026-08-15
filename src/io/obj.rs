@@ -102,12 +102,7 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
             writeln!(
                 writer,
                 "v {:.4} {:.4} {:.4} {:.3} {:.3} {:.3}",
-                v.position[0],
-                v.position[1],
-                v.position[2],
-                c[0],
-                c[1],
-                c[2],
+                v.position[0], v.position[1], v.position[2], c[0], c[1], c[2],
             )?;
         }
         for v in &mesh.vertices {
@@ -150,11 +145,7 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
 /// Output structure: single `o Voxelith` object, single `g smoothed`
 /// group. Uses the same `v x y z r g b` vertex-color extension as
 /// the regular OBJ exporter.
-pub fn export_obj_smoothed(
-    world: &World,
-    path: &Path,
-    blur: bool,
-) -> Result<ObjStats, ObjError> {
+pub fn export_obj_smoothed(world: &World, path: &Path, blur: bool) -> Result<ObjStats, ObjError> {
     let mesh = mesh_world_smoothed(world, blur)?;
     let stats = ObjStats {
         vertex_count: mesh.vertex_count(),
@@ -182,21 +173,13 @@ pub fn export_obj_smoothed(
 /// format `export_obj` uses per chunk: vertex positions with embedded
 /// colors, then per-vertex normals, then triangle face lines indexed
 /// 1-based as `f v//vn v//vn v//vn`.
-fn write_obj_combined_mesh<W: Write>(
-    mesh: &ChunkMesh,
-    writer: &mut W,
-) -> Result<(), ObjError> {
+fn write_obj_combined_mesh<W: Write>(mesh: &ChunkMesh, writer: &mut W) -> Result<(), ObjError> {
     for v in &mesh.vertices {
         let c = v.baked_color();
         writeln!(
             writer,
             "v {:.4} {:.4} {:.4} {:.3} {:.3} {:.3}",
-            v.position[0],
-            v.position[1],
-            v.position[2],
-            c[0],
-            c[1],
-            c[2],
+            v.position[0], v.position[1], v.position[2], c[0], c[1], c[2],
         )?;
     }
     for v in &mesh.vertices {
@@ -345,12 +328,7 @@ mod tests {
         for line in s.lines().filter(|l| l.starts_with("f ")) {
             // Format: `f a//a b//b c//c`. Parse the three indices.
             for token in line[2..].split_whitespace() {
-                let idx: usize = token
-                    .split("//")
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap();
+                let idx: usize = token.split("//").next().unwrap().parse().unwrap();
                 assert!(
                     idx >= 1 && idx <= stats.vertex_count,
                     "face index {} out of range [1, {}]",

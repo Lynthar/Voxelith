@@ -98,7 +98,11 @@ impl PipelineVariant {
 
 impl RenderPipeline {
     /// Create a new render pipeline with optional features
-    pub fn new_with_features(device: &wgpu::Device, surface_format: wgpu::TextureFormat, features: wgpu::Features) -> Self {
+    pub fn new_with_features(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        features: wgpu::Features,
+    ) -> Self {
         // Create shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Voxel Shader"),

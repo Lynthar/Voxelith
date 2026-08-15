@@ -15,8 +15,8 @@ use super::neighbors::{
     lock_neighbors, neighbor_arcs, voxel_at_local, NeighborArcs, NeighborGuards,
 };
 use super::{
-    ao_to_f32, apply_face_shading, compute_face_ao, face_quad_vertices_sized_ao,
-    ChunkMesh, Face, Mesher,
+    ao_to_f32, apply_face_shading, compute_face_ao, face_quad_vertices_sized_ao, ChunkMesh, Face,
+    Mesher,
 };
 use crate::core::{Chunk, ChunkPos, World, CHUNK_SIZE};
 
@@ -69,11 +69,8 @@ impl Mesher for NaiveMesher {
         let neighbors: NeighborGuards = lock_neighbors(&arcs);
 
         let estimated_faces = chunk.solid_count() as usize;
-        let mut mesh = ChunkMesh::with_capacity(
-            chunk_pos,
-            estimated_faces * 4,
-            estimated_faces * 6,
-        );
+        let mut mesh =
+            ChunkMesh::with_capacity(chunk_pos, estimated_faces * 4, estimated_faces * 6);
 
         let (wx, wy, wz) = chunk_pos.world_origin();
 
@@ -92,29 +89,19 @@ impl Mesher for NaiveMesher {
 
                     for face in Face::ALL {
                         if !Self::is_face_visible(
-                            &chunk,
-                            &neighbors,
-                            x as i32,
-                            y as i32,
-                            z as i32,
-                            face,
+                            &chunk, &neighbors, x as i32, y as i32, z as i32, face,
                         ) {
                             continue;
                         }
                         let shaded = apply_face_shading(color, face);
                         // 4-corner AO via 12 voxel samples through
                         // the 26-neighbor lock array.
-                        let ao_int = compute_face_ao(
-                            (world_x, world_y, world_z),
-                            face,
-                            |p| {
-                                let lx = p.0 - wx;
-                                let ly = p.1 - wy;
-                                let lz = p.2 - wz;
-                                voxel_at_local(&chunk, &neighbors, lx, ly, lz)
-                                    .is_solid()
-                            },
-                        );
+                        let ao_int = compute_face_ao((world_x, world_y, world_z), face, |p| {
+                            let lx = p.0 - wx;
+                            let ly = p.1 - wy;
+                            let lz = p.2 - wz;
+                            voxel_at_local(&chunk, &neighbors, lx, ly, lz).is_solid()
+                        });
                         let ao = [
                             ao_to_f32(ao_int[0]),
                             ao_to_f32(ao_int[1]),

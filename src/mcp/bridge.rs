@@ -302,10 +302,7 @@ impl BridgeReceiver {
 /// A fresh editor ↔ server pair.
 pub fn channel() -> (BridgeHandle, BridgeReceiver) {
     let (calls, rx) = mpsc::unbounded_channel();
-    (
-        BridgeHandle { calls },
-        BridgeReceiver { calls: rx },
-    )
+    (BridgeHandle { calls }, BridgeReceiver { calls: rx })
 }
 
 /// The server. Cloning shares the line to the editor, which the HTTP
@@ -415,8 +412,10 @@ impl BridgeMcp {
         }
     }
 
-    #[tool(description = "Undo the last step — an agent batch or a human edit, whichever \
-                          is on top of the shared history.")]
+    #[tool(
+        description = "Undo the last step — an agent batch or a human edit, whichever \
+                          is on top of the shared history."
+    )]
     async fn undo(&self) -> Result<CallToolResult, McpError> {
         self.step(AgentRequest::Undo, "undo").await
     }
@@ -583,7 +582,7 @@ pub async fn serve_http_bridged(
     listener: std::net::TcpListener,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
     let server = BridgeMcp::new(editor);
@@ -705,10 +704,7 @@ mod tests {
         drop(receiver);
 
         let reply = handle.call(AgentRequest::Undo).await;
-        assert_eq!(
-            reply.err().expect("must refuse").code,
-            "editor_unavailable"
-        );
+        assert_eq!(reply.err().expect("must refuse").code, "editor_unavailable");
     }
 
     /// A parked call knows when nobody is listening any more, which is

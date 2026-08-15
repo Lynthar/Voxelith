@@ -405,7 +405,7 @@ fn write_glb_groups(
     }
 
     // BIN must be 4-byte aligned. Pad with zeros (spec §3.4.2).
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -508,9 +508,9 @@ fn write_glb_groups(
     // pivot. An identity transform adds nothing, leaving the output
     // byte-for-byte identical to the plain export.
     if !transform.is_identity() && !scene_nodes.is_empty() {
-        let bounds = sections.iter().fold(
-            None,
-            |acc: Option<([f32; 3], [f32; 3])>, s| match acc {
+        let bounds = sections
+            .iter()
+            .fold(None, |acc: Option<([f32; 3], [f32; 3])>, s| match acc {
                 None => Some((s.min, s.max)),
                 Some((mut lo, mut hi)) => {
                     for a in 0..3 {
@@ -519,8 +519,7 @@ fn write_glb_groups(
                     }
                     Some((lo, hi))
                 }
-            },
-        );
+            });
         let root = root_transform_node(&scene_nodes, bounds, transform);
         scene_nodes = vec![nodes.len()];
         nodes.push(root);
@@ -608,11 +607,7 @@ fn write_glb_groups(
 /// Separated out so the 4 GiB boundary is testable — a mesh that large
 /// can't be built in a unit test, and the failure mode it guards
 /// against (a silently wrapped `as u32`) is invisible in the output.
-fn glb_total_len(
-    json_len: usize,
-    bin_len: usize,
-    has_bin: bool,
-) -> Result<u32, GlbError> {
+fn glb_total_len(json_len: usize, bin_len: usize, has_bin: bool) -> Result<u32, GlbError> {
     let total = 12 + 8 + json_len + if has_bin { 8 + bin_len } else { 0 };
     u32::try_from(total).map_err(|_| GlbError::TooLarge(total))
 }
@@ -712,8 +707,7 @@ mod tests {
         // Optional BIN chunk
         if json_end < bytes.len() {
             let bin_len =
-                u32::from_le_bytes(bytes[json_end..json_end + 4].try_into().unwrap())
-                    as usize;
+                u32::from_le_bytes(bytes[json_end..json_end + 4].try_into().unwrap()) as usize;
             assert_eq!(
                 &bytes[json_end + 4..json_end + 8],
                 b"BIN\0",
@@ -840,11 +834,9 @@ mod tests {
         File::open(&path).unwrap().read_to_end(&mut bytes).unwrap();
         let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         assert_eq!(json_len % 4, 0, "JSON chunk must be 4-byte aligned");
-        let bin_len = u32::from_le_bytes(
-            bytes[20 + json_len..20 + json_len + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let bin_len =
+            u32::from_le_bytes(bytes[20 + json_len..20 + json_len + 4].try_into().unwrap())
+                as usize;
         assert_eq!(bin_len % 4, 0, "BIN chunk must be 4-byte aligned");
 
         let _ = std::fs::remove_file(&path);
@@ -1129,7 +1121,10 @@ mod tests {
         assert!(bin.is_none(), "no geometry → no BIN chunk");
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
-        assert!(json["meshes"].is_null(), "no meshes for a sockets-only export");
+        assert!(
+            json["meshes"].is_null(),
+            "no meshes for a sockets-only export"
+        );
         let nodes = json["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 1);
         assert!(nodes[0].get("mesh").is_none());

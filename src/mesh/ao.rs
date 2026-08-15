@@ -196,13 +196,8 @@ mod tests {
         // Solid voxel at (1, 1, 0) (the side1 cell along U for
         // PosY's vertex 1 + 2). Vertices 1 and 2 should darken to
         // 2; vertices 0 and 3 stay at 3.
-        let solid: std::collections::HashSet<(i32, i32, i32)> =
-            [(1, 1, 0)].into_iter().collect();
-        let ao = compute_face_ao(
-            (0, 0, 0),
-            Face::PosY,
-            |p| solid.contains(&p),
-        );
+        let solid: std::collections::HashSet<(i32, i32, i32)> = [(1, 1, 0)].into_iter().collect();
+        let ao = compute_face_ao((0, 0, 0), Face::PosY, |p| solid.contains(&p));
         assert_eq!(ao, [3, 2, 2, 3]);
     }
 

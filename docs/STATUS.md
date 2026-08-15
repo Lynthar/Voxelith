@@ -132,7 +132,7 @@ Concise forward map (the unbuilt parts of the former roadmap + vision), grouped 
 
 **Platform & ecosystem** — WASM/WebGPU build; scripting (Lua/Rhai) — largely subsumed by the agent ops layer above, which is the programmable surface; plugin API; tileset/material externalization to `.ron`; asset library.
 
-**Tooling / CI** — flip clippy (`-- -D warnings`) and `cargo fmt --check` from informational to hard gates after a cleanup pass (codebase carries a handful of pre-existing lints + a deliberate narrow manual format).
+**Tooling / CI** — ~~flip clippy and `cargo fmt --check` to hard gates~~ done (2026-08): the tree is at zero clippy warnings and rustfmt-clean (hand-aligned tables carry `#[rustfmt::skip]`), and both run as hard gates in CI (`-- -D warnings`). Still open here: MSRV verification and `cargo audit` in CI.
 
 ---
 

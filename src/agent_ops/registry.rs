@@ -419,7 +419,10 @@ mod tests {
         let report = session
             .apply_ops(&batch)
             .expect("the template must be accepted as sent");
-        assert!(report.changed_voxels > 0, "the template must build something");
+        assert!(
+            report.changed_voxels > 0,
+            "the template must build something"
+        );
         assert_eq!(session.graph.nodes.len(), 3);
     }
 
@@ -429,7 +432,10 @@ mod tests {
         assert!(template.get("next_id").is_none());
         assert!(template.get("output_node").is_none());
         for node in template["nodes"].as_array().expect("nodes is an array") {
-            assert!(node.get("position").is_none(), "position is layout, not data");
+            assert!(
+                node.get("position").is_none(),
+                "position is layout, not data"
+            );
             assert!(node.get("kind").is_some(), "every node names its kind");
         }
     }
@@ -439,7 +445,11 @@ mod tests {
         let ids: Vec<&str> = generator_infos().iter().map(|info| info.id).collect();
         assert_eq!(
             ids,
-            vec!["builtin.perlin_terrain", "builtin.lsystem_tree", "builtin.wfc"]
+            vec![
+                "builtin.perlin_terrain",
+                "builtin.lsystem_tree",
+                "builtin.wfc"
+            ]
         );
     }
 
@@ -499,7 +509,11 @@ mod tests {
         assert_eq!(wfc.code, ErrorCode::InvalidParams);
 
         // …and the sizes a human would actually ask for still pass.
-        assert!(build("builtin.perlin_terrain", &json!({"width": 256, "depth": 256})).is_ok());
+        assert!(build(
+            "builtin.perlin_terrain",
+            &json!({"width": 256, "depth": 256})
+        )
+        .is_ok());
         assert!(build("builtin.wfc", &json!({"width": 24, "depth": 24})).is_ok());
     }
 }

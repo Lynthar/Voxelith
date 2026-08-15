@@ -73,9 +73,7 @@ impl Selection {
         let (x0, x1) = (self.min.0, self.max.0);
         let (y0, y1) = (self.min.1, self.max.1);
         let (z0, z1) = (self.min.2, self.max.2);
-        (z0..=z1).flat_map(move |z| {
-            (y0..=y1).flat_map(move |y| (x0..=x1).map(move |x| (x, y, z)))
-        })
+        (z0..=z1).flat_map(move |z| (y0..=y1).flat_map(move |y| (x0..=x1).map(move |x| (x, y, z))))
     }
 }
 

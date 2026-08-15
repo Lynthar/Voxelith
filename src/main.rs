@@ -16,7 +16,11 @@ use clap::{Parser, Subcommand};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 #[derive(Parser)]
-#[command(name = "voxelith", version, about = "Procedural-first voxel asset creation tool")]
+#[command(
+    name = "voxelith",
+    version,
+    about = "Procedural-first voxel asset creation tool"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -281,12 +285,18 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>, checkpoint: bool) {
             std::process::exit(2);
         }
     };
-    log::info!("serving projects under {}", voxelith::mcp::display(root.dir()));
+    log::info!(
+        "serving projects under {}",
+        voxelith::mcp::display(root.dir())
+    );
     if checkpoint == Checkpoint::AfterEveryEdit {
         log::info!("check-pointing the document to its file after every edit");
     }
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("could not start the async runtime: {e}");
@@ -374,9 +384,9 @@ fn run_gui(agent_port: Option<u16>) {
     // thousand lines per idle minute — which buries anything the app
     // says and makes the terminal the app was launched from useless.
     // An explicit RUST_LOG still overrides all of this.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        "info,wgpu_core=warn,wgpu_hal=warn,naga=warn",
-    ))
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
+    )
     .format_timestamp(None)
     .init();
 

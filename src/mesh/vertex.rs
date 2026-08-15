@@ -1,7 +1,7 @@
 //! Vertex and mesh data structures for rendering.
 
-use bytemuck::{Pod, Zeroable};
 use crate::core::ChunkPos;
+use bytemuck::{Pod, Zeroable};
 
 /// Ambient floor used when baking per-vertex AO into exported vertex
 /// colors. **Kept in sync with `ambient_min` in
@@ -19,6 +19,7 @@ pub const AO_AMBIENT_MIN: f32 = 0.5;
 /// - Color: 4 floats (16 bytes)
 /// - AO: 1 float (4 bytes) — 0 = fully occluded, 1 = no occlusion
 /// - Tint zone: 1 float (4 bytes) — faction recolor zone (export only)
+///
 /// Total: 48 bytes per vertex
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
@@ -53,12 +54,7 @@ impl Vertex {
 
     /// Create a new vertex with explicit AO factor (0 = fully
     /// occluded, 1 = none).
-    pub fn new_with_ao(
-        position: [f32; 3],
-        normal: [f32; 3],
-        color: [f32; 4],
-        ao: f32,
-    ) -> Self {
+    pub fn new_with_ao(position: [f32; 3], normal: [f32; 3], color: [f32; 4], ao: f32) -> Self {
         Self {
             position,
             normal,
@@ -157,7 +153,11 @@ impl ChunkMesh {
     }
 
     /// Create mesh with pre-allocated capacity
-    pub fn with_capacity(chunk_pos: ChunkPos, vertex_capacity: usize, index_capacity: usize) -> Self {
+    pub fn with_capacity(
+        chunk_pos: ChunkPos,
+        vertex_capacity: usize,
+        index_capacity: usize,
+    ) -> Self {
         Self {
             chunk_pos,
             vertices: Vec::with_capacity(vertex_capacity),
@@ -199,8 +199,7 @@ impl ChunkMesh {
     /// CCW-from-outside (cross product parallel to face normal).
     /// See `push_quad` for the full winding rationale.
     pub fn add_quad_with_ao_flip(&mut self, vertices: [Vertex; 4]) {
-        let flip =
-            vertices[0].ao + vertices[2].ao > vertices[1].ao + vertices[3].ao;
+        let flip = vertices[0].ao + vertices[2].ao > vertices[1].ao + vertices[3].ao;
         self.push_quad(vertices, flip);
     }
 
@@ -229,14 +228,8 @@ impl ChunkMesh {
         } else {
             // Default split along 0-2 (A-C): triangles
             // (A, C, B) + (A, D, C).
-            self.indices.extend_from_slice(&[
-                base,
-                base + 2,
-                base + 1,
-                base,
-                base + 3,
-                base + 2,
-            ]);
+            self.indices
+                .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
         }
     }
 
@@ -364,9 +357,7 @@ mod tests {
                     ];
                     // Cross dot normal should be POSITIVE (parallel,
                     // not anti-parallel) for CCW-from-outside.
-                    let dot = cross[0] * normal[0]
-                        + cross[1] * normal[1]
-                        + cross[2] * normal[2];
+                    let dot = cross[0] * normal[0] + cross[1] * normal[1] + cross[2] * normal[2];
                     assert!(
                         dot > 0.0,
                         "Face {:?} triangle {} (ao_uniform={}): cross {:?} not parallel to normal {:?}, dot={}",

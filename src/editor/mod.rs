@@ -16,8 +16,8 @@ mod tools;
 mod transform;
 
 pub use clipboard::{
-    build_clear_changes, build_move_changes, build_paste_changes,
-    copy_selection_to_clipboard, Clipboard,
+    build_clear_changes, build_move_changes, build_paste_changes, copy_selection_to_clipboard,
+    Clipboard,
 };
 pub use commands::{Command, CommandHistory, GraphTransition, VoxelChange};
 pub use raycast::{Ray, RaycastHit, VoxelRaycast};
@@ -157,15 +157,15 @@ impl Editor {
             Voxel::from_rgb(255, 0, 255), // Magenta
             Voxel::from_rgb(0, 255, 255), // Cyan
             // Earth tones
-            Voxel::from_rgb(139, 90, 43),  // Brown
-            Voxel::from_rgb(76, 153, 0),   // Grass green
+            Voxel::from_rgb(139, 90, 43),   // Brown
+            Voxel::from_rgb(76, 153, 0),    // Grass green
             Voxel::from_rgb(194, 178, 128), // Sand
             Voxel::from_rgb(128, 128, 128), // Stone
             // Vivid colors
-            Voxel::from_rgb(255, 128, 0),  // Orange
-            Voxel::from_rgb(128, 0, 255),  // Purple
+            Voxel::from_rgb(255, 128, 0),   // Orange
+            Voxel::from_rgb(128, 0, 255),   // Purple
             Voxel::from_rgb(255, 192, 203), // Pink
-            Voxel::from_rgb(0, 128, 128),  // Teal
+            Voxel::from_rgb(0, 128, 128),   // Teal
         ]
     }
 
@@ -233,7 +233,10 @@ mod symmetry_tests {
 
     #[test]
     fn test_x_axis_doubles_position() {
-        let s = SymmetryAxes { x: true, ..Default::default() };
+        let s = SymmetryAxes {
+            x: true,
+            ..Default::default()
+        };
         assert_eq!(s.count(), 2);
         assert_eq!(
             s.mirror_positions((5, 7, 11)),
@@ -243,7 +246,11 @@ mod symmetry_tests {
 
     #[test]
     fn test_all_axes_octuple() {
-        let s = SymmetryAxes { x: true, y: true, z: true };
+        let s = SymmetryAxes {
+            x: true,
+            y: true,
+            z: true,
+        };
         assert_eq!(s.count(), 8);
         let result = s.mirror_positions((5, 7, 11));
         assert_eq!(result.len(), 8);
@@ -264,7 +271,10 @@ mod symmetry_tests {
         // Cell at x=0 must mirror to x=-1 (not to itself), and the
         // pair must be a true reflection — x=0 mirrors to x=-1 and
         // back.
-        let s = SymmetryAxes { x: true, ..Default::default() };
+        let s = SymmetryAxes {
+            x: true,
+            ..Default::default()
+        };
         assert_eq!(s.mirror_positions((0, 5, 5)), vec![(0, 5, 5), (-1, 5, 5)]);
         assert_eq!(s.mirror_positions((-1, 5, 5)), vec![(-1, 5, 5), (0, 5, 5)]);
     }
@@ -286,8 +296,20 @@ mod symmetry_tests {
     #[test]
     fn test_any_reports_true_when_any_axis_on() {
         assert!(!SymmetryAxes::default().any());
-        assert!(SymmetryAxes { x: true, ..Default::default() }.any());
-        assert!(SymmetryAxes { y: true, ..Default::default() }.any());
-        assert!(SymmetryAxes { z: true, ..Default::default() }.any());
+        assert!(SymmetryAxes {
+            x: true,
+            ..Default::default()
+        }
+        .any());
+        assert!(SymmetryAxes {
+            y: true,
+            ..Default::default()
+        }
+        .any());
+        assert!(SymmetryAxes {
+            z: true,
+            ..Default::default()
+        }
+        .any());
     }
 }

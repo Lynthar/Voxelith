@@ -37,11 +37,7 @@ pub struct SelectionMesh {
 }
 
 impl SelectionMesh {
-    pub fn new(
-        device: &wgpu::Device,
-        min: (i32, i32, i32),
-        max: (i32, i32, i32),
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, min: (i32, i32, i32), max: (i32, i32, i32)) -> Self {
         let mut vertices = build_aabb_lines(min, max);
         // Append the center crosshair + min-corner anchor markers so the
         // user can see where mirror flips (center) and where rotation
@@ -71,20 +67,32 @@ fn build_aabb_lines(min: (i32, i32, i32), max: (i32, i32, i32)) -> Vec<LineVerte
 
     vec![
         // Bottom face (y = y0): 4 edges.
-        v([x0, y0, z0], c), v([x1, y0, z0], c),
-        v([x1, y0, z0], c), v([x1, y0, z1], c),
-        v([x1, y0, z1], c), v([x0, y0, z1], c),
-        v([x0, y0, z1], c), v([x0, y0, z0], c),
+        v([x0, y0, z0], c),
+        v([x1, y0, z0], c),
+        v([x1, y0, z0], c),
+        v([x1, y0, z1], c),
+        v([x1, y0, z1], c),
+        v([x0, y0, z1], c),
+        v([x0, y0, z1], c),
+        v([x0, y0, z0], c),
         // Top face (y = y1): 4 edges.
-        v([x0, y1, z0], c), v([x1, y1, z0], c),
-        v([x1, y1, z0], c), v([x1, y1, z1], c),
-        v([x1, y1, z1], c), v([x0, y1, z1], c),
-        v([x0, y1, z1], c), v([x0, y1, z0], c),
+        v([x0, y1, z0], c),
+        v([x1, y1, z0], c),
+        v([x1, y1, z0], c),
+        v([x1, y1, z1], c),
+        v([x1, y1, z1], c),
+        v([x0, y1, z1], c),
+        v([x0, y1, z1], c),
+        v([x0, y1, z0], c),
         // 4 vertical edges between the two faces.
-        v([x0, y0, z0], c), v([x0, y1, z0], c),
-        v([x1, y0, z0], c), v([x1, y1, z0], c),
-        v([x1, y0, z1], c), v([x1, y1, z1], c),
-        v([x0, y0, z1], c), v([x0, y1, z1], c),
+        v([x0, y0, z0], c),
+        v([x0, y1, z0], c),
+        v([x1, y0, z0], c),
+        v([x1, y1, z0], c),
+        v([x1, y0, z1], c),
+        v([x1, y1, z1], c),
+        v([x0, y0, z1], c),
+        v([x0, y1, z1], c),
     ]
 }
 
@@ -118,13 +126,19 @@ fn build_markers(min: (i32, i32, i32), max: (i32, i32, i32)) -> Vec<LineVertex> 
 
     vec![
         // Center crosshair: one segment per axis through the center.
-        v([cx - arm, cy, cz], cc), v([cx + arm, cy, cz], cc),
-        v([cx, cy - arm, cz], cc), v([cx, cy + arm, cz], cc),
-        v([cx, cy, cz - arm], cc), v([cx, cy, cz + arm], cc),
+        v([cx - arm, cy, cz], cc),
+        v([cx + arm, cy, cz], cc),
+        v([cx, cy - arm, cz], cc),
+        v([cx, cy + arm, cz], cc),
+        v([cx, cy, cz - arm], cc),
+        v([cx, cy, cz + arm], cc),
         // Anchor tripod: legs from the min corner along +X/+Y/+Z.
-        v([x0, y0, z0], ac), v([x0 + leg, y0, z0], ac),
-        v([x0, y0, z0], ac), v([x0, y0 + leg, z0], ac),
-        v([x0, y0, z0], ac), v([x0, y0, z0 + leg], ac),
+        v([x0, y0, z0], ac),
+        v([x0 + leg, y0, z0], ac),
+        v([x0, y0, z0], ac),
+        v([x0, y0 + leg, z0], ac),
+        v([x0, y0, z0], ac),
+        v([x0, y0, z0 + leg], ac),
     ]
 }
 
@@ -147,7 +161,7 @@ mod tests {
         let xs: Vec<f32> = v.iter().map(|lv| lv.position[0]).collect();
         assert!(xs.contains(&3.0));
         assert!(xs.contains(&4.0));
-        assert!(!xs.iter().any(|&x| x < 3.0 || x > 4.0));
+        assert!(!xs.iter().any(|&x| !(3.0..=4.0).contains(&x)));
     }
 
     #[test]
@@ -164,7 +178,11 @@ mod tests {
             let on_axis = (0..3)
                 .filter(|&i| (lv.position[i] - center[i]).abs() < 1e-6)
                 .count();
-            assert!(on_axis >= 2, "crosshair vertex {:?} off-center", lv.position);
+            assert!(
+                on_axis >= 2,
+                "crosshair vertex {:?} off-center",
+                lv.position
+            );
         }
 
         // Tripod (last 6): three legs, each starting exactly at the min

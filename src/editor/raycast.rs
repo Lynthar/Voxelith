@@ -192,18 +192,16 @@ impl VoxelRaycast {
                     t_max_z += t_delta_z;
                     last_normal = (0, 0, -step_z);
                 }
+            } else if t_max_y < t_max_z {
+                y += step_y;
+                distance = t_max_y;
+                t_max_y += t_delta_y;
+                last_normal = (0, -step_y, 0);
             } else {
-                if t_max_y < t_max_z {
-                    y += step_y;
-                    distance = t_max_y;
-                    t_max_y += t_delta_y;
-                    last_normal = (0, -step_y, 0);
-                } else {
-                    z += step_z;
-                    distance = t_max_z;
-                    t_max_z += t_delta_z;
-                    last_normal = (0, 0, -step_z);
-                }
+                z += step_z;
+                distance = t_max_z;
+                t_max_z += t_delta_z;
+                last_normal = (0, 0, -step_z);
             }
 
             // Check if we hit a solid voxel
@@ -320,7 +318,6 @@ impl VoxelRaycast {
         }
         fallback
     }
-
 }
 
 #[cfg(test)]

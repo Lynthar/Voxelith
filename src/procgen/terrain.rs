@@ -6,10 +6,7 @@ use noise::{NoiseFn, Perlin};
 
 use crate::core::Voxel;
 
-use super::{
-    GenError, GenResult, GeneratorCategory, GeneratorMeta,
-    VoxelGenerator, VoxelPatch,
-};
+use super::{GenError, GenResult, GeneratorCategory, GeneratorMeta, VoxelGenerator, VoxelPatch};
 
 /// Heightmap terrain generator using fractal Brownian motion (FBM)
 /// over Perlin noise.
@@ -92,10 +89,8 @@ impl VoxelGenerator for PerlinTerrain {
         let height_range = (self.max_height - self.min_height) as f64;
 
         // Rough capacity hint: half the bounding volume tends to be solid.
-        let est = (self.width as usize)
-            * (self.depth as usize)
-            * (height_range as usize).max(1)
-            / 2;
+        let est =
+            (self.width as usize) * (self.depth as usize) * (height_range as usize).max(1) / 2;
         let mut patch = VoxelPatch::with_capacity(est);
 
         // Color stratification (grass / dirt / stone).
@@ -136,8 +131,7 @@ impl VoxelGenerator for PerlinTerrain {
                     // output stable.
                     let ox = octave as f64 * 0.7548776662;
                     let oz = octave as f64 * 0.5698402909;
-                    let n = perlin
-                        .get([x as f64 * freq + ox, z as f64 * freq + oz]);
+                    let n = perlin.get([x as f64 * freq + ox, z as f64 * freq + oz]);
                     acc += n * amp;
                     total_amp += amp;
                     amp *= 0.5;
@@ -283,11 +277,27 @@ mod tests {
             patch.voxels.iter().map(|((x, _, _), _)| *x).collect();
         let zs: std::collections::HashSet<i32> =
             patch.voxels.iter().map(|((_, _, z), _)| *z).collect();
-        assert_eq!(xs.len(), 9, "odd width should yield 9 columns, got {}", xs.len());
-        assert_eq!(zs.len(), 7, "odd depth should yield 7 rows, got {}", zs.len());
+        assert_eq!(
+            xs.len(),
+            9,
+            "odd width should yield 9 columns, got {}",
+            xs.len()
+        );
+        assert_eq!(
+            zs.len(),
+            7,
+            "odd depth should yield 7 rows, got {}",
+            zs.len()
+        );
         // Centered span: -half ..= dim-half-1.
-        assert_eq!((*xs.iter().min().unwrap(), *xs.iter().max().unwrap()), (-4, 4));
-        assert_eq!((*zs.iter().min().unwrap(), *zs.iter().max().unwrap()), (-3, 3));
+        assert_eq!(
+            (*xs.iter().min().unwrap(), *xs.iter().max().unwrap()),
+            (-4, 4)
+        );
+        assert_eq!(
+            (*zs.iter().min().unwrap(), *zs.iter().max().unwrap()),
+            (-3, 3)
+        );
     }
 
     #[test]

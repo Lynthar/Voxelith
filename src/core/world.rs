@@ -9,6 +9,10 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// An inclusive axis-aligned box of voxel cells, `(min, max)` — the
+/// shape every "bounds of some cells" answer in the codebase takes.
+pub type CellAabb = ((i32, i32, i32), (i32, i32, i32));
+
 /// A world containing multiple chunks.
 ///
 /// Unbounded: chunks are created on demand wherever a write lands, so
@@ -102,13 +106,7 @@ impl World {
     /// diagonals rendering stale AO until some unrelated edit happened
     /// to dirty them. A write on a face reaches 1 neighbor, on an edge
     /// 3, in a corner 7.
-    fn mark_boundary_neighbors_dirty(
-        &self,
-        chunk_pos: ChunkPos,
-        lx: usize,
-        ly: usize,
-        lz: usize,
-    ) {
+    fn mark_boundary_neighbors_dirty(&self, chunk_pos: ChunkPos, lx: usize, ly: usize, lz: usize) {
         let last = CHUNK_SIZE - 1;
         // Per axis: the neighbor offsets this coordinate reaches into.
         // An interior coordinate reaches none, so for a non-boundary
@@ -199,8 +197,8 @@ impl World {
     /// Iterates every solid voxel in every loaded chunk; intended for
     /// occasional UI events (recenter, frame, select-all), not per-frame
     /// use. Shared by [`Self::scene_center`] and the camera-framing path.
-    pub fn scene_aabb(&self) -> Option<((i32, i32, i32), (i32, i32, i32))> {
-        let mut bounds: Option<((i32, i32, i32), (i32, i32, i32))> = None;
+    pub fn scene_aabb(&self) -> Option<CellAabb> {
+        let mut bounds: Option<CellAabb> = None;
         for (chunk_pos, chunk) in self.chunks() {
             let chunk = chunk.read();
             if chunk.is_empty() {
@@ -208,11 +206,7 @@ impl World {
             }
             let (ox, oy, oz) = chunk_pos.world_origin();
             for (lp, _) in chunk.iter_solid() {
-                let p = (
-                    ox + lp.x as i32,
-                    oy + lp.y as i32,
-                    oz + lp.z as i32,
-                );
+                let p = (ox + lp.x as i32, oy + lp.y as i32, oz + lp.z as i32);
                 bounds = Some(match bounds {
                     Some((mn, mx)) => (
                         (mn.0.min(p.0), mn.1.min(p.1), mn.2.min(p.2)),
@@ -303,15 +297,10 @@ impl World {
             for y in -half_size..=half_size {
                 for x in -half_size..=half_size {
                     // Choose color based on position
-                    let color_idx = ((x + y + z).abs() as usize) % colors.len();
+                    let color_idx = ((x + y + z).unsigned_abs() as usize) % colors.len();
                     let (r, g, b) = colors[color_idx];
                     let voxel = Voxel::from_rgb(r, g, b);
-                    self.set_voxel(
-                        center.0 + x,
-                        center.1 + y,
-                        center.2 + z,
-                        voxel,
-                    );
+                    self.set_voxel(center.0 + x, center.1 + y, center.2 + z, voxel);
                 }
             }
         }
@@ -380,7 +369,11 @@ mod tests {
 
         copy.set_voxel(1, 2, 3, blue);
         copy.set_voxel(100, 0, 0, blue); // a chunk the original doesn't have
-        assert_eq!(world.get_voxel(1, 2, 3), red, "copy wrote through to the original");
+        assert_eq!(
+            world.get_voxel(1, 2, 3),
+            red,
+            "copy wrote through to the original"
+        );
         assert!(world.get_voxel(100, 0, 0).is_air());
         assert_eq!(copy.get_voxel(1, 2, 3), blue);
     }
@@ -440,8 +433,7 @@ mod tests {
         // The (31,31,31) corner of chunk (0,0,0) touches all 7.
         world.set_voxel(31, 31, 31, Voxel::from_rgb(255, 0, 0));
 
-        let dirty: std::collections::HashSet<_> =
-            world.dirty_chunks().into_iter().collect();
+        let dirty: std::collections::HashSet<_> = world.dirty_chunks().into_iter().collect();
         for &(cx, cy, cz) in &[
             (0, 0, 0),
             (1, 0, 0),
@@ -547,10 +539,6 @@ mod tests {
         world.set_voxel(-2, -2, -2, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(1, 1, 1, Voxel::from_rgb(0, 255, 0));
         let center = world.scene_center().expect("non-empty");
-        assert!(
-            (center - Vec3::ZERO).length() < 1e-4,
-            "got {:?}",
-            center
-        );
+        assert!((center - Vec3::ZERO).length() < 1e-4, "got {:?}", center);
     }
 }

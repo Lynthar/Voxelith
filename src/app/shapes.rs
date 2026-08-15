@@ -38,8 +38,7 @@ impl App {
             for z in -size..=size {
                 for x in -size..=size {
                     let t = (y as f32 / height as f32 * 255.0) as u8;
-                    let voxel =
-                        Voxel::from_rgb(194 - t / 2, 178 - t / 2, 128 + t / 2);
+                    let voxel = Voxel::from_rgb(194 - t / 2, 178 - t / 2, 128 + t / 2);
                     self.document.world.set_voxel(
                         base_center.0 + x,
                         base_center.1 + y,

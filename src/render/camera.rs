@@ -2,9 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
+use std::collections::HashSet;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 use winit::keyboard::KeyCode;
-use std::collections::HashSet;
 
 /// Camera uniform data for GPU
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -174,9 +174,7 @@ impl CameraController {
     /// motion the camera integrates per frame, so it must not depend on
     /// the OS delivering key-repeat events to stay smooth.
     pub fn is_navigating(&self) -> bool {
-        !self.pressed_keys.is_empty()
-            || self.right_mouse_pressed
-            || self.middle_mouse_pressed
+        !self.pressed_keys.is_empty() || self.right_mouse_pressed || self.middle_mouse_pressed
     }
 
     /// Forget any in-progress mouse drag (middle-orbit / right-pan).
@@ -330,12 +328,7 @@ impl CameraController {
     /// Direction `(position - target)` is preserved by the uniform
     /// scale, so the controller's cached `yaw` / `pitch` remain valid
     /// without further sync — only `distance` updates.
-    pub fn process_scroll(
-        &mut self,
-        delta: MouseScrollDelta,
-        camera: &mut Camera,
-        anchor: Vec3,
-    ) {
+    pub fn process_scroll(&mut self, delta: MouseScrollDelta, camera: &mut Camera, anchor: Vec3) {
         let scroll = match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
             MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
@@ -432,11 +425,7 @@ impl CameraController {
             // sprint could never fire anyway.
             let sprint = self.pressed_keys.contains(&KeyCode::ShiftLeft)
                 || self.pressed_keys.contains(&KeyCode::ShiftRight);
-            let speed = if sprint {
-                self.speed * 3.0
-            } else {
-                self.speed
-            };
+            let speed = if sprint { self.speed * 3.0 } else { self.speed };
 
             let offset = movement.normalize() * speed * dt * self.distance;
             camera.position += offset;
@@ -900,9 +889,9 @@ mod tests {
         let before = controller.distance;
         let anchor = camera.target;
 
-        let delta = winit::event::MouseScrollDelta::PixelDelta(
-            winit::dpi::PhysicalPosition::new(0.0, 400.0),
-        );
+        let delta = winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(
+            0.0, 400.0,
+        ));
         controller.process_scroll(delta, &mut camera, anchor);
 
         assert!(

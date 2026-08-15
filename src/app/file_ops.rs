@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use voxelith::{
-    editor::Command, editor::Socket, io, procgen::PipelineGraph,
+    editor::Command,
+    editor::Socket,
+    io,
+    procgen::PipelineGraph,
     ui::{ExportKind, ExportReport, Surface},
 };
 
@@ -71,9 +74,8 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 pub(super) fn camera_from_state(state: &io::EditorState) -> Option<(glam::Vec3, glam::Vec3)> {
     let position = glam::Vec3::from_array(state.camera_position);
     let target = glam::Vec3::from_array(state.camera_target);
-    let usable = position.is_finite()
-        && target.is_finite()
-        && position.distance_squared(target) > 1e-6;
+    let usable =
+        position.is_finite() && target.is_finite() && position.distance_squared(target) > 1e-6;
     usable.then_some((position, target))
 }
 
@@ -265,16 +267,11 @@ impl App {
             .collect()
     }
 
-
     /// Apply a loaded `EditorState` per `kind` — the single place that
     /// says which restore path takes which fields (see [`LoadKind`]).
     /// Returns whether a usable camera was applied, so the caller can
     /// frame the scene after its mesh rebuild when there wasn't one.
-    pub(super) fn apply_editor_state(
-        &mut self,
-        state: &io::EditorState,
-        kind: LoadKind,
-    ) -> bool {
+    pub(super) fn apply_editor_state(&mut self, state: &io::EditorState, kind: LoadKind) -> bool {
         // Document state — every kind.
         self.document.sockets = sockets_from_state(state);
         self.document.graph = graph_from_state(state);
@@ -458,8 +455,7 @@ impl App {
                 self.reset_scene_session_state();
                 self.project_path = Some(path.clone());
 
-                let had_camera =
-                    self.apply_editor_state(&editor_state, LoadKind::Open);
+                let had_camera = self.apply_editor_state(&editor_state, LoadKind::Open);
                 self.rebuild_all_meshes();
                 // A project with no usable camera of its own — one an
                 // agent built headless — keeps the viewport where it is
@@ -706,8 +702,7 @@ impl App {
         self.last_disk_poll = Instant::now();
 
         let on_disk = file_mtime(&path);
-        let verdict =
-            classify_disk_poll(self.watched_mtime, on_disk, self.document.unsaved());
+        let verdict = classify_disk_poll(self.watched_mtime, on_disk, self.document.unsaved());
         // Take the new time when this poll is settled — a refused
         // reload warns once rather than on every poll from here on. A
         // reload that *failed* is not settled: the file is still one
@@ -827,12 +822,7 @@ impl App {
 
     /// Status-bar line for a mesh export, shared by OBJ and GLB. An
     /// empty scene says so instead of reporting a 0-triangle success.
-    fn export_status(
-        surface: Surface,
-        filename: &str,
-        triangles: usize,
-        detail: &str,
-    ) -> String {
+    fn export_status(surface: Surface, filename: &str, triangles: usize, detail: &str) -> String {
         if triangles == 0 {
             return format!("Exported: {} (empty — no geometry)", filename);
         }
@@ -963,53 +953,51 @@ impl App {
         // model exported to .vox opens upright in MagicaVoxel.
         let convert_axes = self.ui.convert_vox_axes;
         match std::fs::File::create(path) {
-            Ok(mut file) => {
-                match io::export_vox(&self.document.world, &mut file, convert_axes) {
-                    Ok(overflow) => {
-                        self.prefs.remember_export_dir(path);
-                        let filename = file_label(path);
-                        let msg = if overflow > 0 {
-                            format!(
-                                "Exported: {} ({} colors quantized — the VOX palette \
+            Ok(mut file) => match io::export_vox(&self.document.world, &mut file, convert_axes) {
+                Ok(overflow) => {
+                    self.prefs.remember_export_dir(path);
+                    let filename = file_label(path);
+                    let msg = if overflow > 0 {
+                        format!(
+                            "Exported: {} ({} colors quantized — the VOX palette \
                                  holds 254)",
-                                filename, overflow
-                            )
-                        } else {
-                            format!("Exported: {}", filename)
-                        };
-                        self.ui.set_status(msg);
-                        let mut notes = Vec::new();
-                        if overflow > 0 {
-                            notes.push(format!(
-                                "{} colors quantized to the nearest of 254 \
+                            filename, overflow
+                        )
+                    } else {
+                        format!("Exported: {}", filename)
+                    };
+                    self.ui.set_status(msg);
+                    let mut notes = Vec::new();
+                    if overflow > 0 {
+                        notes.push(format!(
+                            "{} colors quantized to the nearest of 254 \
                                  palette slots",
-                                overflow
-                            ));
-                        }
-                        self.set_export_report(
-                            path,
-                            ExportReport {
-                                format: "MagicaVoxel (.vox)".into(),
-                                color_model: "254-color palette".into(),
-                                notes,
-                                ..Default::default()
-                            },
-                        );
+                            overflow
+                        ));
                     }
-                    Err(e) => {
-                        log::error!("Failed to export VOX: {}", e);
-                        self.show_write_error(
-                            "Export failed",
-                            path,
-                            "export",
-                            &e,
-                            matches!(e, io::VoxError::Io(_)),
-                        );
-                        self.ui
-                            .set_status(format!("Export failed: {}", file_label(path)));
-                    }
+                    self.set_export_report(
+                        path,
+                        ExportReport {
+                            format: "MagicaVoxel (.vox)".into(),
+                            color_model: "254-color palette".into(),
+                            notes,
+                            ..Default::default()
+                        },
+                    );
                 }
-            }
+                Err(e) => {
+                    log::error!("Failed to export VOX: {}", e);
+                    self.show_write_error(
+                        "Export failed",
+                        path,
+                        "export",
+                        &e,
+                        matches!(e, io::VoxError::Io(_)),
+                    );
+                    self.ui
+                        .set_status(format!("Export failed: {}", file_label(path)));
+                }
+            },
             Err(e) => {
                 log::error!("Failed to create file {:?}: {}", path, e);
                 self.show_write_error("Export failed", path, "create", &e, true);
@@ -1025,17 +1013,13 @@ fn kind_dialog_title(kind: ExportKind) -> &'static str {
     match kind {
         ExportKind::Vox => "Export as MagicaVoxel",
         ExportKind::Obj(Surface::Blocky) => "Export as Wavefront OBJ",
-        ExportKind::Obj(Surface::SmoothLight) => {
-            "Export Smoothed OBJ (light / preserve detail)"
-        }
+        ExportKind::Obj(Surface::SmoothLight) => "Export Smoothed OBJ (light / preserve detail)",
         ExportKind::Obj(Surface::SmoothHeavy) => "Export Smoothed OBJ (heavy / clay)",
         ExportKind::Glb(Surface::Blocky) => "Export as glTF Binary",
         ExportKind::Glb(Surface::SmoothLight) => {
             "Export Smoothed glTF Binary (light / preserve detail)"
         }
-        ExportKind::Glb(Surface::SmoothHeavy) => {
-            "Export Smoothed glTF Binary (heavy / clay)"
-        }
+        ExportKind::Glb(Surface::SmoothHeavy) => "Export Smoothed glTF Binary (heavy / clay)",
     }
 }
 
@@ -1154,7 +1138,10 @@ fn describe_vox_import_error(e: &io::VoxError, path: &Path) -> (String, String) 
             "Make sure you picked a .vox file exported from MagicaVoxel.",
         ),
         io::VoxError::UnsupportedVersion(v) => (
-            format!("unsupported VOX version {} (Voxelith reads v150 and v200)", v),
+            format!(
+                "unsupported VOX version {} (Voxelith reads v150 and v200)",
+                v
+            ),
             "Re-export the model as v150 from MagicaVoxel, then import again.",
         ),
         io::VoxError::ModelTooLarge => (
@@ -1269,7 +1256,10 @@ mod tests {
     fn unsaved_work_outranks_the_file_on_disk() {
         // Single-writer: this can see that the file moved, not merge two
         // versions of it, so the copy the user is still editing wins.
-        assert_eq!(classify_disk_poll(at(10), at(11), true), DiskPoll::WarnStale);
+        assert_eq!(
+            classify_disk_poll(at(10), at(11), true),
+            DiskPoll::WarnStale
+        );
     }
 
     #[test]
@@ -1343,12 +1333,19 @@ mod tests {
         };
 
         app.apply_editor_state(&state, LoadKind::Reload);
-        assert_eq!(app.document.sockets.len(), 1, "document state follows the file");
+        assert_eq!(
+            app.document.sockets.len(),
+            1,
+            "document state follows the file"
+        );
         assert_eq!(app.editor.brush_color.r, 9, "workspace stays the user's");
         assert_eq!(app.editor.current_tool, voxelith::editor::Tool::Fill);
 
         app.apply_editor_state(&state, LoadKind::Open);
-        assert_eq!(app.editor.brush_color.r, 1, "an open applies the whole file");
+        assert_eq!(
+            app.editor.brush_color.r, 1,
+            "an open applies the whole file"
+        );
         assert_eq!(app.editor.current_tool, voxelith::editor::Tool::Place);
     }
 

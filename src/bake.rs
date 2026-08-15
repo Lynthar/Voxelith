@@ -353,7 +353,11 @@ fn warn_unknown_keys(where_: &str, unknown: &BTreeMap<String, serde_json::Value>
         return;
     }
     let keys: Vec<&str> = unknown.keys().map(String::as_str).collect();
-    log::warn!("bake: ignoring unrecognized {} key(s): {}", where_, keys.join(", "));
+    log::warn!(
+        "bake: ignoring unrecognized {} key(s): {}",
+        where_,
+        keys.join(", ")
+    );
     eprintln!(
         "warning: ignoring unrecognized {} key(s): {}",
         where_,
@@ -399,10 +403,7 @@ fn expand_items(spec: &BakeSpec, base: &Path) -> Result<Vec<ResolvedItem>, BakeE
                 }
                 let out_dir = base.join(od);
                 for src in vxlt {
-                    let stem = src
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("model");
+                    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
                     let o = out_dir.join(format!("{stem}.glb"));
                     out.push(make_item(src, o, &parsed));
                 }
@@ -425,7 +426,10 @@ fn merge(defaults: &Settings, item: &Settings) -> Settings {
         // merged value only feeds `parse_settings`.
         unknown: BTreeMap::new(),
         mesher: item.mesher.clone().or_else(|| defaults.mesher.clone()),
-        smoothing: item.smoothing.clone().or_else(|| defaults.smoothing.clone()),
+        smoothing: item
+            .smoothing
+            .clone()
+            .or_else(|| defaults.smoothing.clone()),
         up_axis: item.up_axis.clone().or_else(|| defaults.up_axis.clone()),
         unit_scale: item.unit_scale.or(defaults.unit_scale),
         pivot: item.pivot.clone().or_else(|| defaults.pivot.clone()),
@@ -533,7 +537,7 @@ fn make_item(src: PathBuf, out: PathBuf, p: &ParsedSettings) -> ResolvedItem {
 
 fn parse_shard(s: &str) -> Result<(usize, usize), BakeError> {
     let bad = || BakeError::Spec(format!("invalid --shard '{s}' (expected i/n, e.g. 0/4)"));
-    let (i, n) = s.split_once('/').ok_or_else(|| bad())?;
+    let (i, n) = s.split_once('/').ok_or_else(&bad)?;
     let i: usize = i.trim().parse().map_err(|_| bad())?;
     let n: usize = n.trim().parse().map_err(|_| bad())?;
     if n == 0 || i >= n {
@@ -753,9 +757,7 @@ fn run_gltfpack(glb: &Path, args_override: Option<&[String]>) -> Result<(), Opti
 
     let output = match cmd.output() {
         Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(OptimizeError::NotFound)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(OptimizeError::NotFound),
         Err(e) => return Err(OptimizeError::Io(e.to_string())),
     };
 
@@ -797,7 +799,7 @@ fn group_thousands(n: usize) -> String {
     let len = s.len();
     let mut out = String::with_capacity(len + len / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -937,7 +939,8 @@ mod tests {
                 }
             }
         }
-        io::save_world_with_state(&world, io::EditorState::default(), Default::default(), &src).unwrap();
+        io::save_world_with_state(&world, io::EditorState::default(), Default::default(), &src)
+            .unwrap();
 
         // Absolute paths; `base.join(absolute)` keeps the absolute path.
         fn esc(p: &Path) -> String {

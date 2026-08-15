@@ -27,9 +27,7 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{
-    CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo,
-};
+use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde::Serialize;
 
@@ -158,8 +156,9 @@ fn answered<T: Serialize>(body: T) -> Result<CallToolResult, McpError> {
         #[serde(flatten)]
         body: T,
     }
-    let text = serde_json::to_string_pretty(&Envelope { ok: true, body })
-        .map_err(|e| McpError::internal_error(format!("could not serialize the answer: {e}"), None))?;
+    let text = serde_json::to_string_pretty(&Envelope { ok: true, body }).map_err(|e| {
+        McpError::internal_error(format!("could not serialize the answer: {e}"), None)
+    })?;
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
@@ -469,7 +468,9 @@ impl VoxelithMcp {
                 empty: view.empty,
                 truncated: view.truncated,
             })
-            .map_err(|e| McpError::internal_error(format!("could not describe the view: {e}"), None))?;
+            .map_err(|e| {
+                McpError::internal_error(format!("could not describe the view: {e}"), None)
+            })?;
             blocks.push(ContentBlock::text(caption));
             blocks.push(ContentBlock::image(
                 base64::engine::general_purpose::STANDARD.encode(&view.png),
@@ -485,10 +486,7 @@ impl VoxelithMcp {
                        interactive File > Export, headless — for engine-ready placement \
                        (pivot, up-axis, unit scale) use the `voxelith bake` command."
     )]
-    fn export(
-        &self,
-        Parameters(args): Parameters<PathArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    fn export(&self, Parameters(args): Parameters<PathArgs>) -> Result<CallToolResult, McpError> {
         let path = match self.root.resolve(&args.path) {
             Ok(path) => path,
             Err(e) => return refused(&path_error(e)),
@@ -517,7 +515,9 @@ impl ServerHandler for VoxelithMcp {
             .with_server_info(
                 Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
                     .with_title("Voxelith")
-                    .with_description("Build and edit voxel models, then export them as game assets."),
+                    .with_description(
+                        "Build and edit voxel models, then export them as game assets.",
+                    ),
             )
             .with_instructions(
                 "Voxelith builds voxel models. One document stays open across calls, so \
@@ -677,7 +677,7 @@ pub async fn serve_http(
     checkpoint: Checkpoint,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService, StreamableHttpServerConfig,
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
     let server = VoxelithMcp::new(root, checkpoint);
@@ -800,7 +800,10 @@ mod tests {
         assert!(result["report"]["voxel_count"].as_u64().unwrap() > 0);
         // …and the document itself is untouched.
         assert_eq!(result["voxel_count"], serde_json::json!(0));
-        assert_eq!(body(&server.describe().unwrap())["voxel_count"], serde_json::json!(0));
+        assert_eq!(
+            body(&server.describe().unwrap())["voxel_count"],
+            serde_json::json!(0)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -832,13 +835,22 @@ mod tests {
         let outside = "../voxelith_mcp_confined_elsewhere.vxlt";
 
         for result in [
-            server.open_project(Parameters(PathArgs { path: outside.into() })),
-            server.save_project(Parameters(SaveArgs { path: Some(outside.into()) })),
-            server.export(Parameters(PathArgs { path: outside.into() })),
+            server.open_project(Parameters(PathArgs {
+                path: outside.into(),
+            })),
+            server.save_project(Parameters(SaveArgs {
+                path: Some(outside.into()),
+            })),
+            server.export(Parameters(PathArgs {
+                path: outside.into(),
+            })),
         ] {
             let result = result.unwrap();
             assert_eq!(result.is_error, Some(true));
-            assert_eq!(body(&result)["error"]["code"], serde_json::json!("path_refused"));
+            assert_eq!(
+                body(&result)["error"]["code"],
+                serde_json::json!("path_refused")
+            );
         }
         assert!(!dir.join("../voxelith_mcp_confined_elsewhere.vxlt").exists());
 
@@ -859,19 +871,31 @@ mod tests {
         io::save_world_with_state(&world, state, Default::default(), &project).unwrap();
 
         let server = server(&dir);
-        let opened = body(&server
-            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
-            .unwrap());
+        let opened = body(
+            &server
+                .open_project(Parameters(PathArgs {
+                    path: "scene.vxlt".into(),
+                }))
+                .unwrap(),
+        );
         assert_eq!(opened["voxel_count"], serde_json::json!(1));
 
         server.apply_ops(batch(HUT)).unwrap();
         // No path given: it saves back where it came from.
-        let saved = body(&server.save_project(Parameters(SaveArgs { path: None })).unwrap());
+        let saved = body(
+            &server
+                .save_project(Parameters(SaveArgs { path: None }))
+                .unwrap(),
+        );
         assert_eq!(saved["ok"], serde_json::json!(true));
 
         let (reloaded, state, _) = io::load_world_with_state(&project).unwrap();
         assert!(reloaded.chunk_count() > 0);
-        assert_eq!(state.camera_position, [12.0, 34.0, 56.0], "camera preserved");
+        assert_eq!(
+            state.camera_position,
+            [12.0, 34.0, 56.0],
+            "camera preserved"
+        );
         assert_eq!(state.palette, vec![[9, 8, 7, 255]], "palette preserved");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -882,7 +906,9 @@ mod tests {
         let dir = scratch("no_path");
         let server = server(&dir);
         server.apply_ops(batch(HUT)).unwrap();
-        let result = server.save_project(Parameters(SaveArgs { path: None })).unwrap();
+        let result = server
+            .save_project(Parameters(SaveArgs { path: None }))
+            .unwrap();
         assert_eq!(result.is_error, Some(true));
         assert_eq!(
             body(&result)["error"]["code"],
@@ -900,11 +926,19 @@ mod tests {
         // the file must go back with the session, not stay ahead of it.
         let dir = scratch("checkpoint");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
+        io::save_world_with_state(
+            &World::new(),
+            EditorState::default(),
+            Default::default(),
+            &project,
+        )
+        .unwrap();
 
         let server = checkpointing_server(&dir);
         server
-            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
+            .open_project(Parameters(PathArgs {
+                path: "scene.vxlt".into(),
+            }))
             .unwrap();
 
         let applied = body(&server.apply_ops(batch(HUT)).unwrap());
@@ -935,11 +969,19 @@ mod tests {
         // otherwise "preview this" makes the human's editor reload.
         let dir = scratch("checkpoint_dry");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
+        io::save_world_with_state(
+            &World::new(),
+            EditorState::default(),
+            Default::default(),
+            &project,
+        )
+        .unwrap();
 
         let server = checkpointing_server(&dir);
         server
-            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
+            .open_project(Parameters(PathArgs {
+                path: "scene.vxlt".into(),
+            }))
             .unwrap();
         let dry = HUT.replace(r#""ops""#, r#""options":{"dry_run":true},"ops""#);
 
@@ -960,7 +1002,11 @@ mod tests {
         let server = checkpointing_server(&dir);
 
         let applied = body(&server.apply_ops(batch(HUT)).unwrap());
-        assert_eq!(applied["ok"], serde_json::json!(true), "the edit still stands");
+        assert_eq!(
+            applied["ok"],
+            serde_json::json!(true),
+            "the edit still stands"
+        );
         assert_eq!(applied["checkpoint"]["saved"], serde_json::json!(false));
         assert!(applied["checkpoint"]["detail"]
             .as_str()
@@ -974,11 +1020,19 @@ mod tests {
     fn without_the_flag_nothing_is_written_and_the_answer_stays_quiet() {
         let dir = scratch("checkpoint_off");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
+        io::save_world_with_state(
+            &World::new(),
+            EditorState::default(),
+            Default::default(),
+            &project,
+        )
+        .unwrap();
 
         let server = server(&dir);
         server
-            .open_project(Parameters(PathArgs { path: "scene.vxlt".into() }))
+            .open_project(Parameters(PathArgs {
+                path: "scene.vxlt".into(),
+            }))
             .unwrap();
         let applied = body(&server.apply_ops(batch(HUT)).unwrap());
 
@@ -986,7 +1040,11 @@ mod tests {
             applied.get("checkpoint").is_none(),
             "a plain server must not add a field an agent has to reason about"
         );
-        assert_eq!(voxels_on_disk(&project), 0, "the file is the agent's to save");
+        assert_eq!(
+            voxels_on_disk(&project),
+            0,
+            "the file is the agent's to save"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1008,7 +1066,11 @@ mod tests {
             .unwrap();
 
         // Caption, image, caption, image — in the order asked for.
-        assert_eq!(result.content.len(), 4, "one caption and one image per view");
+        assert_eq!(
+            result.content.len(),
+            4,
+            "one caption and one image per view"
+        );
         for (at, expected) in [(0, "front"), (2, "top")] {
             let caption: serde_json::Value = match &result.content[at] {
                 ContentBlock::Text(text) => serde_json::from_str(&text.text).unwrap(),
@@ -1091,7 +1153,10 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(result.is_error, Some(true));
-        assert_eq!(body(&result)["error"]["code"], serde_json::json!("invalid_size"));
+        assert_eq!(
+            body(&result)["error"]["code"],
+            serde_json::json!("invalid_size")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1106,15 +1171,21 @@ mod tests {
         assert!(ops.is_object(), "the batch must advertise its ops array");
 
         let text = schema.to_string();
-        for op in ["box", "sphere", "cylinder", "line", "hollow", "mirror_copy", "generate"] {
+        for op in [
+            "box",
+            "sphere",
+            "cylinder",
+            "line",
+            "hollow",
+            "mirror_copy",
+            "generate",
+        ] {
             assert!(text.contains(op), "the schema should describe the {op} op");
         }
         // The voxel form is hand-written; it must still offer both
         // shapes the deserializer accepts.
-        let voxel = serde_json::to_value(schemars::schema_for!(
-            crate::agent_ops::VoxelSpec
-        ))
-        .unwrap();
+        let voxel =
+            serde_json::to_value(schemars::schema_for!(crate::agent_ops::VoxelSpec)).unwrap();
         let forms = voxel["anyOf"].as_array().expect("two forms");
         assert_eq!(forms.len(), 2);
         assert_eq!(forms[0]["const"], serde_json::json!("air"));

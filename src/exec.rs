@@ -313,9 +313,7 @@ pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
 /// The loaded [`EditorState`] rides along untouched so a later save
 /// preserves the artist's camera, palette and brush — an agent editing
 /// someone's project has no business resetting their workspace.
-pub(crate) fn open_session(
-    input: Option<&Path>,
-) -> Result<(AgentSession, EditorState), ExecError> {
+pub(crate) fn open_session(input: Option<&Path>) -> Result<(AgentSession, EditorState), ExecError> {
     let Some(path) = input else {
         return Ok((AgentSession::new(), EditorState::default()));
     };
@@ -380,12 +378,14 @@ pub(crate) fn save_project(
         })
         .collect();
     state.graph = session.graph.clone();
-    io::save_world_with_state(&session.world, state, session.metadata.clone(), path).map_err(|e| {
-        ExecError::new(
-            "save_failed",
-            format!("could not save {}: {e}", path.display()),
-        )
-    })?;
+    io::save_world_with_state(&session.world, state, session.metadata.clone(), path).map_err(
+        |e| {
+            ExecError::new(
+                "save_failed",
+                format!("could not save {}: {e}", path.display()),
+            )
+        },
+    )?;
     Ok(path.display().to_string())
 }
 
@@ -554,8 +554,7 @@ pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportI
                     rotation: socket.rotation(),
                 })
                 .collect();
-            let stats =
-                io::export_glb(&session.world, &sockets, path).map_err(|e| failed(&e))?;
+            let stats = io::export_glb(&session.world, &sockets, path).map_err(|e| failed(&e))?;
             ("glb", stats.vertex_count, stats.triangle_count, Vec::new())
         }
         "obj" => {
@@ -653,13 +652,20 @@ mod tests {
         assert!(!report.dry_run);
         assert_eq!(report.applied_ops, 3);
         assert!(report.changed_voxels > 0);
-        assert_eq!(report.world_aabb.unwrap().max[1], 4, "walls four cells tall");
+        assert_eq!(
+            report.world_aabb.unwrap().max[1],
+            4,
+            "walls four cells tall"
+        );
 
         let description = outcome.description.as_ref().unwrap();
         assert_eq!(description.voxel_count, report.voxel_count);
         assert!(description.colors.len() >= 2, "floor and walls differ");
 
-        assert_eq!(outcome.saved.as_deref(), Some(project.display().to_string().as_str()));
+        assert_eq!(
+            outcome.saved.as_deref(),
+            Some(project.display().to_string().as_str())
+        );
         let exported = outcome.exported.as_ref().unwrap();
         assert_eq!(exported.format, "glb");
         assert!(exported.triangles > 0 && exported.bytes > 0);
@@ -712,7 +718,11 @@ mod tests {
         assert_eq!(state.palette, vec![[9, 8, 7, 255]]);
         assert_eq!(state.brush_flags, 0b11);
         assert_eq!(state.brush_tint_zone, 2);
-        assert_eq!(state.sockets.len(), 1, "sockets survive a headless round trip");
+        assert_eq!(
+            state.sockets.len(),
+            1,
+            "sockets survive a headless round trip"
+        );
         assert_eq!(state.sockets[0].name, "muzzle");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -722,7 +732,13 @@ mod tests {
     fn a_dry_run_reports_without_touching_the_project() {
         let dir = scratch("dry_run");
         let project = dir.join("scene.vxlt");
-        io::save_world_with_state(&World::new(), EditorState::default(), Default::default(), &project).unwrap();
+        io::save_world_with_state(
+            &World::new(),
+            EditorState::default(),
+            Default::default(),
+            &project,
+        )
+        .unwrap();
 
         let outcome = run_exec(&ExecRequest {
             ops: Some(write_ops(&dir, HUT)),
@@ -734,7 +750,10 @@ mod tests {
 
         let report = outcome.report.as_ref().unwrap();
         assert!(report.dry_run);
-        assert!(report.changed_voxels > 0, "it still reports what would happen");
+        assert!(
+            report.changed_voxels > 0,
+            "it still reports what would happen"
+        );
 
         let (world, _, _) = io::load_world_with_state(&project).unwrap();
         assert_eq!(solid_voxels(&world), 0, "the file must be untouched");
@@ -777,7 +796,10 @@ mod tests {
 
         assert_eq!(error.code, "invalid_argument");
         assert_eq!(error.op_index, Some(1));
-        assert!(!project.exists(), "a failed run must not leave a file behind");
+        assert!(
+            !project.exists(),
+            "a failed run must not leave a file behind"
+        );
 
         let envelope: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
         assert_eq!(envelope["ok"], serde_json::json!(false));
@@ -851,7 +873,10 @@ mod tests {
 
         for (name, export) in [
             ("a format nothing here writes", dir.join("hut.fbx")),
-            ("a directory that isn't there", dir.join("no_such_dir/hut.glb")),
+            (
+                "a directory that isn't there",
+                dir.join("no_such_dir/hut.glb"),
+            ),
         ] {
             let ops = write_ops(
                 &dir,
@@ -883,7 +908,8 @@ mod tests {
         for x in 0..3 {
             world.set_voxel(x, 0, 0, Voxel::from_rgb(200, 0, 0));
         }
-        io::save_world_with_state(&world, EditorState::default(), Default::default(), &project).unwrap();
+        io::save_world_with_state(&world, EditorState::default(), Default::default(), &project)
+            .unwrap();
         let before = std::fs::read(&project).unwrap();
 
         // Exactly what `voxelith inspect` builds.
@@ -899,7 +925,11 @@ mod tests {
         assert!(outcome.saved.is_none() && outcome.exported.is_none());
         assert_eq!(outcome.description.as_ref().unwrap().voxel_count, 3);
         let slice = outcome.slice.as_ref().unwrap();
-        assert!(slice[0].contains("y=0"), "first line is the header: {}", slice[0]);
+        assert!(
+            slice[0].contains("y=0"),
+            "first line is the header: {}",
+            slice[0]
+        );
         assert_eq!(slice[1], "###", "three voxels in a row");
         assert_eq!(std::fs::read(&project).unwrap(), before, "file untouched");
 

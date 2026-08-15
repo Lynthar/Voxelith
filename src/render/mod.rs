@@ -7,21 +7,21 @@
 //! - Mesh rendering
 
 mod camera;
-mod pipeline;
 mod gpu_mesh;
 mod grid;
+mod pipeline;
 mod selection;
 mod socket;
 
 pub use camera::{Camera, CameraController, CameraUniform};
-pub use pipeline::RenderPipeline;
 pub use gpu_mesh::GpuMesh;
 pub use grid::{AxisMesh, GridMesh, LinePipeline, LineVertex};
+pub use pipeline::RenderPipeline;
 pub use selection::SelectionMesh;
 pub use socket::SocketMesh;
 
-use crate::mesh::ChunkMesh;
 use crate::core::ChunkPos;
+use crate::mesh::ChunkMesh;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -148,10 +148,12 @@ impl Renderer {
         surface.configure(&device, &config);
 
         // Create render pipeline with optional wireframe support
-        let pipeline = RenderPipeline::new_with_features(&device, surface_format, required_features);
+        let pipeline =
+            RenderPipeline::new_with_features(&device, surface_format, required_features);
 
         // Create line pipeline (uses same camera bind group layout)
-        let line_pipeline = LinePipeline::new(&device, surface_format, &pipeline.camera_bind_group_layout);
+        let line_pipeline =
+            LinePipeline::new(&device, surface_format, &pipeline.camera_bind_group_layout);
 
         // Create camera
         // The same constant a headless-built project is saved with, so a
@@ -336,11 +338,7 @@ impl Renderer {
     /// closed AABB `[min, max]` (in world cell coordinates). The
     /// rendered mesh expands to `max + 1` so it envelops the outer
     /// face of the corner cells.
-    pub fn set_selection_mesh(
-        &mut self,
-        min: (i32, i32, i32),
-        max: (i32, i32, i32),
-    ) {
+    pub fn set_selection_mesh(&mut self, min: (i32, i32, i32), max: (i32, i32, i32)) {
         self.selection_mesh = Some(SelectionMesh::new(&self.device, min, max));
     }
 

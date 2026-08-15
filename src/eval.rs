@@ -184,8 +184,11 @@ impl EvalError {
             ok: bool,
             error: &'a EvalError,
         }
-        serde_json::to_string_pretty(&Envelope { ok: false, error: self })
-            .unwrap_or_else(|_| r#"{"ok":false,"error":{"code":"internal","message":""}}"#.into())
+        serde_json::to_string_pretty(&Envelope {
+            ok: false,
+            error: self,
+        })
+        .unwrap_or_else(|_| r#"{"ok":false,"error":{"code":"internal","message":""}}"#.into())
     }
 }
 
@@ -438,9 +441,7 @@ pub fn grade(case: &EvalCase, description: &Description) -> CaseReport {
             }
             if let Some(bound) = expect.cavities {
                 match &structure.cavities {
-                    Some(cavities) => {
-                        checks.push(check("cavities", bound, cavities.count as f64))
-                    }
+                    Some(cavities) => checks.push(check("cavities", bound, cavities.count as f64)),
                     // Same rule as `structure` itself: a bar nobody
                     // measured must not read as a bar that was cleared.
                     None => checks.push(Check {
@@ -549,9 +550,7 @@ mod tests {
     use crate::core::{Voxel, World};
 
     fn case(expect_json: &str) -> EvalCase {
-        let text = format!(
-            r#"{{"id":"t","task":"build something","expect":{expect_json}}}"#
-        );
+        let text = format!(r#"{{"id":"t","task":"build something","expect":{expect_json}}}"#);
         serde_json::from_str(&text).expect("case should parse")
     }
 
@@ -604,20 +603,28 @@ mod tests {
         // A 4-wide bar with a two-cell bump on one side: 2 of 6 voxels
         // have no mirror image.
         let world = filled((0..4).map(|x| (x, 0, 0)).chain([(0, 1, 0), (1, 1, 0)]));
-        let lenient = grade(&case(r#"{"symmetry":[{"axis":"x","max_ratio":0.5}]}"#), &describe_of(&world));
+        let lenient = grade(
+            &case(r#"{"symmetry":[{"axis":"x","max_ratio":0.5}]}"#),
+            &describe_of(&world),
+        );
         assert!(lenient.pass, "2 of 6 is inside a 50% tolerance");
-        let strict = grade(&case(r#"{"symmetry":[{"axis":"x","max_ratio":0.1}]}"#), &describe_of(&world));
+        let strict = grade(
+            &case(r#"{"symmetry":[{"axis":"x","max_ratio":0.1}]}"#),
+            &describe_of(&world),
+        );
         assert!(!strict.pass);
         assert_eq!(strict.checks[0].name, "symmetry.x");
     }
 
     #[test]
     fn a_hollow_bar_is_the_difference_between_solid_and_shell() {
-        let solid = filled((0..3).flat_map(|x| {
-            (0..3).flat_map(move |y| (0..3).map(move |z| (x, y, z)))
-        }));
+        let solid =
+            filled((0..3).flat_map(|x| (0..3).flat_map(move |y| (0..3).map(move |z| (x, y, z)))));
         let case = case(r#"{"enclosed":{"max":0}}"#);
-        assert!(!grade(&case, &describe_of(&solid)).pass, "a solid 3³ has an interior");
+        assert!(
+            !grade(&case, &describe_of(&solid)).pass,
+            "a solid 3³ has an interior"
+        );
 
         let mut shell = solid.deep_clone();
         shell.set_voxel(1, 1, 1, Voxel::AIR);
@@ -689,7 +696,11 @@ mod tests {
                     case.id,
                     file.display()
                 );
-                assert!(!case.task.trim().is_empty(), "case {:?} has no task", case.id);
+                assert!(
+                    !case.task.trim().is_empty(),
+                    "case {:?} has no task",
+                    case.id
+                );
             }
         }
     }
@@ -700,9 +711,16 @@ mod tests {
     fn a_footprint_bar_is_what_separates_a_span_from_a_wall() {
         let wall = filled((0..6).flat_map(|x| (0..4).map(move |y| (x, y, 0))));
         let span = filled(
-            [(0, 0, 0), (0, 1, 0), (0, 2, 0), (5, 0, 0), (5, 1, 0), (5, 2, 0)]
-                .into_iter()
-                .chain((0..6).map(|x| (x, 3, 0))),
+            [
+                (0, 0, 0),
+                (0, 1, 0),
+                (0, 2, 0),
+                (5, 0, 0),
+                (5, 1, 0),
+                (5, 2, 0),
+            ]
+            .into_iter()
+            .chain((0..6).map(|x| (x, 3, 0))),
         );
         let case = case(r#"{"footprint":{"max":2}}"#);
         assert!(!grade(&case, &describe_of(&wall)).pass);
@@ -723,10 +741,28 @@ mod tests {
 
     #[test]
     fn bounds_read_the_way_a_person_writes_them() {
-        assert_eq!(Bound { min: None, max: Some(1.0) }.describe(), "<= 1");
-        assert_eq!(Bound { min: Some(80.0), max: None }.describe(), ">= 80");
         assert_eq!(
-            Bound { min: Some(80.0), max: Some(2000.0) }.describe(),
+            Bound {
+                min: None,
+                max: Some(1.0)
+            }
+            .describe(),
+            "<= 1"
+        );
+        assert_eq!(
+            Bound {
+                min: Some(80.0),
+                max: None
+            }
+            .describe(),
+            ">= 80"
+        );
+        assert_eq!(
+            Bound {
+                min: Some(80.0),
+                max: Some(2000.0)
+            }
+            .describe(),
             "80..2000"
         );
     }

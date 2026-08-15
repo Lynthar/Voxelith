@@ -109,10 +109,7 @@ impl Tool {
     /// shares the gesture but goes through its own commit path
     /// (writing into `Editor::selection`, not the world).
     pub fn is_shape(&self) -> bool {
-        matches!(
-            self,
-            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder
-        )
+        matches!(self, Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder)
     }
 
     /// Whether this tool needs an anchor cell to operate. Place,
@@ -176,11 +173,7 @@ impl BrushTool {
                 for dx in -radius..=radius {
                     let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
                     if dist_sq <= radius_sq {
-                        positions.push((
-                            center.0 + dx,
-                            center.1 + dy,
-                            center.2 + dz,
-                        ));
+                        positions.push((center.0 + dx, center.1 + dy, center.2 + dz));
                     }
                 }
             }
@@ -225,7 +218,11 @@ impl EditorTool for BrushTool {
                 .filter_map(|pos| {
                     let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
                     if old.is_air() {
-                        Some(VoxelChange { pos, old_voxel: old, new_voxel: ctx.brush_color })
+                        Some(VoxelChange {
+                            pos,
+                            old_voxel: old,
+                            new_voxel: ctx.brush_color,
+                        })
                     } else {
                         None
                     }
@@ -238,7 +235,11 @@ impl EditorTool for BrushTool {
                     if old.is_air() {
                         None
                     } else {
-                        Some(VoxelChange { pos, old_voxel: old, new_voxel: Voxel::AIR })
+                        Some(VoxelChange {
+                            pos,
+                            old_voxel: old,
+                            new_voxel: Voxel::AIR,
+                        })
                     }
                 })
                 .collect(),
@@ -247,7 +248,11 @@ impl EditorTool for BrushTool {
                 .filter_map(|pos| {
                     let old = ctx.world.get_voxel(pos.0, pos.1, pos.2);
                     if !old.is_air() && old != ctx.brush_color {
-                        Some(VoxelChange { pos, old_voxel: old, new_voxel: ctx.brush_color })
+                        Some(VoxelChange {
+                            pos,
+                            old_voxel: old,
+                            new_voxel: ctx.brush_color,
+                        })
                     } else {
                         None
                     }
@@ -258,7 +263,8 @@ impl EditorTool for BrushTool {
 
         if !changes.is_empty() {
             let cmd = Command::set_voxels(changes);
-            ctx.history.execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
+            ctx.history
+                .execute_merge(cmd, ctx.world, STROKE_MERGE_WINDOW);
         }
     }
 
@@ -283,7 +289,11 @@ impl EditorTool for BrushTool {
             // bypassed for them. Empty here keeps the trait satisfied
             // without contributing stray cells if someone ever calls
             // this for a non-brush tool by mistake.
-            Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder | Tool::Select
+            Tool::Line
+            | Tool::Box
+            | Tool::Sphere
+            | Tool::Cylinder
+            | Tool::Select
             | Tool::Socket => Vec::new(),
         }
     }
@@ -624,15 +634,9 @@ mod tests {
         );
 
         // The cell just past the cap must not have been touched.
-        assert_eq!(
-            world.get_voxel(MAX_FILL_DIST + 1, 0, 0),
-            target
-        );
+        assert_eq!(world.get_voxel(MAX_FILL_DIST + 1, 0, 0), target);
         // The cell at the cap was filled.
-        assert_eq!(
-            world.get_voxel(MAX_FILL_DIST, 0, 0).r,
-            255
-        );
+        assert_eq!(world.get_voxel(MAX_FILL_DIST, 0, 0).r, 255);
     }
 
     #[test]
@@ -662,7 +666,11 @@ mod tests {
             };
             tool.apply(&mut ctx, &hit_occupied);
         }
-        assert_eq!(world.get_voxel(0, 0, 0), existing, "Place must not overwrite a solid");
+        assert_eq!(
+            world.get_voxel(0, 0, 0),
+            existing,
+            "Place must not overwrite a solid"
+        );
 
         // Aiming at an empty cell still places normally.
         let hit_air = RaycastHit {
@@ -707,7 +715,11 @@ mod tests {
             "the same-RGBA neighbor must join the region"
         );
         assert_eq!(world.get_voxel(0, 0, 0), brush);
-        assert_eq!(world.get_voxel(1, 0, 0), brush, "emissive neighbor recolored, flags reset");
+        assert_eq!(
+            world.get_voxel(1, 0, 0),
+            brush,
+            "emissive neighbor recolored, flags reset"
+        );
     }
 
     #[test]
@@ -721,14 +733,24 @@ mod tests {
         world.set_voxel(2, 0, 0, a); // same color as seed but unreachable past the wall
         world.clear_dirty_flags();
 
-        let outcome = flood_fill(&mut world, &mut history, (0, 0, 0), Voxel::from_rgb(255, 0, 0), 1000);
+        let outcome = flood_fill(
+            &mut world,
+            &mut history,
+            (0, 0, 0),
+            Voxel::from_rgb(255, 0, 0),
+            1000,
+        );
 
         assert_eq!(
             outcome.written, 1,
             "fill can't cross a different-colored cell"
         );
         assert_eq!(world.get_voxel(1, 0, 0), wall, "wall untouched");
-        assert_eq!(world.get_voxel(2, 0, 0), a, "cell beyond the wall untouched");
+        assert_eq!(
+            world.get_voxel(2, 0, 0),
+            a,
+            "cell beyond the wall untouched"
+        );
     }
 
     #[test]

@@ -13,10 +13,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::core::Voxel;
 
-use super::{
-    GenError, GenResult, GeneratorCategory, GeneratorMeta,
-    VoxelGenerator, VoxelPatch,
-};
+use super::{GenError, GenResult, GeneratorCategory, GeneratorMeta, VoxelGenerator, VoxelPatch};
 
 /// Plant L-system grown by a 3D turtle.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -120,11 +117,7 @@ impl TurtleState {
 }
 
 /// 3D Bresenham line. Calls `f` once per voxel along `a`..=`b`.
-fn rasterize_line(
-    a: (i32, i32, i32),
-    b: (i32, i32, i32),
-    mut f: impl FnMut(i32, i32, i32),
-) {
+fn rasterize_line(a: (i32, i32, i32), b: (i32, i32, i32), mut f: impl FnMut(i32, i32, i32)) {
     let (mut x, mut y, mut z) = a;
     let dx = (b.0 - a.0).abs();
     let dy = (b.1 - a.1).abs();
@@ -191,12 +184,7 @@ fn rasterize_line(
 }
 
 /// Place a small spherical leaf cluster centered on `c`.
-fn place_leaf_cluster(
-    patch: &mut VoxelPatch,
-    c: (i32, i32, i32),
-    color: Voxel,
-    radius: i32,
-) {
+fn place_leaf_cluster(patch: &mut VoxelPatch, c: (i32, i32, i32), color: Voxel, radius: i32) {
     let r2 = radius * radius;
     for dz in -radius..=radius {
         for dy in -radius..=radius {
@@ -231,9 +219,7 @@ impl VoxelGenerator for LSystemTree {
             )));
         }
         if self.initial_length <= 0.0 {
-            return Err(GenError::InvalidParams(
-                "initial_length must be > 0".into(),
-            ));
+            return Err(GenError::InvalidParams("initial_length must be > 0".into()));
         }
 
         let s = rewrite(AXIOM, self.iterations);
@@ -245,11 +231,7 @@ impl VoxelGenerator for LSystemTree {
             self.trunk_color[1],
             self.trunk_color[2],
         );
-        let leaves = Voxel::from_rgb(
-            self.leaf_color[0],
-            self.leaf_color[1],
-            self.leaf_color[2],
-        );
+        let leaves = Voxel::from_rgb(self.leaf_color[0], self.leaf_color[1], self.leaf_color[2]);
 
         let origin = Vec3::new(
             self.origin.0 as f32,
@@ -279,8 +261,7 @@ impl VoxelGenerator for LSystemTree {
                     stack.push(turtle.clone());
                     // Random roll per push so sibling branches don't
                     // collapse into a single plane in 3D.
-                    let roll =
-                        rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI);
+                    let roll = rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI);
                     turtle.roll(roll);
                     turtle.length *= self.length_scale;
                 }

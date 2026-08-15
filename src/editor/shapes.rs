@@ -105,9 +105,8 @@ pub fn box_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)
     // span (debug panic; release wraps negative → `as usize` sign-extends
     // to a bogus huge capacity). Cast each extent to i64 BEFORE the
     // subtraction so `x1 - x0` itself can't overflow either.
-    let count = (x1 as i64 - x0 as i64 + 1)
-        * (y1 as i64 - y0 as i64 + 1)
-        * (z1 as i64 - z0 as i64 + 1);
+    let count =
+        (x1 as i64 - x0 as i64 + 1) * (y1 as i64 - y0 as i64 + 1) * (z1 as i64 - z0 as i64 + 1);
     let mut out = Vec::with_capacity(count.clamp(0, MAX_SHAPE_CELLS_HINT) as usize);
     for z in z0..=z1 {
         for y in y0..=y1 {
@@ -244,7 +243,10 @@ mod tests {
     #[test]
     fn test_line_horizontal_visits_every_cell() {
         let v = line_voxels((0, 0, 0), (4, 0, 0));
-        assert_eq!(v, vec![(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)]);
+        assert_eq!(
+            v,
+            vec![(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)]
+        );
     }
 
     #[test]
@@ -366,9 +368,16 @@ mod tests {
         // Vertical pillar: full height at the X-Z center; the X-Z corner
         // sits outside the circular cross-section.
         for y in 0..=3 {
-            assert!(vertical.contains(&(5, y, 5)), "center column missing at y={}", y);
+            assert!(
+                vertical.contains(&(5, y, 5)),
+                "center column missing at y={}",
+                y
+            );
         }
-        assert!(!vertical.contains(&(0, 2, 0)), "X-Z corner must be outside a Y pillar");
+        assert!(
+            !vertical.contains(&(0, 2, 0)),
+            "X-Z corner must be outside a Y pillar"
+        );
 
         // With no hint the heuristic orients the tube horizontally, so
         // that same corner cell lands inside its cross-section — proof

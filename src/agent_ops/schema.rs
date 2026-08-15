@@ -450,10 +450,7 @@ pub enum GraphEdit {
     /// Change a node's parameters in place. Only the ones you name;
     /// the rest keep their values. `kind` can't be changed this way —
     /// remove the node and add the one you meant.
-    SetParams {
-        id: u32,
-        params: serde_json::Value,
-    },
+    SetParams { id: u32, params: serde_json::Value },
     /// Wire `source`'s output into `target`'s input `slot` (0 for
     /// single-input nodes; `mask` and `combine` take 0 and 1).
     Connect {
@@ -503,10 +500,9 @@ mod tests {
         // that writes `filed` believes it asked for a shell, and a
         // silently ignored key would hand it a solid block with a
         // report saying everything went fine.
-        let error = parse_op(
-            r#"{"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":"air","filed":false}"#,
-        )
-        .expect_err("unknown field must be refused");
+        let error =
+            parse_op(r#"{"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":"air","filed":false}"#)
+                .expect_err("unknown field must be refused");
         assert!(
             error.to_string().contains("filed"),
             "the message should name the bad key, got: {error}"
@@ -530,10 +526,9 @@ mod tests {
             }
             other => panic!("parsed as {other:?}"),
         }
-        let op = parse_op(
-            r#"{"op":"cylinder","base":[0,0,0],"radius":1,"height":2,"voxel":"air"}"#,
-        )
-        .unwrap();
+        let op =
+            parse_op(r#"{"op":"cylinder","base":[0,0,0],"radius":1,"height":2,"voxel":"air"}"#)
+                .unwrap();
         match op {
             Op::Cylinder { axis, .. } => assert_eq!(axis, AxisSpec::Y, "cylinders stand up"),
             other => panic!("parsed as {other:?}"),

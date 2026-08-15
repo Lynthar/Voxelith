@@ -72,10 +72,7 @@ const ISO_LEVEL: f32 = 0.5;
 /// shrink and isolated voxels may disappear into the smoothed
 /// background. The smoothed mode is what the user gets from the
 /// "smoothed" export menu entries.
-pub fn mesh_world_smoothed(
-    world: &World,
-    smooth: bool,
-) -> Result<ChunkMesh, SmoothMeshError> {
+pub fn mesh_world_smoothed(world: &World, smooth: bool) -> Result<ChunkMesh, SmoothMeshError> {
     use crate::core::ChunkPos;
     let Some((bbox_min, bbox_max)) = world.scene_aabb() else {
         return Ok(ChunkMesh::new(ChunkPos::ZERO));
@@ -89,7 +86,11 @@ pub fn mesh_world_smoothed(
     // allocated field is (bbox extent + 3) per axis.
     let pad = 1;
     let min = (bbox_min.0 - pad, bbox_min.1 - pad, bbox_min.2 - pad);
-    let max = (bbox_max.0 + 1 + pad, bbox_max.1 + 1 + pad, bbox_max.2 + 1 + pad);
+    let max = (
+        bbox_max.0 + 1 + pad,
+        bbox_max.1 + 1 + pad,
+        bbox_max.2 + 1 + pad,
+    );
     let size = (
         (max.0 - min.0 + 1) as usize,
         (max.1 - min.1 + 1) as usize,
@@ -116,9 +117,8 @@ pub fn mesh_world_smoothed(
     // 0.0 if air. Sampling at integer positions means each density
     // sample IS a voxel — no extra averaging needed for the raw pass.
     let mut density = vec![0.0_f32; total];
-    let idx = |dx: usize, dy: usize, dz: usize| -> usize {
-        dx + dy * size.0 + dz * size.0 * size.1
-    };
+    let idx =
+        |dx: usize, dy: usize, dz: usize| -> usize { dx + dy * size.0 + dz * size.0 * size.1 };
     for dz in 0..size.2 {
         for dy in 0..size.1 {
             for dx in 0..size.0 {
@@ -213,8 +213,8 @@ fn march_one_cube(
     // (density >= ISO_LEVEL). EDGE_TABLE[index] tells us which of the
     // 12 edges intersect the surface.
     let mut cube_index: usize = 0;
-    for i in 0..8 {
-        if densities[i] >= ISO_LEVEL {
+    for (i, &density) in densities.iter().enumerate() {
+        if density >= ISO_LEVEL {
             cube_index |= 1 << i;
         }
     }
@@ -225,22 +225,54 @@ fn march_one_cube(
 
     // World-space corner positions for emit time.
     let corners_world: [[f32; 3]; 8] = [
-        [(field_min.0 + gx as i32) as f32, (field_min.1 + gy as i32) as f32, (field_min.2 + gz as i32) as f32],
-        [(field_min.0 + gx as i32 + 1) as f32, (field_min.1 + gy as i32) as f32, (field_min.2 + gz as i32) as f32],
-        [(field_min.0 + gx as i32 + 1) as f32, (field_min.1 + gy as i32) as f32, (field_min.2 + gz as i32 + 1) as f32],
-        [(field_min.0 + gx as i32) as f32, (field_min.1 + gy as i32) as f32, (field_min.2 + gz as i32 + 1) as f32],
-        [(field_min.0 + gx as i32) as f32, (field_min.1 + gy as i32 + 1) as f32, (field_min.2 + gz as i32) as f32],
-        [(field_min.0 + gx as i32 + 1) as f32, (field_min.1 + gy as i32 + 1) as f32, (field_min.2 + gz as i32) as f32],
-        [(field_min.0 + gx as i32 + 1) as f32, (field_min.1 + gy as i32 + 1) as f32, (field_min.2 + gz as i32 + 1) as f32],
-        [(field_min.0 + gx as i32) as f32, (field_min.1 + gy as i32 + 1) as f32, (field_min.2 + gz as i32 + 1) as f32],
+        [
+            (field_min.0 + gx as i32) as f32,
+            (field_min.1 + gy as i32) as f32,
+            (field_min.2 + gz as i32) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32 + 1) as f32,
+            (field_min.1 + gy as i32) as f32,
+            (field_min.2 + gz as i32) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32 + 1) as f32,
+            (field_min.1 + gy as i32) as f32,
+            (field_min.2 + gz as i32 + 1) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32) as f32,
+            (field_min.1 + gy as i32) as f32,
+            (field_min.2 + gz as i32 + 1) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32) as f32,
+            (field_min.1 + gy as i32 + 1) as f32,
+            (field_min.2 + gz as i32) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32 + 1) as f32,
+            (field_min.1 + gy as i32 + 1) as f32,
+            (field_min.2 + gz as i32) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32 + 1) as f32,
+            (field_min.1 + gy as i32 + 1) as f32,
+            (field_min.2 + gz as i32 + 1) as f32,
+        ],
+        [
+            (field_min.0 + gx as i32) as f32,
+            (field_min.1 + gy as i32 + 1) as f32,
+            (field_min.2 + gz as i32 + 1) as f32,
+        ],
     ];
 
     // Compute the 12 potential edge vertex positions (only the ones
     // flagged in `edges` are actually used; we lazily fill them).
     // Edge i connects EDGE_VERTEX_PAIRS[i].0 → EDGE_VERTEX_PAIRS[i].1.
-    let mut edge_vertices: [(([f32; 3], [f32; 3], [f32; 4]), bool); 12] = [
-        (([0.0; 3], [0.0; 3], [0.0; 4]), false); 12
-    ];
+    // (position, normal, color) plus a "filled" flag, per cube edge.
+    type EdgeVertex = (([f32; 3], [f32; 3], [f32; 4]), bool);
+    let mut edge_vertices: [EdgeVertex; 12] = [(([0.0; 3], [0.0; 3], [0.0; 4]), false); 12];
     // Field-global identity of each edge, so neighbouring cubes reuse
     // one vertex instead of each emitting their own copy.
     let mut edge_keys: [EdgeKey; 12] = [((0, 0, 0), 0); 12];
@@ -250,7 +282,12 @@ fn march_one_cube(
         }
         let (a, b) = EDGE_VERTEX_PAIRS[e];
         edge_keys[e] = edge_key(corners_local[a], corners_local[b]);
-        let pos = interp_edge(corners_world[a], corners_world[b], densities[a], densities[b]);
+        let pos = interp_edge(
+            corners_world[a],
+            corners_world[b],
+            densities[a],
+            densities[b],
+        );
         // Shift the emitted surface +0.5 on every axis so MC's voxel-
         // CENTERED surface (a voxel at integer n spans [n-0.5, n+0.5])
         // lands on the same [n, n+1] cell that the greedy mesher, the voxel
@@ -259,7 +296,16 @@ fn march_one_cube(
         // below keeps the UN-shifted corner coords so it still samples the
         // correct voxels.
         let pos = [pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5];
-        let normal = density_gradient(density, size, idx, corners_local, a, b, densities[a], densities[b]);
+        let normal = density_gradient(
+            density,
+            size,
+            idx,
+            corners_local,
+            a,
+            b,
+            densities[a],
+            densities[b],
+        );
         let color = edge_color(world, corners_world[a], corners_world[b]);
         edge_vertices[e] = ((pos, normal, color), true);
     }
@@ -288,9 +334,21 @@ fn march_one_cube(
         let e0 = row[i] as usize;
         let e1 = row[i + 1] as usize;
         let e2 = row[i + 2] as usize;
-        let v0 = Vertex::new(edge_vertices[e0].0 .0, edge_vertices[e0].0 .1, edge_vertices[e0].0 .2);
-        let v1 = Vertex::new(edge_vertices[e1].0 .0, edge_vertices[e1].0 .1, edge_vertices[e1].0 .2);
-        let v2 = Vertex::new(edge_vertices[e2].0 .0, edge_vertices[e2].0 .1, edge_vertices[e2].0 .2);
+        let v0 = Vertex::new(
+            edge_vertices[e0].0 .0,
+            edge_vertices[e0].0 .1,
+            edge_vertices[e0].0 .2,
+        );
+        let v1 = Vertex::new(
+            edge_vertices[e1].0 .0,
+            edge_vertices[e1].0 .1,
+            edge_vertices[e1].0 .2,
+        );
+        let v2 = Vertex::new(
+            edge_vertices[e2].0 .0,
+            edge_vertices[e2].0 .1,
+            edge_vertices[e2].0 .2,
+        );
 
         // Cross product (v1-v0) × (v2-v0).
         let e_a = [
@@ -308,9 +366,7 @@ fn march_one_cube(
             e_a[2] * e_b[0] - e_a[0] * e_b[2],
             e_a[0] * e_b[1] - e_a[1] * e_b[0],
         ];
-        let dot = cross[0] * v0.normal[0]
-            + cross[1] * v0.normal[1]
-            + cross[2] * v0.normal[2];
+        let dot = cross[0] * v0.normal[0] + cross[1] * v0.normal[1] + cross[2] * v0.normal[2];
 
         let i0 = intern_edge_vertex(mesh, shared, edge_keys[e0], v0);
         let i1 = intern_edge_vertex(mesh, shared, edge_keys[e1], v1);
@@ -504,8 +560,16 @@ fn sample_gradient(
 /// are both empty; there we widen to the 2×2×2 block around the edge
 /// before giving up on white.
 fn edge_color(world: &World, a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
-    let ai = (a[0].round() as i32, a[1].round() as i32, a[2].round() as i32);
-    let bi = (b[0].round() as i32, b[1].round() as i32, b[2].round() as i32);
+    let ai = (
+        a[0].round() as i32,
+        a[1].round() as i32,
+        a[2].round() as i32,
+    );
+    let bi = (
+        b[0].round() as i32,
+        b[1].round() as i32,
+        b[2].round() as i32,
+    );
 
     if let Some(c) = average_solid(world, [ai, bi].into_iter()) {
         return c;
@@ -515,9 +579,7 @@ fn edge_color(world: &World, a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
     // (2 cells along the edge axis, 2 on each perpendicular axis).
     let lo = (ai.0.min(bi.0), ai.1.min(bi.1), ai.2.min(bi.2));
     let block = (0..2).flat_map(move |dx| {
-        (0..2).flat_map(move |dy| {
-            (0..2).map(move |dz| (lo.0 + dx, lo.1 + dy, lo.2 + dz))
-        })
+        (0..2).flat_map(move |dy| (0..2).map(move |dz| (lo.0 + dx, lo.1 + dy, lo.2 + dz)))
     });
     average_solid(world, block).unwrap_or([1.0, 1.0, 1.0, 1.0])
 }
@@ -556,9 +618,8 @@ fn average_solid(
 /// boundary cells upward and dissolve the model's bottom face — see the
 /// note at the division site.)
 fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
-    let idx = |dx: usize, dy: usize, dz: usize| -> usize {
-        dx + dy * size.0 + dz * size.0 * size.1
-    };
+    let idx =
+        |dx: usize, dy: usize, dz: usize| -> usize { dx + dy * size.0 + dz * size.0 * size.1 };
     let mut out = vec![0.0_f32; input.len()];
     for z in 0..size.2 {
         for y in 0..size.1 {
@@ -577,8 +638,7 @@ fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
                                 && (ny as usize) < size.1
                                 && (nz as usize) < size.2
                             {
-                                sum +=
-                                    input[idx(nx as usize, ny as usize, nz as usize)];
+                                sum += input[idx(nx as usize, ny as usize, nz as usize)];
                             }
                         }
                     }
@@ -637,8 +697,14 @@ mod tests {
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.clear_dirty_flags();
         let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
-        assert!(!mesh.is_empty(), "isolated voxel should still produce a closed surface");
-        assert!(mesh.triangle_count() >= 8, "expected at least an octahedron-ish surface");
+        assert!(
+            !mesh.is_empty(),
+            "isolated voxel should still produce a closed surface"
+        );
+        assert!(
+            mesh.triangle_count() >= 8,
+            "expected at least an octahedron-ish surface"
+        );
     }
 
     #[test]
@@ -659,7 +725,11 @@ mod tests {
         // Smoothed 3³ block is a roundish blob; expect non-zero,
         // bounded triangle count.
         assert!(!mesh.is_empty());
-        assert!(mesh.triangle_count() < 1000, "too many triangles: {}", mesh.triangle_count());
+        assert!(
+            mesh.triangle_count() < 1000,
+            "too many triangles: {}",
+            mesh.triangle_count()
+        );
     }
 
     #[test]
@@ -726,9 +796,8 @@ mod tests {
                 e1[2] * e2[0] - e1[0] * e2[2],
                 e1[0] * e2[1] - e1[1] * e2[0],
             ];
-            let dot = cross[0] * avg_normal[0]
-                + cross[1] * avg_normal[1]
-                + cross[2] * avg_normal[2];
+            let dot =
+                cross[0] * avg_normal[0] + cross[1] * avg_normal[1] + cross[2] * avg_normal[2];
             if dot > tol {
                 outward_count += 1;
             } else if dot < -tol {
@@ -762,10 +831,9 @@ mod tests {
         world.clear_dirty_flags();
         let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         for v in &mesh.vertices {
-            let len = (v.normal[0] * v.normal[0]
-                + v.normal[1] * v.normal[1]
-                + v.normal[2] * v.normal[2])
-                .sqrt();
+            let len =
+                (v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2])
+                    .sqrt();
             assert!(
                 (len - 1.0).abs() < 1e-3,
                 "non-unit normal: {:?} (length {})",
@@ -830,10 +898,9 @@ mod tests {
                 "non-finite normal {:?}",
                 v.normal
             );
-            let len = (v.normal[0] * v.normal[0]
-                + v.normal[1] * v.normal[1]
-                + v.normal[2] * v.normal[2])
-                .sqrt();
+            let len =
+                (v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2])
+                    .sqrt();
             assert!(
                 (len - 1.0).abs() < 1e-3,
                 "non-unit normal {:?} (len {})",
@@ -872,9 +939,7 @@ mod tests {
         let size = (5, 5, 5);
         let mut input = vec![0.0_f32; 125];
         // Set the center cell to 1.
-        let i = |x: usize, y: usize, z: usize| -> usize {
-            x + y * size.0 + z * size.0 * size.1
-        };
+        let i = |x: usize, y: usize, z: usize| -> usize { x + y * size.0 + z * size.0 * size.1 };
         input[i(2, 2, 2)] = 1.0;
         let out = box_blur_3x3x3(&input, size);
         // The cell at (2, 2, 2) averages 27 cells with 1 center 1 →

@@ -10,8 +10,8 @@ pub use panels::{ConfirmPrompt, ExportKind, ExportReport, Surface, UiAction, UiS
 use crate::editor::{Axis, Editor, Quarter, Socket, Tool};
 use crate::mcp::bridge::{Approval, DEFAULT_PORT};
 use crate::procgen::{
-    CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind,
-    PerlinTerrain, PipelineGraph, WfcGenerator, WfcTileset,
+    CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind, PerlinTerrain,
+    PipelineGraph, WfcGenerator, WfcTileset,
 };
 use egui::Context;
 
@@ -56,10 +56,9 @@ impl Default for ViewportSettings {
 }
 
 /// Which generator the procgen panel is currently editing.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum GeneratorChoice {
+    #[default]
     Terrain,
     Tree,
     Wfc,
@@ -73,12 +72,6 @@ impl GeneratorChoice {
             Self::Tree => "L-System Tree",
             Self::Wfc => "WFC Tile Layout",
         }
-    }
-}
-
-impl Default for GeneratorChoice {
-    fn default() -> Self {
-        Self::Terrain
     }
 }
 
@@ -432,10 +425,7 @@ impl Ui {
                 match &agent.url {
                     Some(url) => {
                         ui.horizontal(|ui| {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(80, 200, 120),
-                                "listening",
-                            );
+                            ui.colored_label(egui::Color32::from_rgb(80, 200, 120), "listening");
                             if ui
                                 .button("Stop")
                                 .on_hover_text("Close the socket. Anything waiting is told why")
@@ -460,8 +450,10 @@ impl Ui {
                         ));
                     }
                     None => {
-                        ui.label("Let an agent edit this project directly, instead of \
-                                  passing a file back and forth.");
+                        ui.label(
+                            "Let an agent edit this project directly, instead of \
+                                  passing a file back and forth.",
+                        );
                         ui.horizontal(|ui| {
                             ui.label("Port");
                             ui.add(
@@ -667,8 +659,7 @@ impl Ui {
                     ui.add_space(6.0);
                     for note in &report.notes {
                         ui.label(
-                            egui::RichText::new(note)
-                                .color(egui::Color32::from_rgb(255, 200, 80)),
+                            egui::RichText::new(note).color(egui::Color32::from_rgb(255, 200, 80)),
                         );
                     }
                 }
@@ -732,9 +723,8 @@ impl Ui {
                                     .and_then(|n| n.to_str())
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|| path.display().to_string());
-                                let resp = ui
-                                    .button(label)
-                                    .on_hover_text(path.display().to_string());
+                                let resp =
+                                    ui.button(label).on_hover_text(path.display().to_string());
                                 if resp.clicked() {
                                     self.state.request(UiAction::OpenRecent(path.clone()));
                                     ui.close_menu();
@@ -808,7 +798,8 @@ impl Ui {
                             ui.close_menu();
                         }
                         if ui.button("Wavefront OBJ (.obj)...").clicked() {
-                            self.state.request(UiAction::Export(ExportKind::Obj(Surface::Blocky)));
+                            self.state
+                                .request(UiAction::Export(ExportKind::Obj(Surface::Blocky)));
                             ui.close_menu();
                         }
                         if ui
@@ -821,7 +812,8 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::Export(ExportKind::Obj(Surface::SmoothLight)));
+                            self.state
+                                .request(UiAction::Export(ExportKind::Obj(Surface::SmoothLight)));
                             ui.close_menu();
                         }
                         if ui
@@ -834,11 +826,13 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::Export(ExportKind::Obj(Surface::SmoothHeavy)));
+                            self.state
+                                .request(UiAction::Export(ExportKind::Obj(Surface::SmoothHeavy)));
                             ui.close_menu();
                         }
                         if ui.button("glTF Binary (.glb)...").clicked() {
-                            self.state.request(UiAction::Export(ExportKind::Glb(Surface::Blocky)));
+                            self.state
+                                .request(UiAction::Export(ExportKind::Glb(Surface::Blocky)));
                             ui.close_menu();
                         }
                         if ui
@@ -850,7 +844,8 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::Export(ExportKind::Glb(Surface::SmoothLight)));
+                            self.state
+                                .request(UiAction::Export(ExportKind::Glb(Surface::SmoothLight)));
                             ui.close_menu();
                         }
                         if ui
@@ -861,7 +856,8 @@ impl Ui {
                             )
                             .clicked()
                         {
-                            self.state.request(UiAction::Export(ExportKind::Glb(Surface::SmoothHeavy)));
+                            self.state
+                                .request(UiAction::Export(ExportKind::Glb(Surface::SmoothHeavy)));
                             ui.close_menu();
                         }
                     });
@@ -872,13 +868,27 @@ impl Ui {
                 });
 
                 ui.menu_button("Edit", |ui| {
-                    let undo_text = if editor.can_undo() { "Undo  Ctrl+Z" } else { "Undo" };
-                    if ui.add_enabled(editor.can_undo(), egui::Button::new(undo_text)).clicked() {
+                    let undo_text = if editor.can_undo() {
+                        "Undo  Ctrl+Z"
+                    } else {
+                        "Undo"
+                    };
+                    if ui
+                        .add_enabled(editor.can_undo(), egui::Button::new(undo_text))
+                        .clicked()
+                    {
                         self.state.request(UiAction::Undo);
                         ui.close_menu();
                     }
-                    let redo_text = if editor.can_redo() { "Redo  Ctrl+Y" } else { "Redo" };
-                    if ui.add_enabled(editor.can_redo(), egui::Button::new(redo_text)).clicked() {
+                    let redo_text = if editor.can_redo() {
+                        "Redo  Ctrl+Y"
+                    } else {
+                        "Redo"
+                    };
+                    if ui
+                        .add_enabled(editor.can_redo(), egui::Button::new(redo_text))
+                        .clicked()
+                    {
                         self.state.request(UiAction::Redo);
                         ui.close_menu();
                     }
@@ -903,7 +913,8 @@ impl Ui {
                         .add_enabled(can_paste, egui::Button::new("Paste  Ctrl+V"))
                         .clicked()
                     {
-                        self.state.request(UiAction::PasteClipboard { at_cursor: false });
+                        self.state
+                            .request(UiAction::PasteClipboard { at_cursor: false });
                         ui.close_menu();
                     }
                     if ui
@@ -949,30 +960,21 @@ impl Ui {
                     // extends from the same min, so a 4×1×2 region
                     // becomes 2×1×4 spreading toward +Z.
                     ui.menu_button("Rotate around X", |ui| {
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("90°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("90°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::X,
                                 quarter: Quarter::Cw,
                             });
                             ui.close_menu();
                         }
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("-90°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("-90°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::X,
                                 quarter: Quarter::Ccw,
                             });
                             ui.close_menu();
                         }
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("180°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("180°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::X,
                                 quarter: Quarter::Half,
@@ -1001,10 +1003,7 @@ impl Ui {
                             });
                             ui.close_menu();
                         }
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("180°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("180°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::Y,
                                 quarter: Quarter::Half,
@@ -1013,30 +1012,21 @@ impl Ui {
                         }
                     });
                     ui.menu_button("Rotate around Z", |ui| {
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("90°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("90°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::Z,
                                 quarter: Quarter::Cw,
                             });
                             ui.close_menu();
                         }
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("-90°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("-90°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::Z,
                                 quarter: Quarter::Ccw,
                             });
                             ui.close_menu();
                         }
-                        if ui
-                            .add_enabled(has_sel, egui::Button::new("180°"))
-                            .clicked()
-                        {
+                        if ui.add_enabled(has_sel, egui::Button::new("180°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
                                 axis: Axis::Z,
                                 quarter: Quarter::Half,
@@ -1076,7 +1066,10 @@ impl Ui {
                     ui.checkbox(&mut self.state.panels.show_stats, "Statistics");
                     ui.checkbox(&mut self.state.panels.show_tools, "Tools Panel");
                     ui.checkbox(&mut self.state.panels.show_palette, "Color Palette");
-                    ui.checkbox(&mut self.state.panels.show_viewport_settings, "Viewport Settings");
+                    ui.checkbox(
+                        &mut self.state.panels.show_viewport_settings,
+                        "Viewport Settings",
+                    );
                     ui.checkbox(&mut self.state.panels.show_procgen, "Procedural Generation");
                     ui.checkbox(&mut self.state.panels.show_graph, "Pipeline Graph");
                     ui.checkbox(&mut self.state.panels.show_agent, "Agent Bridge");
@@ -1085,10 +1078,7 @@ impl Ui {
                     ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
                     ui.add_enabled(
                         wireframe_supported,
-                        egui::Checkbox::new(
-                            &mut self.viewport.wireframe_mode,
-                            "Wireframe Mode",
-                        ),
+                        egui::Checkbox::new(&mut self.viewport.wireframe_mode, "Wireframe Mode"),
                     )
                     .on_disabled_hover_text(WIREFRAME_UNSUPPORTED);
                     ui.checkbox(&mut self.viewport.show_hud, "Viewport HUD");
@@ -1155,7 +1145,12 @@ impl Ui {
                     // meant eleven copies of the key map drifting away
                     // from the one the keyboard handler actually uses.
                     // `note` adds per-button detail where there is any.
-                    let tool_button = |ui: &mut egui::Ui, tool: Tool, current: Tool, icon: &str, note: &str| -> bool {
+                    let tool_button = |ui: &mut egui::Ui,
+                                       tool: Tool,
+                                       current: Tool,
+                                       icon: &str,
+                                       note: &str|
+                     -> bool {
                         let mut tooltip = tool.name().to_string();
                         if !tool.shortcut().is_empty() {
                             tooltip.push_str(&format!(" ({})", tool.shortcut()));
@@ -1168,7 +1163,7 @@ impl Ui {
                         ui.add(
                             egui::Button::new(icon)
                                 .min_size(egui::vec2(36.0, 36.0))
-                                .selected(selected)
+                                .selected(selected),
                         )
                         .on_hover_text(tooltip)
                         .clicked()
@@ -1183,13 +1178,7 @@ impl Ui {
                             ui.separator();
                             ui.add_space(8.0);
                         }
-                        if tool_button(
-                            ui,
-                            spec.tool,
-                            editor.current_tool,
-                            spec.icon,
-                            spec.note,
-                        ) {
+                        if tool_button(ui, spec.tool, editor.current_tool, spec.icon, spec.note) {
                             editor.select_tool(spec.tool);
                         }
                     }
@@ -1204,9 +1193,14 @@ impl Ui {
                         editor.brush_color.g,
                         editor.brush_color.b,
                     );
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
                     ui.painter().rect_filled(rect, 4.0, color);
-                    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                    ui.painter().rect_stroke(
+                        rect,
+                        4.0,
+                        egui::Stroke::new(1.0, egui::Color32::WHITE),
+                    );
 
                     ui.add_space(8.0);
 
@@ -1216,12 +1210,7 @@ impl Ui {
             });
     }
 
-    fn show_stats_panel(
-        &mut self,
-        ctx: &Context,
-        stats: &RenderStats,
-        editor: &Editor,
-    ) {
+    fn show_stats_panel(&mut self, ctx: &Context, stats: &RenderStats, editor: &Editor) {
         egui::Window::new("Statistics")
             .default_pos([60.0, 40.0])
             .resizable(false)
@@ -1249,7 +1238,11 @@ impl Ui {
                         ui.end_row();
 
                         ui.label("History:");
-                        ui.label(format!("{} / {}", editor.history.undo_count(), editor.history.redo_count()));
+                        ui.label(format!(
+                            "{} / {}",
+                            editor.history.undo_count(),
+                            editor.history.redo_count()
+                        ));
                         ui.end_row();
                     });
 
@@ -1287,21 +1280,48 @@ impl Ui {
                     .num_columns(3)
                     .spacing([4.0, 4.0])
                     .show(ui, |ui| {
-                        if ui.selectable_label(editor.current_tool == Tool::Place, Tool::Place.name()).clicked() {
+                        if ui
+                            .selectable_label(
+                                editor.current_tool == Tool::Place,
+                                Tool::Place.name(),
+                            )
+                            .clicked()
+                        {
                             editor.select_tool(Tool::Place);
                         }
-                        if ui.selectable_label(editor.current_tool == Tool::Remove, Tool::Remove.name()).clicked() {
+                        if ui
+                            .selectable_label(
+                                editor.current_tool == Tool::Remove,
+                                Tool::Remove.name(),
+                            )
+                            .clicked()
+                        {
                             editor.select_tool(Tool::Remove);
                         }
-                        if ui.selectable_label(editor.current_tool == Tool::Paint, Tool::Paint.name()).clicked() {
+                        if ui
+                            .selectable_label(
+                                editor.current_tool == Tool::Paint,
+                                Tool::Paint.name(),
+                            )
+                            .clicked()
+                        {
                             editor.select_tool(Tool::Paint);
                         }
                         ui.end_row();
 
-                        if ui.selectable_label(editor.current_tool == Tool::Eyedropper, Tool::Eyedropper.name()).clicked() {
+                        if ui
+                            .selectable_label(
+                                editor.current_tool == Tool::Eyedropper,
+                                Tool::Eyedropper.name(),
+                            )
+                            .clicked()
+                        {
                             editor.select_tool(Tool::Eyedropper);
                         }
-                        if ui.selectable_label(editor.current_tool == Tool::Fill, Tool::Fill.name()).clicked() {
+                        if ui
+                            .selectable_label(editor.current_tool == Tool::Fill, Tool::Fill.name())
+                            .clicked()
+                        {
                             editor.select_tool(Tool::Fill);
                         }
                         ui.end_row();
@@ -1328,7 +1348,10 @@ impl Ui {
                             editor.select_tool(Tool::Box);
                         }
                         if ui
-                            .selectable_label(editor.current_tool == Tool::Sphere, Tool::Sphere.name())
+                            .selectable_label(
+                                editor.current_tool == Tool::Sphere,
+                                Tool::Sphere.name(),
+                            )
                             .on_hover_text("Drag bbox; ellipsoid fits in it")
                             .clicked()
                         {
@@ -1337,7 +1360,10 @@ impl Ui {
                         ui.end_row();
 
                         if ui
-                            .selectable_label(editor.current_tool == Tool::Cylinder, Tool::Cylinder.name())
+                            .selectable_label(
+                                editor.current_tool == Tool::Cylinder,
+                                Tool::Cylinder.name(),
+                            )
                             .on_hover_text(
                                 "Drag a footprint, then pull up — the cylinder \
                                  stands along the height direction (the locked \
@@ -1401,7 +1427,8 @@ impl Ui {
                         )
                         .clicked()
                     {
-                        self.state.request(UiAction::PasteClipboard { at_cursor: false });
+                        self.state
+                            .request(UiAction::PasteClipboard { at_cursor: false });
                     }
                 });
                 ui.horizontal(|ui| {
@@ -1459,37 +1486,39 @@ impl Ui {
                     // document modified — no save prompt, no autosave.
                     let mut to_delete: Option<usize> = None;
                     let mut edited = false;
-                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                        for (i, s) in sockets.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut s.name)
-                                            .desired_width(110.0),
-                                    )
-                                    .on_hover_text("Name (becomes the glTF node name)")
-                                    .changed()
-                                {
-                                    edited = true;
-                                }
-                                if ui
-                                    .small_button("✕")
-                                    .on_hover_text("Delete this socket")
-                                    .clicked()
-                                {
-                                    to_delete = Some(i);
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "({:.1}, {:.1}, {:.1})",
-                                        s.position[0], s.position[1], s.position[2]
-                                    ))
-                                    .small()
-                                    .weak(),
-                                );
-                            });
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for (i, s) in sockets.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut s.name)
+                                                .desired_width(110.0),
+                                        )
+                                        .on_hover_text("Name (becomes the glTF node name)")
+                                        .changed()
+                                    {
+                                        edited = true;
+                                    }
+                                    if ui
+                                        .small_button("✕")
+                                        .on_hover_text("Delete this socket")
+                                        .clicked()
+                                    {
+                                        to_delete = Some(i);
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "({:.1}, {:.1}, {:.1})",
+                                            s.position[0], s.position[1], s.position[2]
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                });
+                            }
+                        });
                     if let Some(i) = to_delete {
                         sockets.remove(i);
                         edited = true;
@@ -1558,7 +1587,10 @@ impl Ui {
                 // RGB values
                 ui.horizontal(|ui| {
                     ui.label("RGB:");
-                    ui.label(format!("{}, {}, {}", editor.brush_color.r, editor.brush_color.g, editor.brush_color.b));
+                    ui.label(format!(
+                        "{}, {}, {}",
+                        editor.brush_color.r, editor.brush_color.g, editor.brush_color.b
+                    ));
                 });
 
                 ui.separator();
@@ -1623,8 +1655,14 @@ impl Ui {
                 if let Some(hit) = &editor.hovered_voxel {
                     ui.separator();
                     ui.heading("Hovered");
-                    ui.label(format!("Position: ({}, {}, {})", hit.voxel_pos.0, hit.voxel_pos.1, hit.voxel_pos.2));
-                    ui.label(format!("Face: ({}, {}, {})", hit.normal.0, hit.normal.1, hit.normal.2));
+                    ui.label(format!(
+                        "Position: ({}, {}, {})",
+                        hit.voxel_pos.0, hit.voxel_pos.1, hit.voxel_pos.2
+                    ));
+                    ui.label(format!(
+                        "Face: ({}, {}, {})",
+                        hit.normal.0, hit.normal.1, hit.normal.2
+                    ));
                 }
             });
         self.state.panels.show_tools = open;
@@ -1662,10 +1700,8 @@ impl Ui {
                                 && editor.brush_color.b == voxel.b;
 
                             let size = if is_selected { 24.0 } else { 20.0 };
-                            let (rect, response) = ui.allocate_exact_size(
-                                egui::vec2(size, size),
-                                egui::Sense::click(),
-                            );
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
 
                             if response.clicked() {
                                 picked = Some(i);
@@ -1673,7 +1709,11 @@ impl Ui {
 
                             ui.painter().rect_filled(rect, 2.0, color);
                             if is_selected {
-                                ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    2.0,
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                );
                             }
 
                             if (i + 1) % cols == 0 {
@@ -1692,9 +1732,10 @@ impl Ui {
                     if ui.button("Add").clicked() {
                         // Check if color already exists in palette
                         let color = editor.brush_color;
-                        let exists = editor.palette.iter().any(|v| {
-                            v.r == color.r && v.g == color.g && v.b == color.b
-                        });
+                        let exists = editor
+                            .palette
+                            .iter()
+                            .any(|v| v.r == color.r && v.g == color.g && v.b == color.b);
                         // Report both refusals. Silently doing nothing
                         // reads as a broken button — the user has no way
                         // to tell "already there" from "list is full"
@@ -1743,10 +1784,7 @@ impl Ui {
                 ui.checkbox(&mut self.viewport.show_axes, "Show Axes");
                 ui.add_enabled(
                     wireframe_supported,
-                    egui::Checkbox::new(
-                        &mut self.viewport.wireframe_mode,
-                        "Wireframe Mode",
-                    ),
+                    egui::Checkbox::new(&mut self.viewport.wireframe_mode, "Wireframe Mode"),
                 )
                 .on_disabled_hover_text(WIREFRAME_UNSUPPORTED);
                 ui.checkbox(&mut self.viewport.show_hud, "Viewport HUD")
@@ -1754,15 +1792,15 @@ impl Ui {
                         "Tool & gesture readout in the bottom-left corner of the viewport",
                     );
                 ui.checkbox(&mut self.viewport.show_perf_hud, "Performance HUD")
-                    .on_hover_text(
-                        "FPS, triangles, and re-mesh time in the bottom-right corner",
-                    );
+                    .on_hover_text("FPS, triangles, and re-mesh time in the bottom-right corner");
 
                 ui.separator();
 
                 ui.heading("Grid");
                 ui.add(egui::Slider::new(&mut self.viewport.grid_size, 5..=50).text("Size"));
-                ui.add(egui::Slider::new(&mut self.viewport.grid_spacing, 0.5..=5.0).text("Spacing"));
+                ui.add(
+                    egui::Slider::new(&mut self.viewport.grid_spacing, 0.5..=5.0).text("Spacing"),
+                );
 
                 ui.separator();
 
@@ -1776,10 +1814,12 @@ impl Ui {
                         self.state.request(UiAction::SetCameraView(CameraView::Top));
                     }
                     if ui.button("Front").clicked() {
-                        self.state.request(UiAction::SetCameraView(CameraView::Front));
+                        self.state
+                            .request(UiAction::SetCameraView(CameraView::Front));
                     }
                     if ui.button("Side").clicked() {
-                        self.state.request(UiAction::SetCameraView(CameraView::Side));
+                        self.state
+                            .request(UiAction::SetCameraView(CameraView::Side));
                     }
                 });
 
@@ -1850,15 +1890,9 @@ impl Ui {
                 ui.separator();
 
                 match procgen.selected {
-                    GeneratorChoice::Terrain => {
-                        terrain_params_ui(ui, &mut procgen.terrain)
-                    }
-                    GeneratorChoice::Tree => {
-                        tree_params_ui(ui, &mut procgen.tree)
-                    }
-                    GeneratorChoice::Wfc => {
-                        wfc_params_ui(ui, &mut procgen.wfc)
-                    }
+                    GeneratorChoice::Terrain => terrain_params_ui(ui, &mut procgen.terrain),
+                    GeneratorChoice::Tree => tree_params_ui(ui, &mut procgen.tree),
+                    GeneratorChoice::Wfc => wfc_params_ui(ui, &mut procgen.wfc),
                 }
 
                 ui.separator();
@@ -1947,8 +1981,7 @@ impl Ui {
                             // Only one Output (sink) is allowed — evaluation
                             // needs a single pipeline result. Gray the entry
                             // out once one exists (#33).
-                            let enabled =
-                                !(has_output && matches!(kind, NodeKind::Output { .. }));
+                            let enabled = !(has_output && matches!(kind, NodeKind::Output { .. }));
                             if ui.add_enabled(enabled, egui::Button::new(k.0)).clicked() {
                                 add_kind = Some(kind);
                                 ui.close_menu();
@@ -1958,7 +1991,10 @@ impl Ui {
                             }
                         }
                     });
-                    if ui.button("Auto Layout").on_hover_text("Re-grid all nodes").clicked()
+                    if ui
+                        .button("Auto Layout")
+                        .on_hover_text("Re-grid all nodes")
+                        .clicked()
                     {
                         auto_layout = true;
                     }
@@ -2051,177 +2087,180 @@ impl Ui {
                 egui::ScrollArea::vertical()
                     .max_height(max_height)
                     .show(ui, |ui| {
-                // One line instead of rewriting thirty entries per
-                // platform: the chords below are bound to the
-                // platform's command key (`primary_modifier` in
-                // app/input), so the table stays written once.
-                #[cfg(target_os = "macos")]
-                {
-                    ui.label(
-                        egui::RichText::new("On macOS, use ⌘ wherever Ctrl is shown.")
-                            .small()
-                            .weak(),
-                    );
-                    ui.add_space(4.0);
-                }
-                egui::Grid::new("shortcuts_grid")
-                    .num_columns(2)
-                    .spacing([40.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.heading("Tools");
-                        ui.end_row();
-
-                        // From the descriptor table — the same rows
-                        // the toolbar renders, so this list can't
-                        // promise a tool the toolbar doesn't have.
-                        for spec in keymap::TOOL_SPECS {
-                            let shortcut = spec.tool.shortcut();
-                            if shortcut.is_empty() {
-                                ui.label("(toolbar only)");
-                            } else {
-                                ui.label(shortcut);
-                            }
-                            ui.label(spec.tool.name());
-                            ui.end_row();
+                        // One line instead of rewriting thirty entries per
+                        // platform: the chords below are bound to the
+                        // platform's command key (`primary_modifier` in
+                        // app/input), so the table stays written once.
+                        #[cfg(target_os = "macos")]
+                        {
+                            ui.label(
+                                egui::RichText::new("On macOS, use ⌘ wherever Ctrl is shown.")
+                                    .small()
+                                    .weak(),
+                            );
+                            ui.add_space(4.0);
                         }
+                        egui::Grid::new("shortcuts_grid")
+                            .num_columns(2)
+                            .spacing([40.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.heading("Tools");
+                                ui.end_row();
 
-                        ui.label("Alt (hold)");
-                        ui.label("Temporary eyedropper — restores on release");
-                        ui.end_row();
+                                // From the descriptor table — the same rows
+                                // the toolbar renders, so this list can't
+                                // promise a tool the toolbar doesn't have.
+                                for spec in keymap::TOOL_SPECS {
+                                    let shortcut = spec.tool.shortcut();
+                                    if shortcut.is_empty() {
+                                        ui.label("(toolbar only)");
+                                    } else {
+                                        ui.label(shortcut);
+                                    }
+                                    ui.label(spec.tool.name());
+                                    ui.end_row();
+                                }
 
-                        ui.end_row();
-                        ui.heading("Shape Tools (6–9)");
-                        ui.end_row();
+                                ui.label("Alt (hold)");
+                                ui.label("Temporary eyedropper — restores on release");
+                                ui.end_row();
 
-                        ui.label("First click + drag");
-                        ui.label("Lay footprint on the locked face plane");
-                        ui.end_row();
+                                ui.end_row();
+                                ui.heading("Shape Tools (6–9)");
+                                ui.end_row();
 
-                        ui.label("Release");
-                        ui.label("Enter height phase");
-                        ui.end_row();
+                                ui.label("First click + drag");
+                                ui.label("Lay footprint on the locked face plane");
+                                ui.end_row();
 
-                        ui.label("Cursor up / down");
-                        ui.label("Set extruded height (~8 px / voxel)");
-                        ui.end_row();
+                                ui.label("Release");
+                                ui.label("Enter height phase");
+                                ui.end_row();
 
-                        ui.label("Second click");
-                        ui.label("Commit the shape");
-                        ui.end_row();
+                                ui.label("Cursor up / down");
+                                ui.label("Set extruded height (~8 px / voxel)");
+                                ui.end_row();
 
-                        ui.label("Esc");
-                        ui.label("Cancel shape");
-                        ui.end_row();
+                                ui.label("Second click");
+                                ui.label("Commit the shape");
+                                ui.end_row();
 
-                        ui.end_row();
-                        ui.heading("Brush Drag-Paint");
-                        ui.end_row();
+                                ui.label("Esc");
+                                ui.label("Cancel shape");
+                                ui.end_row();
 
-                        ui.label("Press + drag");
-                        ui.label("Paint stays on the first hit's face plane");
-                        ui.end_row();
+                                ui.end_row();
+                                ui.heading("Brush Drag-Paint");
+                                ui.end_row();
 
-                        ui.end_row();
-                        ui.heading("Edit");
-                        ui.end_row();
+                                ui.label("Press + drag");
+                                ui.label("Paint stays on the first hit's face plane");
+                                ui.end_row();
 
-                        chord_rows(ui, keymap::HelpSection::Edit);
+                                ui.end_row();
+                                ui.heading("Edit");
+                                ui.end_row();
 
-                        ui.end_row();
-                        ui.heading("Selection");
-                        ui.end_row();
+                                chord_rows(ui, keymap::HelpSection::Edit);
 
-                        ui.label("Drag in selection");
-                        ui.label("Move (single SetVoxels Command)");
-                        ui.end_row();
+                                ui.end_row();
+                                ui.heading("Selection");
+                                ui.end_row();
 
-                        ui.label("Drag outside");
-                        ui.label("Create new selection");
-                        ui.end_row();
+                                ui.label("Drag in selection");
+                                ui.label("Move (single SetVoxels Command)");
+                                ui.end_row();
 
-                        chord_rows(ui, keymap::HelpSection::Selection);
+                                ui.label("Drag outside");
+                                ui.label("Create new selection");
+                                ui.end_row();
 
-                        ui.label("Del");
-                        ui.label("Delete non-air voxels in selection");
-                        ui.end_row();
+                                chord_rows(ui, keymap::HelpSection::Selection);
 
-                        ui.label("Arrows");
-                        ui.label("Nudge selection on X / Z (Shift × 10)");
-                        ui.end_row();
+                                ui.label("Del");
+                                ui.label("Delete non-air voxels in selection");
+                                ui.end_row();
 
-                        ui.label("Ctrl + Up/Down");
-                        ui.label("Nudge selection on Y axis");
-                        ui.end_row();
+                                ui.label("Arrows");
+                                ui.label("Nudge selection on X / Z (Shift × 10)");
+                                ui.end_row();
 
-                        ui.label("R / Shift+R");
-                        ui.label("Rotate 90° around Y (CW / CCW)");
-                        ui.end_row();
+                                ui.label("Ctrl + Up/Down");
+                                ui.label("Nudge selection on Y axis");
+                                ui.end_row();
 
-                        ui.label("M");
-                        ui.label("Mirror across X (full axis set: Selection menu)");
-                        ui.end_row();
+                                ui.label("R / Shift+R");
+                                ui.label("Rotate 90° around Y (CW / CCW)");
+                                ui.end_row();
 
-                        ui.end_row();
-                        ui.heading("Camera");
-                        ui.end_row();
+                                ui.label("M");
+                                ui.label("Mirror across X (full axis set: Selection menu)");
+                                ui.end_row();
 
-                        ui.label("WASD");
-                        ui.label("Move camera");
-                        ui.end_row();
+                                ui.end_row();
+                                ui.heading("Camera");
+                                ui.end_row();
 
-                        ui.label("Q");
-                        ui.label("Move up");
-                        ui.end_row();
+                                ui.label("WASD");
+                                ui.label("Move camera");
+                                ui.end_row();
 
-                        ui.label("E");
-                        ui.label("Move down");
-                        ui.end_row();
+                                ui.label("Q");
+                                ui.label("Move up");
+                                ui.end_row();
 
-                        ui.label("Shift");
-                        ui.label("Fly faster (×3) while moving");
-                        ui.end_row();
+                                ui.label("E");
+                                ui.label("Move down");
+                                ui.end_row();
 
-                        ui.label("F");
-                        ui.label("Frame selection (or whole scene)");
-                        ui.end_row();
+                                ui.label("Shift");
+                                ui.label("Fly faster (×3) while moving");
+                                ui.end_row();
 
-                        ui.label("Middle Mouse");
-                        ui.label("Orbit camera");
-                        ui.end_row();
+                                ui.label("F");
+                                ui.label("Frame selection (or whole scene)");
+                                ui.end_row();
 
-                        ui.label("Right Mouse");
-                        ui.label("Pan camera");
-                        ui.end_row();
+                                ui.label("Middle Mouse");
+                                ui.label("Orbit camera");
+                                ui.end_row();
 
-                        ui.label("Scroll");
-                        ui.label("Zoom");
-                        ui.end_row();
+                                ui.label("Right Mouse");
+                                ui.label("Pan camera");
+                                ui.end_row();
 
-                        ui.label("Escape");
-                        ui.label("Release cursor");
-                        ui.end_row();
+                                ui.label("Scroll");
+                                ui.label("Zoom");
+                                ui.end_row();
 
-                        ui.end_row();
-                        ui.heading("File");
-                        ui.end_row();
+                                ui.label("Escape");
+                                ui.label("Release cursor");
+                                ui.end_row();
 
-                        chord_rows(ui, keymap::HelpSection::File);
+                                ui.end_row();
+                                ui.heading("File");
+                                ui.end_row();
 
-                        ui.end_row();
-                        ui.heading("Actions");
-                        ui.end_row();
+                                chord_rows(ui, keymap::HelpSection::File);
 
-                        ui.label("Left Click");
-                        ui.label("Apply tool");
-                        ui.end_row();
+                                ui.end_row();
+                                ui.heading("Actions");
+                                ui.end_row();
+
+                                ui.label("Left Click");
+                                ui.label("Apply tool");
+                                ui.end_row();
+                            });
                     });
-                });
             });
     }
 
     fn show_about_dialog(&mut self, ctx: &Context) {
         egui::Window::new("About Voxelith")
-            .default_pos([ctx.screen_rect().width() / 2.0 - 150.0, ctx.screen_rect().height() / 2.0 - 100.0])
+            .default_pos([
+                ctx.screen_rect().width() / 2.0 - 150.0,
+                ctx.screen_rect().height() / 2.0 - 100.0,
+            ])
             .resizable(false)
             .collapsible(false)
             .open(&mut self.state.show_about)
@@ -2268,21 +2307,24 @@ impl Ui {
                 // active (especially Fill / Eyedropper, which behave
                 // very differently from the brush tools).
                 ui.label(
-                    egui::RichText::new(format!(
-                        "Tool: {}",
-                        editor.current_tool.name()
-                    ))
-                    .strong()
-                    .color(egui::Color32::LIGHT_BLUE),
+                    egui::RichText::new(format!("Tool: {}", editor.current_tool.name()))
+                        .strong()
+                        .color(egui::Color32::LIGHT_BLUE),
                 );
                 ui.separator();
                 ui.label(format!("Brush: {}px", editor.brush_size));
                 if editor.symmetry.any() {
                     ui.separator();
                     let mut axes = String::new();
-                    if editor.symmetry.x { axes.push('X'); }
-                    if editor.symmetry.y { axes.push('Y'); }
-                    if editor.symmetry.z { axes.push('Z'); }
+                    if editor.symmetry.x {
+                        axes.push('X');
+                    }
+                    if editor.symmetry.y {
+                        axes.push('Y');
+                    }
+                    if editor.symmetry.z {
+                        axes.push('Z');
+                    }
                     ui.label(
                         egui::RichText::new(format!("Sym: {}", axes))
                             .color(egui::Color32::LIGHT_YELLOW),
@@ -2330,12 +2372,9 @@ impl Ui {
                     if self.viewport.show_axes {
                         ui.label("[Axes]");
                     }
-                    if self.procgen.preview_enabled
-                        || self.procgen.graph_preview_enabled
-                    {
+                    if self.procgen.preview_enabled || self.procgen.graph_preview_enabled {
                         ui.label(
-                            egui::RichText::new("● Preview")
-                                .color(egui::Color32::LIGHT_GREEN),
+                            egui::RichText::new("● Preview").color(egui::Color32::LIGHT_GREEN),
                         );
                     }
                 });
@@ -2398,11 +2437,7 @@ fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
             ui.label("Seed");
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
-                if ui
-                    .button("Rand")
-                    .on_hover_text("Randomize seed")
-                    .clicked()
-                {
+                if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
                     t.seed = rand::random();
                 }
             });
@@ -2437,10 +2472,7 @@ fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
             ui.end_row();
 
             ui.label("Frequency");
-            ui.add(
-                egui::Slider::new(&mut t.frequency, 0.005..=0.5)
-                    .logarithmic(true),
-            );
+            ui.add(egui::Slider::new(&mut t.frequency, 0.005..=0.5).logarithmic(true));
             ui.end_row();
 
             ui.label("Octaves");
@@ -2467,11 +2499,7 @@ fn tree_params_ui(ui: &mut egui::Ui, t: &mut LSystemTree) {
             ui.label("Seed");
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
-                if ui
-                    .button("Rand")
-                    .on_hover_text("Randomize seed")
-                    .clicked()
-                {
+                if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
                     t.seed = rand::random();
                 }
             });
@@ -2522,11 +2550,7 @@ fn wfc_params_ui(ui: &mut egui::Ui, t: &mut WfcGenerator) {
             ui.label("Seed");
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
-                if ui
-                    .button("Rand")
-                    .on_hover_text("Randomize seed")
-                    .clicked()
-                {
+                if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
                     t.seed = rand::random();
                 }
             });
@@ -2615,16 +2639,35 @@ fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
     (canvas, sidebar)
 }
 
+/// One "+ Add Node" menu entry: `(label, factory, separator_after)`.
+type NodeMenuOption = (&'static str, fn() -> NodeKind, bool);
+
 /// Available node kinds in the "+ Add Node" menu.
-/// Tuple is (label, factory, separator_after).
-fn node_menu_options() -> Vec<(&'static str, fn() -> NodeKind, bool)> {
+fn node_menu_options() -> Vec<NodeMenuOption> {
     vec![
-        ("Source: Terrain", || NodeKind::Terrain(PerlinTerrain::default()), false),
-        ("Source: Tree", || NodeKind::Tree(LSystemTree::default()), false),
-        ("Source: WFC", || NodeKind::Wfc(WfcGenerator::default()), true),
+        (
+            "Source: Terrain",
+            || NodeKind::Terrain(PerlinTerrain::default()),
+            false,
+        ),
+        (
+            "Source: Tree",
+            || NodeKind::Tree(LSystemTree::default()),
+            false,
+        ),
+        (
+            "Source: WFC",
+            || NodeKind::Wfc(WfcGenerator::default()),
+            true,
+        ),
         (
             "Translate",
-            || NodeKind::Translate { input: None, dx: 0, dy: 0, dz: 0 },
+            || NodeKind::Translate {
+                input: None,
+                dx: 0,
+                dy: 0,
+                dz: 0,
+            },
             false,
         ),
         (
@@ -2726,10 +2769,7 @@ fn input_socket_screen(
 }
 
 /// Center of a node's output socket (right edge).
-fn output_socket_screen(
-    canvas_min: egui::Pos2,
-    node: &crate::procgen::GraphNode,
-) -> egui::Pos2 {
+fn output_socket_screen(canvas_min: egui::Pos2, node: &crate::procgen::GraphNode) -> egui::Pos2 {
     let body = node_screen_rect(canvas_min, node);
     egui::pos2(body.max.x, body.center().y + 6.0)
 }
@@ -2757,12 +2797,7 @@ fn cubic_bezier_point(
 /// horizontally-bowed cubic Bezier — the standard look for node-graph
 /// editors. Tessellated to a polyline so we don't depend on egui's
 /// CubicBezierShape API across versions.
-fn paint_wire(
-    painter: &egui::Painter,
-    from: egui::Pos2,
-    to: egui::Pos2,
-    color: egui::Color32,
-) {
+fn paint_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
     let dx = (to.x - from.x).abs().max(40.0);
     let c1 = egui::pos2(from.x + dx * 0.5, from.y);
     let c2 = egui::pos2(to.x - dx * 0.5, to.y);
@@ -2799,16 +2834,11 @@ fn graph_canvas(
     wire_action: &mut Option<(NodeId, usize, Option<NodeId>)>,
 ) {
     let avail = ui.available_size();
-    let (canvas_rect, _bg) =
-        ui.allocate_exact_size(avail, egui::Sense::hover());
+    let (canvas_rect, _bg) = ui.allocate_exact_size(avail, egui::Sense::hover());
     let painter = ui.painter_at(canvas_rect);
 
     // Background.
-    painter.rect_filled(
-        canvas_rect,
-        0.0,
-        egui::Color32::from_rgb(28, 28, 36),
-    );
+    painter.rect_filled(canvas_rect, 0.0, egui::Color32::from_rgb(28, 28, 36));
 
     // ===== Wires (drawn before nodes so they pass under boxes) =====
     for node in &graph.nodes {
@@ -2822,7 +2852,9 @@ fn graph_canvas(
             let Some(src_id) = graph.get_input(node.id, slot).ok().flatten() else {
                 continue;
             };
-            let Some(src) = graph.get(src_id) else { continue };
+            let Some(src) = graph.get(src_id) else {
+                continue;
+            };
             let from = output_socket_screen(canvas_rect.min, src);
             let to = input_socket_screen(canvas_rect.min, node, slot);
             let highlighted = *selected == Some(node.id) || *selected == Some(src_id);
@@ -2839,10 +2871,7 @@ fn graph_canvas(
     if let Some(src_id) = *drag_wire {
         if let Some(src) = graph.get(src_id) {
             let from = output_socket_screen(canvas_rect.min, src);
-            let to = ui
-                .ctx()
-                .input(|i| i.pointer.interact_pos())
-                .unwrap_or(from);
+            let to = ui.ctx().input(|i| i.pointer.interact_pos()).unwrap_or(from);
             paint_wire(&painter, from, to, egui::Color32::YELLOW);
         }
     }
@@ -2892,10 +2921,8 @@ fn graph_canvas(
         if frame.body_resp.dragged() {
             *selected = Some(*id);
             if let Some(node) = graph.get_mut(*id) {
-                node.position[0] =
-                    (node.position[0] + frame.delta.x).clamp(0.0, drag_limit.x);
-                node.position[1] =
-                    (node.position[1] + frame.delta.y).clamp(0.0, drag_limit.y);
+                node.position[0] = (node.position[0] + frame.delta.x).clamp(0.0, drag_limit.x);
+                node.position[1] = (node.position[1] + frame.delta.y).clamp(0.0, drag_limit.y);
             }
         }
     }
@@ -2918,10 +2945,8 @@ fn graph_canvas(
         painter.rect_stroke(body, 4.0, outline);
 
         // Header.
-        let header = egui::Rect::from_min_max(
-            body.min,
-            egui::pos2(body.max.x, body.min.y + NODE_HEADER_H),
-        );
+        let header =
+            egui::Rect::from_min_max(body.min, egui::pos2(body.max.x, body.min.y + NODE_HEADER_H));
         painter.rect_filled(header, 4.0, node_header_color(&node.kind));
         painter.text(
             header.min + egui::vec2(8.0, 3.0),
@@ -2938,8 +2963,7 @@ fn graph_canvas(
             egui::vec2(close_size, close_size),
         );
         let close_id = ui.id().with(("graph_node_close", node.id));
-        let close_resp =
-            ui.interact(close_rect, close_id, egui::Sense::click());
+        let close_resp = ui.interact(close_rect, close_id, egui::Sense::click());
         let close_color = if close_resp.hovered() {
             egui::Color32::from_rgb(255, 120, 120)
         } else {
@@ -2972,8 +2996,7 @@ fn graph_canvas(
                 center,
                 egui::vec2(SOCKET_HIT_R * 2.0, SOCKET_HIT_R * 2.0),
             );
-            let in_id =
-                ui.id().with(("graph_in_sock", node.id, slot));
+            let in_id = ui.id().with(("graph_in_sock", node.id, slot));
             let in_resp = ui.interact(hit_rect, in_id, egui::Sense::hover());
             let hot = drag_wire.is_some() && in_resp.hovered();
             let color = if hot {
@@ -2997,13 +3020,8 @@ fn graph_canvas(
                 egui::vec2(SOCKET_HIT_R * 2.0, SOCKET_HIT_R * 2.0),
             );
             let out_id = ui.id().with(("graph_out_sock", node.id));
-            let out_resp =
-                ui.interact(hit_rect, out_id, egui::Sense::drag());
-            painter.circle_filled(
-                center,
-                SOCKET_R,
-                egui::Color32::from_rgb(220, 200, 100),
-            );
+            let out_resp = ui.interact(hit_rect, out_id, egui::Sense::drag());
+            painter.circle_filled(center, SOCKET_R, egui::Color32::from_rgb(220, 200, 100));
             painter.circle_stroke(
                 center,
                 SOCKET_R,
@@ -3022,11 +3040,7 @@ fn graph_canvas(
                             continue;
                         }
                         for slot in 0..PipelineGraph::input_count(&target.kind) {
-                            let s = input_socket_screen(
-                                canvas_rect.min,
-                                target,
-                                slot,
-                            );
+                            let s = input_socket_screen(canvas_rect.min, target, slot);
                             if (s - p).length() <= SOCKET_HIT_R {
                                 hit = Some((target.id, slot));
                                 break 'outer;
@@ -3096,10 +3110,7 @@ fn graph_sidebar(
         return;
     };
 
-    ui.label(
-        egui::RichText::new(format!("#{}  {}", node.id, node.kind.label()))
-            .strong(),
-    );
+    ui.label(egui::RichText::new(format!("#{}  {}", node.id, node.kind.label())).strong());
     ui.separator();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -3127,7 +3138,11 @@ fn graph_sidebar(
                 input_slot(ui, "Input", *input, id, 0, &candidates, wire_action);
                 filter_predicate_ui(ui, predicate, id);
             }
-            NodeKind::Mask { subject, mask, mode } => {
+            NodeKind::Mask {
+                subject,
+                mask,
+                mode,
+            } => {
                 input_slot(ui, "Subject", *subject, id, 0, &candidates, wire_action);
                 input_slot(ui, "Mask", *mask, id, 1, &candidates, wire_action);
                 ui.horizontal(|ui| {
@@ -3135,16 +3150,8 @@ fn graph_sidebar(
                     egui::ComboBox::from_id_salt(("mask_mode_sb", id))
                         .selected_text(mode.label())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                mode,
-                                MaskMode::AboveColumn,
-                                "Above column",
-                            );
-                            ui.selectable_value(
-                                mode,
-                                MaskMode::BelowColumn,
-                                "Below column",
-                            );
+                            ui.selectable_value(mode, MaskMode::AboveColumn, "Above column");
+                            ui.selectable_value(mode, MaskMode::BelowColumn, "Below column");
                         });
                 });
                 ui.label(
@@ -3166,16 +3173,8 @@ fn graph_sidebar(
                         .selected_text(op.label())
                         .show_ui(ui, |ui| {
                             ui.selectable_value(op, CombineOp::Union, "Union");
-                            ui.selectable_value(
-                                op,
-                                CombineOp::Difference,
-                                "Difference",
-                            );
-                            ui.selectable_value(
-                                op,
-                                CombineOp::Intersect,
-                                "Intersect",
-                            );
+                            ui.selectable_value(op, CombineOp::Difference, "Difference");
+                            ui.selectable_value(op, CombineOp::Intersect, "Intersect");
                         });
                 });
             }
@@ -3191,11 +3190,7 @@ fn graph_sidebar(
 /// Variant switches discard the previous variant's params on purpose —
 /// keeping a "remembered y threshold" across switches would surprise
 /// the user more than help them.
-fn filter_predicate_ui(
-    ui: &mut egui::Ui,
-    predicate: &mut FilterPredicate,
-    node_id: NodeId,
-) {
+fn filter_predicate_ui(ui: &mut egui::Ui, predicate: &mut FilterPredicate, node_id: NodeId) {
     // Variant selector. We compare via `matches!` rather than tag enums
     // to avoid carrying a parallel discriminator type.
     let cur_label = match predicate {
@@ -3210,20 +3205,14 @@ fn filter_predicate_ui(
             .selected_text(cur_label)
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_label(
-                        matches!(predicate, FilterPredicate::YAbove(_)),
-                        "Y above",
-                    )
+                    .selectable_label(matches!(predicate, FilterPredicate::YAbove(_)), "Y above")
                     .clicked()
                     && !matches!(predicate, FilterPredicate::YAbove(_))
                 {
                     *predicate = FilterPredicate::YAbove(0);
                 }
                 if ui
-                    .selectable_label(
-                        matches!(predicate, FilterPredicate::YBelow(_)),
-                        "Y below",
-                    )
+                    .selectable_label(matches!(predicate, FilterPredicate::YBelow(_)), "Y below")
                     .clicked()
                     && !matches!(predicate, FilterPredicate::YBelow(_))
                 {
@@ -3277,11 +3266,9 @@ fn filter_predicate_ui(
                 rgba[3] = 255;
             });
             ui.label(
-                egui::RichText::new(
-                    "Matches voxels with this exact RGB (alpha pinned to 255).",
-                )
-                .small()
-                .weak(),
+                egui::RichText::new("Matches voxels with this exact RGB (alpha pinned to 255).")
+                    .small()
+                    .weak(),
             );
         }
         FilterPredicate::InsideBox { min, max } => {
@@ -3391,7 +3378,10 @@ mod graph_layout_tests {
     fn both_panes_keep_a_usable_width_when_the_window_is_small() {
         let (canvas, sidebar) = graph_split_widths(520.0, 8.0);
         assert!(canvas >= GRAPH_CANVAS_MIN_W, "canvas collapsed to {canvas}");
-        assert!(sidebar >= GRAPH_SIDEBAR_MIN_W, "sidebar collapsed to {sidebar}");
+        assert!(
+            sidebar >= GRAPH_SIDEBAR_MIN_W,
+            "sidebar collapsed to {sidebar}"
+        );
     }
 
     #[test]
