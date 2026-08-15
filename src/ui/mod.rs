@@ -10,7 +10,7 @@ pub use panels::{
     ConfirmPrompt, ExportChoice, ExportFormat, ExportKind, ExportReport, Surface, UiAction, UiState,
 };
 
-use crate::editor::{Axis, Editor, Quarter, Socket, Tool};
+use crate::editor::{next_socket_name, Axis, Editor, Quarter, Socket, Tool};
 use crate::mcp::bridge::{Approval, DEFAULT_PORT};
 use crate::procgen::{
     CombineOp, FilterPredicate, LSystemTree, MaskMode, NodeId, NodeKind, PerlinTerrain,
@@ -1517,18 +1517,25 @@ impl Ui {
             // without the action a rename or delete never marked
             // the document modified — no save prompt, no autosave.
             let mut to_delete: Option<usize> = None;
+            let mut committed: Option<usize> = None;
             let mut edited = false;
             egui::ScrollArea::vertical()
                 .max_height(120.0)
                 .show(ui, |ui| {
                     for (i, s) in sockets.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            if ui
+                            let field = ui
                                 .add(egui::TextEdit::singleline(&mut s.name).desired_width(110.0))
-                                .on_hover_text("Name (becomes the glTF node name)")
-                                .changed()
-                            {
+                                .on_hover_text(
+                                    "Name (becomes the glTF node name). Unique per \
+                                     scene: leaving the field gives a duplicate a \
+                                     numeric suffix and a blank name the default.",
+                                );
+                            if field.changed() {
                                 edited = true;
+                            }
+                            if field.lost_focus() {
+                                committed = Some(i);
                             }
                             if ui
                                 .small_button("✕")
@@ -1548,6 +1555,27 @@ impl Ui {
                         });
                     }
                 });
+            // A rename is checked when the field is *committed* (focus
+            // loss, which Enter also triggers), never per keystroke:
+            // typing "muzzle_left" passes through "muzzle", and
+            // rewriting the buffer mid-word would fight the typist.
+            // The `.changed()` arm above still fires per keystroke —
+            // that's the dirty-marking chain, and it stays.
+            //
+            // This needs the field to still be drawn on the frame it
+            // loses focus, which the panel order gives us: the toolbar
+            // and the menu bar are drawn *before* the Inspector, so a
+            // click that switches tools or closes the panel surrenders
+            // focus earlier in the same frame, and this section draws
+            // once more to see it. Moving the Inspector above them
+            // would silently drop the last rename of a session.
+            if let Some(i) = committed {
+                let resolved = resolve_socket_name(sockets, i);
+                if sockets[i].name != resolved {
+                    sockets[i].name = resolved;
+                    edited = true;
+                }
+            }
             if let Some(i) = to_delete {
                 sockets.remove(i);
                 edited = true;
@@ -2582,6 +2610,53 @@ fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
     (canvas, sidebar)
 }
 
+/// The name socket `idx` keeps once its rename is committed.
+///
+/// glTF nodes are keyed by name downstream, so two sockets called
+/// `muzzle` leave the engine picking one of them arbitrarily, and a
+/// blank one it can't address at all — the kind of breakage that
+/// surfaces in the game, not in the editor. Placement already
+/// guarantees uniqueness (`next_socket_name`); the Inspector's rename
+/// field is the only other door, so this is where the invariant
+/// `Socket::name` documents actually gets enforced.
+///
+/// A blank name falls back to the default sequence; a taken one grows
+/// the smallest free `_N` suffix. The suffix is appended to whatever
+/// was typed rather than replacing a number already at the end:
+/// renaming onto a taken `muzzle_2` gives `muzzle_2_2`, which is ugly
+/// but predictable, where stripping the tail would silently hand the
+/// name to a different socket than the one the user typed at.
+///
+/// Surrounding whitespace goes too: ` muzzle ` and `muzzle` are two
+/// different glTF node names, and nothing in the editor or in the
+/// engine's inspector shows which one you have.
+fn resolve_socket_name(sockets: &[Socket], idx: usize) -> String {
+    let typed = sockets[idx].name.trim();
+    if typed.is_empty() {
+        // Passing the whole slice is right: a blank name can never be
+        // one of the `Socket_N` candidates, so this socket doesn't
+        // block its own default.
+        return next_socket_name(sockets);
+    }
+    let taken = |candidate: &str| {
+        sockets
+            .iter()
+            .enumerate()
+            .any(|(j, s)| j != idx && s.name == candidate)
+    };
+    if !taken(typed) {
+        return typed.to_string();
+    }
+    let mut n = 2usize;
+    loop {
+        let candidate = format!("{typed}_{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// One "+ Add Node" menu entry: `(label, factory, separator_after)`.
 type NodeMenuOption = (&'static str, fn() -> NodeKind, bool);
 
@@ -3360,5 +3435,50 @@ mod graph_layout_tests {
         let s: ProcgenSettings =
             ron::from_str(old).expect("retired fields must be ignored, not fatal");
         assert!(s.graph_preview_enabled, "the surviving field still reads");
+    }
+}
+
+#[cfg(test)]
+mod socket_name_tests {
+    use super::*;
+
+    fn socket(name: &str) -> Socket {
+        Socket::new(name, [0.0; 3], [0.0, 1.0, 0.0])
+    }
+
+    #[test]
+    fn a_typed_name_someone_else_holds_grows_a_suffix() {
+        // Socket 1 has just been renamed onto socket 0's name.
+        let sockets = [socket("muzzle"), socket("muzzle")];
+        assert_eq!(resolve_socket_name(&sockets, 1), "muzzle_2");
+
+        // The suffix climbs past names that are also taken.
+        let sockets = [socket("muzzle"), socket("muzzle_2"), socket("muzzle")];
+        assert_eq!(resolve_socket_name(&sockets, 2), "muzzle_3");
+
+        // A name only this socket holds survives exactly as typed —
+        // committing a field must not rewrite a legal name.
+        let sockets = [socket("muzzle"), socket("barrel")];
+        assert_eq!(resolve_socket_name(&sockets, 1), "barrel");
+
+        // A socket doesn't collide with itself: re-committing an
+        // untouched field is a no-op, not a suffix per focus loss.
+        let sockets = [socket("muzzle")];
+        assert_eq!(resolve_socket_name(&sockets, 0), "muzzle");
+    }
+
+    #[test]
+    fn a_blank_name_falls_back_to_the_default_sequence() {
+        let sockets = [socket("Socket_1"), socket("")];
+        assert_eq!(resolve_socket_name(&sockets, 1), "Socket_2");
+
+        // Whitespace-only reads as blank...
+        let sockets = [socket("   ")];
+        assert_eq!(resolve_socket_name(&sockets, 0), "Socket_1");
+
+        // ...and surrounding whitespace is dropped rather than
+        // exported into a node name nobody can see the shape of.
+        let sockets = [socket(" muzzle ")];
+        assert_eq!(resolve_socket_name(&sockets, 0), "muzzle");
     }
 }

@@ -28,6 +28,13 @@ pub struct Socket {
     /// Display + export name. Unique within a scene (see
     /// [`next_socket_name`]) because glTF nodes are keyed by name
     /// downstream.
+    ///
+    /// Uniqueness is enforced at the two doors that write one:
+    /// placement takes the first free `Socket_N`, and the Inspector's
+    /// rename field resolves what was typed when the field is
+    /// committed. Nothing downstream re-checks — a third door (an
+    /// agent-facing socket op, an importer) has to carry the rule
+    /// itself, or it ships duplicates straight into the `.glb`.
     pub name: String,
     /// World-space position — the center of the face the socket was
     /// dropped on, so it carries sub-cell `.5` offsets.
