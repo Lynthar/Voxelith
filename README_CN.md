@@ -34,7 +34,7 @@
 | 📥 **网格导入** | 把 `.glb` 体素化进场景,可选 32³ / 64³ / 128³:表面采样加奇偶扫描填充内部,颜色取自材质的 baseColor 因子与贴图。叠加到现有内容上,算一步可撤销编辑,Ctrl+Z 就能退回 |
 | 🔌 **Agent 桥** | 编辑器自己托管一个 MCP server,agent 直接编辑你开着的工程 —— 它的批次进的是**你的**撤销栈,一批一次 Ctrl+Z,你随时可以接管。它还能直接给你一张节点图而不是一堆体素,结果依然可调参。也可以让它先问:批次以半透明几何上屏,由你决定应用还是丢弃。没人看着的时候还有无头版(命令行和独立 server) |
 | 🏷️ **游戏资产材质** | 每笔刷的自发光 / 金属标记,外加 4 档阵营 **tint zone**,导出 GLB 时分别落成 glTF materials 与逐顶点 `_TINTZONE` 属性,供下游换色 shader 使用 |
-| 🌱 **程序化生成** | Perlin 地形、L-System 树、WFC 多套 tileset(Dungeon + City)—— 单生成器面板,或在可视化节点图里用 Translate / Filter / Mask / Combine 组合。节点图随工程保存,agent 也能直接产出一张图交给你继续调 |
+| 🌱 **程序化生成** | Perlin 地形、L-System 树、WFC 多套 tileset(Dungeon + City)—— 从 Generate 菜单一键加为现成的图节点,再在可视化节点图里用 Translate / Filter / Mask / Combine 组合。节点图随工程保存,agent 也能直接产出一张图交给你继续调 |
 | ✨ **实时预览** | 防抖半透明叠加,生成结果落世界前可见 |
 | 📁 **文件支持** | 原生 `.vxlt`(gzip+状态)、MagicaVoxel `.vox` 导入(v150 + v200 多模型场景图)/导出(v150),Wavefront `.obj` 和 glTF Binary `.glb` 导出。OBJ/GLB 还有 Marching Cubes "smoothed" 变体(light: 圆角方块 / heavy: 黏土感)支持有机模型导出 |
 | 💾 **状态持久化** | 窗口布局、面板状态、生成器参数、最近文件跨重启保留 |

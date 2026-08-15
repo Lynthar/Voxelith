@@ -88,7 +88,6 @@ pub struct PanelVisibility {
     pub show_inspector: bool,
     pub show_palette: bool,
     pub show_viewport_settings: bool,
-    pub show_procgen: bool,
     pub show_graph: bool,
     pub show_agent: bool,
 }
@@ -106,7 +105,6 @@ impl Default for PanelVisibility {
             show_inspector: true,
             show_palette: true,
             show_viewport_settings: false,
-            show_procgen: false,
             show_graph: false,
             show_agent: false,
         }

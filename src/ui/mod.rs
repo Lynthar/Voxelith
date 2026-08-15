@@ -58,37 +58,12 @@ impl Default for ViewportSettings {
     }
 }
 
-/// Which generator the procgen panel is currently editing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-pub enum GeneratorChoice {
-    #[default]
-    Terrain,
-    Tree,
-    Wfc,
-}
-
-impl GeneratorChoice {
-    /// Display label used by the panel's combo box and status messages.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Terrain => "Perlin Terrain",
-            Self::Tree => "L-System Tree",
-            Self::Wfc => "WFC Tile Layout",
-        }
-    }
-}
-
-/// Live state for the procedural-generation panel.
-///
-/// Each generator's instance doubles as its parameter state — UI
-/// sliders mutate the fields in place, then `UiAction::GenerateProcedural`
-/// triggers `selected`'s `generate()` in the application layer.
-///
-/// `preview_enabled` and `graph_preview_enabled` independently drive
-/// translucent overlays — the first for the selected single generator,
-/// the second for the pipeline graph's output. Both share the renderer's
-/// preview slot; when both are on, the graph wins on the slot since
-/// its tick runs second.
+/// Procgen-related workspace state. What's left of the retired
+/// single-generator panel (2026-08 convergence ④): generator
+/// *parameters* now live on graph nodes — document data, saved with
+/// the project — so the only thing prefs still carries is the graph
+/// preview toggle. An older prefs file's `selected` / `terrain` /
+/// `tree` / `wfc` / `preview_enabled` keys are simply ignored.
 /// Struct-level `#[serde(default)]`, not just field-level: this rides in
 /// `prefs.ron`, and without it the *next* field added here without its
 /// own default makes every existing prefs file fail to parse — which
@@ -97,12 +72,8 @@ impl GeneratorChoice {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ProcgenSettings {
-    pub selected: GeneratorChoice,
-    pub terrain: PerlinTerrain,
-    pub tree: LSystemTree,
-    pub wfc: WfcGenerator,
-    pub preview_enabled: bool,
-    #[serde(default)]
+    /// Translucent overlay of the pipeline graph's output (the Graph
+    /// panel's Preview checkbox).
     pub graph_preview_enabled: bool,
 }
 
@@ -203,7 +174,7 @@ impl Ui {
         hud: &HudState,
     ) {
         // Top menu bar
-        self.show_menu_bar(ctx, editor);
+        self.show_menu_bar(ctx, editor, graph);
 
         // The open project changed on disk and the reload was refused —
         // shown directly under the menu bar until it's resolved.
@@ -240,11 +211,6 @@ impl Ui {
         // Viewport settings panel
         if self.state.panels.show_viewport_settings {
             self.show_viewport_panel(ctx);
-        }
-
-        // Procedural generation panel
-        if self.state.panels.show_procgen {
-            self.show_procgen_panel(ctx);
         }
 
         // Pipeline graph panel
@@ -795,7 +761,7 @@ impl Ui {
             });
     }
 
-    fn show_menu_bar(&mut self, ctx: &Context, editor: &Editor) {
+    fn show_menu_bar(&mut self, ctx: &Context, editor: &Editor, graph: &mut PipelineGraph) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -1099,7 +1065,6 @@ impl Ui {
                         &mut self.state.panels.show_viewport_settings,
                         "Viewport Settings",
                     );
-                    ui.checkbox(&mut self.state.panels.show_procgen, "Procedural Generation");
                     ui.checkbox(&mut self.state.panels.show_graph, "Pipeline Graph");
                     ui.checkbox(&mut self.state.panels.show_agent, "Agent Bridge");
                     ui.separator();
@@ -1133,16 +1098,52 @@ impl Ui {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Procedural Terrain...").clicked() {
-                        // Select the generator the menu item names, not
-                        // just the panel that hosts it. Opening the
-                        // panel alone left it on whatever was last used
-                        // — click "Procedural Terrain" and get the WFC
-                        // or Tree parameters, which reads as the wrong
-                        // panel rather than a stale selection.
-                        self.procgen.selected = GeneratorChoice::Terrain;
-                        self.state.panels.show_procgen = true;
-                        ui.close_menu();
+                    // One-node presets (2026-08 convergence ④): each
+                    // drops a source node with default parameters into
+                    // the pipeline graph and opens the Graph panel —
+                    // the single-generator panel this menu used to open
+                    // retired in its favor. On a graph with no Output
+                    // sink an Output is added and wired to the new
+                    // source, so Run Pipeline and Preview work at once;
+                    // a graph that already has one is never rewired.
+                    let presets: [GeneratorPreset; 3] = [
+                        ("Perlin Terrain", || {
+                            NodeKind::Terrain(PerlinTerrain::default())
+                        }),
+                        ("L-System Tree", || NodeKind::Tree(LSystemTree::default())),
+                        ("WFC Tile Layout", || NodeKind::Wfc(WfcGenerator::default())),
+                    ];
+                    for (label, make) in presets {
+                        if ui
+                            .button(label)
+                            .on_hover_text(
+                                "Add this generator as a node in the \
+                                 pipeline graph and open the Graph panel",
+                            )
+                            .clicked()
+                        {
+                            let src = graph.add(make());
+                            let has_output = graph
+                                .nodes
+                                .iter()
+                                .any(|n| matches!(n.kind, NodeKind::Output { .. }));
+                            if !has_output {
+                                let out = graph.add(NodeKind::Output { input: None });
+                                if let Err(e) = graph.set_input(out, 0, Some(src)) {
+                                    // Unreachable for a fresh Output's
+                                    // one input slot, but a wiring
+                                    // failure must not be silent.
+                                    log::warn!("Preset node wiring failed: {}", e);
+                                }
+                            }
+                            self.selected_node = Some(src);
+                            self.state.panels.show_graph = true;
+                            // The graph is document data and this edit
+                            // happens outside the Graph panel's own
+                            // change detector, so it says so itself.
+                            self.state.request(UiAction::GraphEdited);
+                            ui.close_menu();
+                        }
                     }
                 });
 
@@ -1835,74 +1836,6 @@ impl Ui {
         self.state.panels.show_viewport_settings = open;
     }
 
-    fn show_procgen_panel(&mut self, ctx: &Context) {
-        // Deferred-action pattern: `.open(...)` borrows self.state.panels.show_procgen
-        // and the closure borrows self.procgen, so we can't dispatch a UiAction
-        // (which mutates self.state) until both are released.
-        let mut generate = false;
-        let procgen = &mut self.procgen;
-
-        egui::Window::new("Procedural Generation")
-            .default_pos([ctx.screen_rect().width() - 240.0, 200.0])
-            .default_width(240.0)
-            .resizable(true)
-            .collapsible(true)
-            .open(&mut self.state.panels.show_procgen)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Generator");
-                    egui::ComboBox::from_id_salt("procgen_selected")
-                        .selected_text(procgen.selected.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut procgen.selected,
-                                GeneratorChoice::Terrain,
-                                GeneratorChoice::Terrain.label(),
-                            );
-                            ui.selectable_value(
-                                &mut procgen.selected,
-                                GeneratorChoice::Tree,
-                                GeneratorChoice::Tree.label(),
-                            );
-                            ui.selectable_value(
-                                &mut procgen.selected,
-                                GeneratorChoice::Wfc,
-                                GeneratorChoice::Wfc.label(),
-                            );
-                        });
-                });
-
-                ui.separator();
-
-                match procgen.selected {
-                    GeneratorChoice::Terrain => terrain_params_ui(ui, &mut procgen.terrain),
-                    GeneratorChoice::Tree => tree_params_ui(ui, &mut procgen.tree),
-                    GeneratorChoice::Wfc => wfc_params_ui(ui, &mut procgen.wfc),
-                }
-
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut procgen.preview_enabled, "Preview")
-                        .on_hover_text(
-                            "Show a translucent overlay of the generator's \
-                             current output (debounced ~150ms)",
-                        );
-                    if ui
-                        .button("Generate")
-                        .on_hover_text("Apply generated voxels (undo-able)")
-                        .clicked()
-                    {
-                        generate = true;
-                    }
-                });
-            });
-
-        if generate {
-            self.state.request(UiAction::GenerateProcedural);
-        }
-    }
-
     fn show_graph_panel(&mut self, ctx: &Context, graph: &mut PipelineGraph) {
         // The graph as this frame found it. The panel edits it in a
         // dozen places — four deferred actions, a node drag, and every
@@ -2357,7 +2290,7 @@ impl Ui {
                     if self.viewport.show_axes {
                         ui.label("[Axes]");
                     }
-                    if self.procgen.preview_enabled || self.procgen.graph_preview_enabled {
+                    if self.procgen.graph_preview_enabled {
                         ui.label(
                             egui::RichText::new("● Preview").color(egui::Color32::LIGHT_GREEN),
                         );
@@ -2405,14 +2338,15 @@ pub enum CameraView {
     Side,
 }
 
-// ---- Procgen panel parameter editors ---------------------------------
+// ---- Generator parameter editors -------------------------------------
 //
-// Free functions so the procgen panel's borrow on `self.procgen` can
-// dispatch to the right editor without involving `&mut self`. They take
-// only the generator's parameter struct.
+// Free functions taking only the generator's parameter struct, so the
+// graph sidebar can hand in the node's embedded generator directly.
+// (They predate the graph: the retired single-generator panel used the
+// same three editors, which is what made its retirement lossless.)
 
 fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
-    ui.heading(GeneratorChoice::Terrain.label());
+    ui.heading("Perlin Terrain");
     ui.add_space(4.0);
 
     egui::Grid::new("terrain_params")
@@ -2474,7 +2408,7 @@ fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
 }
 
 fn tree_params_ui(ui: &mut egui::Ui, t: &mut LSystemTree) {
-    ui.heading(GeneratorChoice::Tree.label());
+    ui.heading("L-System Tree");
     ui.add_space(4.0);
 
     egui::Grid::new("tree_params")
@@ -2525,7 +2459,7 @@ fn tree_params_ui(ui: &mut egui::Ui, t: &mut LSystemTree) {
 }
 
 fn wfc_params_ui(ui: &mut egui::Ui, t: &mut WfcGenerator) {
-    ui.heading(GeneratorChoice::Wfc.label());
+    ui.heading("WFC Tile Layout");
     ui.add_space(4.0);
 
     egui::Grid::new("wfc_params")
@@ -2626,6 +2560,9 @@ fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
 
 /// One "+ Add Node" menu entry: `(label, factory, separator_after)`.
 type NodeMenuOption = (&'static str, fn() -> NodeKind, bool);
+
+/// One Generate-menu preset entry: `(label, factory)`.
+type GeneratorPreset = (&'static str, fn() -> NodeKind);
 
 /// Available node kinds in the "+ Add Node" menu.
 fn node_menu_options() -> Vec<NodeMenuOption> {
@@ -3376,9 +3313,28 @@ mod graph_layout_tests {
         // without its own default makes every existing `prefs.ron`
         // fail to parse — and `Prefs::load` answers a parse failure by
         // discarding the user's whole workspace.
+        let s: ProcgenSettings = ron::from_str("()").expect("a partial struct is still settings");
+        assert!(
+            !s.graph_preview_enabled,
+            "missing fields fall back to Default"
+        );
+    }
+
+    #[test]
+    fn procgen_settings_ignore_the_retired_single_generator_fields() {
+        // A prefs.ron written before 2026-08 carries the retired
+        // single-generator panel's state — an enum, nested parameter
+        // structs, a toggle. All of it must be *skipped*, not refused:
+        // refusing means `Prefs::load` throws away the user's whole
+        // workspace over keys that stopped mattering.
+        let old = "(
+            selected: Terrain,
+            terrain: (width: 64, depth: 64, seed: 42),
+            preview_enabled: true,
+            graph_preview_enabled: true,
+        )";
         let s: ProcgenSettings =
-            ron::from_str("(preview_enabled: true)").expect("a partial struct is still settings");
-        assert!(s.preview_enabled);
-        assert!(!s.graph_preview_enabled, "the rest fall back to Default");
+            ron::from_str(old).expect("retired fields must be ignored, not fatal");
+        assert!(s.graph_preview_enabled, "the surviving field still reads");
     }
 }

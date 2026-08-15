@@ -2,8 +2,8 @@
 //! and applies each action to the world/editor/renderer.
 
 use voxelith::editor::{Command, VoxelChange};
-use voxelith::procgen::{GenResult, VoxelGenerator, VoxelPatch};
-use voxelith::ui::{CameraView, GeneratorChoice, UiAction};
+use voxelith::procgen::VoxelPatch;
+use voxelith::ui::{CameraView, UiAction};
 
 use super::{App, GenerateKind, PendingAction};
 
@@ -141,7 +141,6 @@ impl App {
                 UiAction::ImportVox => self.guard_then(PendingAction::ImportVox),
                 UiAction::ImportGlb => self.import_glb(),
                 UiAction::Export(kind) => self.do_export(kind),
-                UiAction::GenerateProcedural => self.run_selected_generator(),
                 UiAction::RunGraph => self.run_graph(),
                 UiAction::GraphEdited => self.document.bump(),
                 UiAction::SocketsEdited => self.document.bump(),
@@ -258,9 +257,8 @@ impl App {
     }
 
     /// Turn a generated [`VoxelPatch`] into an undoable `SetVoxels`
-    /// change list. Shared by the procgen panel, the graph and the
-    /// glTF import so all three treat duplicate and identity writes
-    /// identically:
+    /// change list. Shared by the graph and the glTF import so both
+    /// treat duplicate and identity writes identically:
     /// 1. **Dedupe by position, last write wins** (`VoxelPatch::
     ///    dedup_last_write`) — otherwise re-running a generator that
     ///    overwrites a cell flips it each run (see that method's docs).
@@ -279,68 +277,5 @@ impl App {
                 })
             })
             .collect()
-    }
-
-    /// Run the procgen panel's currently-selected generator and apply
-    /// the patch through `CommandHistory` so it's undo-able.
-    fn run_selected_generator(&mut self) {
-        // Dispatch by the panel's combo box. Each generator's params
-        // live as fields on its concrete type, so we just call
-        // `.generate()` on whichever the user picked.
-        let result: GenResult<VoxelPatch> = match self.ui.procgen.selected {
-            GeneratorChoice::Terrain => self.ui.procgen.terrain.generate(),
-            GeneratorChoice::Tree => self.ui.procgen.tree.generate(),
-            GeneratorChoice::Wfc => self.ui.procgen.wfc.generate(),
-        };
-
-        let patch = match result {
-            Ok(p) => p,
-            Err(e) => {
-                log::error!("Generation failed: {}", e);
-                self.ui.set_status(format!("Generation failed: {}", e));
-                return;
-            }
-        };
-
-        if patch.is_empty() {
-            self.ui.set_status("Generation produced no voxels");
-            return;
-        }
-
-        // Convert patch -> undoable set_voxels command: dedupe by position
-        // then drop identity writes (see `patch_to_changes`).
-        let changes = self.patch_to_changes(&patch);
-
-        if changes.is_empty() {
-            self.ui
-                .set_status("No changes (output matches existing voxels)");
-            return;
-        }
-
-        let count = changes.len();
-        // Remember the generated footprint for the "Frame Generated"
-        // camera action (uses the full patch, not just changed cells).
-        self.last_generated_bounds = super::bounds_of(patch.voxels.iter().map(|&(p, _)| p));
-        // Capture the static label before set_status takes &mut self.ui.
-        let label = self.ui.procgen.selected.label();
-        // `changes` was built by cloning out of patch.voxels, so patch
-        // is still owned here — we can read its notes after building cmd.
-        let cmd = Command::set_voxels(changes);
-        self.editor.history.execute(cmd, &mut self.document.world);
-
-        let mut status = format!("{}: {} voxels", label, count);
-        if !patch.notes.is_empty() {
-            status.push_str(" (");
-            status.push_str(&patch.notes.join("; "));
-            status.push(')');
-        }
-        self.ui.set_status(status);
-
-        // The just-applied geometry would otherwise double-render with
-        // the preview overlay on top of it. Clear the preview; if the
-        // generator panel is still open the debounced (~150 ms) preview
-        // refresh rebuilds it on its next tick (it re-evaluates on a timer,
-        // not only when a parameter changes).
-        self.invalidate_preview();
     }
 }

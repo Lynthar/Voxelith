@@ -160,10 +160,10 @@ pub enum UiAction {
     GenerateGround,
     GenerateSphere,
     GeneratePyramid,
-    /// Run the procgen panel's currently-selected generator (terrain
-    /// / tree / ...) and apply the result via CommandHistory (undo-able).
-    GenerateProcedural,
     /// Run the pipeline graph and apply its output via CommandHistory.
+    /// The generator presets in the Generate menu don't need an action
+    /// of their own: they edit the graph (raising `GraphEdited`) and
+    /// leave running it to this.
     RunGraph,
     /// The Graph panel changed the pipeline graph — a node, a wire, a
     /// parameter or a position.
