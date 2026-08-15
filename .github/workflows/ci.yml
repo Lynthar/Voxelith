@@ -78,6 +78,30 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      # `rust-version = "1.88"` in Cargo.toml is a promise, and until
+      # now an unverified one: it drifts on the first dependency bump or
+      # the first use of a newer language feature, and the drift lands
+      # on a contributor with an older toolchain as a wall of type
+      # errors from somewhere inside the dependency tree — which is the
+      # exact experience declaring an MSRV exists to prevent.
+      #
+      # `check`, not `build`: the question is whether 1.88 can compile
+      # this tree, and codegen would add runner minutes without adding
+      # an answer. Full features, because that is what a contributor
+      # builds — even though the floor itself comes from `image` and
+      # `rmcp`, which the headless half carries too.
+      #
+      # Installed with rustup and invoked as `cargo +1.88.0` rather than
+      # by swapping the job's default toolchain: every step above this
+      # one is meant to run on stable, and a step that silently
+      # redefines `cargo` for its successors is a trap for whoever
+      # appends the next one.
+      - name: Install Rust (MSRV 1.88)
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+
+      - name: Check (MSRV 1.88)
+        run: cargo +1.88.0 check --all-targets --verbose
+
   # The other half of the platform story. Two behaviors regress ONLY
   # here — the explicit first-frame request_redraw in handler::resumed
   # (macOS delivers no initial paint event; miss it and the window is

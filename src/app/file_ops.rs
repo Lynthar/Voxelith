@@ -503,9 +503,10 @@ impl App {
                     // model is a new document, so a later Save must prompt
                     // for a location instead of silently overwriting the
                     // project that was open before the import (#7). The
-                    // source .vox stays on disk, so — like open/new —
-                    // `unsaved_changes` is left false; the first edit arms
-                    // autosave.
+                    // source .vox stays on disk, so — like open/new — the
+                    // import settles the marks (`mark_saved` below, once
+                    // the rebuild's bump has landed) and the first edit
+                    // after it is what arms both the guard and autosave.
                     self.project_path = None;
                     self.note_project_mtime();
                     self.rebuild_all_meshes();

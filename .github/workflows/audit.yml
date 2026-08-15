@@ -1,0 +1,68 @@
+name: Security audit
+
+# `cargo audit` reads Cargo.lock against the RustSec advisory database.
+# It is its own workflow rather than a step in ci.yml for two reasons:
+# it compiles nothing (so it wants neither the Windows runner nor the
+# build cache), and — unlike every other gate here — its verdict can
+# change while this repository does not. An advisory published today
+# against a dependency shipped last month turns a green tree red, which
+# is exactly the signal worth having and exactly what a
+# push-triggered-only job never delivers. Hence the weekly schedule
+# beside the lockfile-triggered runs.
+#
+# It replaces a manual pass: the dependency advisories were last checked
+# by hand in 2026-08, and a hand check is stale the moment nobody
+# remembers to repeat it.
+#
+# What fails the run: vulnerabilities. Informational advisories
+# (unmaintained crates, `unsound` flags) are reported and do not fail —
+# cargo-audit's own default, kept for the reason written in
+# `.cargo/audit.toml`. An advisory that genuinely does not apply is
+# ignored *there*, with the argument spelled out, never by weakening
+# this job.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+  # Monday morning UTC. The offset is arbitrary but not :00 — GitHub's
+  # scheduler queues heavily on the hour.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A prebuilt binary from the cargo-audit release page, so this
+      # job stays seconds rather than a from-source `cargo install`.
+      # Running the CLI directly (rather than an audit action with its
+      # own ignore list) is what keeps `.cargo/audit.toml` the single
+      # place an exemption is written down and argued for.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit

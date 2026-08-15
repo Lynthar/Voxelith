@@ -1,0 +1,44 @@
+# cargo-audit's configuration, read from `.cargo/audit.toml` at the
+# project root (the tool also honors `~/.cargo/audit.toml`, which is why
+# it lives under `.cargo/` rather than next to `Cargo.toml`).
+#
+# The gate that reads this file is `.github/workflows/audit.yml`, where
+# a vulnerability fails the run. So an entry here is not "silence this
+# warning" — it is a written claim that the advisory cannot reach this
+# project, detailed enough for the next person to re-check rather than
+# inherit. Informational advisories (unmaintained crates, `unsound`
+# flags) are reported without failing and are deliberately *not* listed
+# here: they carry no fix to apply, and a permanently red gate is a gate
+# people learn to ignore.
+
+[advisories]
+# Both entries are `quick-xml` 0.38.x, and both arrive the same way:
+#
+#   quick-xml <- wayland-scanner (proc-macro)
+#             <- smithay-client-toolkit / wayland-client / ...
+#             <- winit, rfd        [Linux/Wayland targets only]
+#
+# Two independent reasons neither can reach Voxelith:
+#
+# 1. `wayland-scanner` is a build-time code generator, and the XML it
+#    parses is the Wayland protocol description shipped inside the
+#    crate. Both advisories need attacker-controlled input to matter —
+#    one exhausts memory on hostile namespace declarations, the other is
+#    quadratic on a hostile start tag. Nothing a user of this editor
+#    supplies ever reaches that parser.
+# 2. That subtree exists only on Linux targets. The verified platforms
+#    are Windows + Vulkan and macOS + Metal, and CI builds neither the
+#    editor nor the tests on Linux on purpose (the reason is in the
+#    header of `ci.yml`). On the platforms that ship, `cargo tree -i
+#    quick-xml` finds nothing at all.
+#
+# Nor is the version ours to move: it is pinned by `wayland-scanner`,
+# which comes down from winit. Upgrading past it means upgrading winit,
+# and only once upstream has done its half.
+#
+# Re-check both when winit moves, and drop this block outright if Linux
+# ever becomes a platform this project actually supports.
+ignore = [
+    "RUSTSEC-2026-0195", # quick-xml: unbounded namespace-declaration allocation (DoS)
+    "RUSTSEC-2026-0194", # quick-xml: quadratic duplicate-attribute-name check
+]

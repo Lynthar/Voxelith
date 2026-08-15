@@ -953,10 +953,13 @@ impl App {
     /// or sockets, the empty scene IS the latest state, and skipping it
     /// (as this used to) meant a crash recovered a stale autosave with
     /// voxels the user had deliberately removed, while graph-only work
-    /// wasn't recoverable at all. Clears `autosave_pending` on a
-    /// successful write so we don't rewrite an unchanged world every
-    /// interval; a failed write is logged and retried next interval.
-    /// `unsaved_changes` is left alone — see its doc comment.
+    /// wasn't recoverable at all. A successful write moves the
+    /// autosave mark (`Document::mark_autosaved`) so the next interval
+    /// finds nothing due until the document changes again; a failed
+    /// write is logged and retried next interval. The *saved* mark is
+    /// untouched — `mark_autosaved` can't reach it, which is how "edit
+    /// → autosave → close still prompts" holds by construction rather
+    /// than by this function remembering to.
     pub(super) fn tick_autosave(&mut self) {
         if !self.document.autosave_due() || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
             return;
