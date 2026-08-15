@@ -736,14 +736,18 @@ fn fill_interior(surface: &HashMap<(i32, i32, i32), Voxel>) -> HashMap<(i32, i32
         .fold((0u64, 0u64, 0u64, 0u64), |(r, g, b, c), v| {
             (r + v.r as u64, g + v.g as u64, b + v.b as u64, c + 1)
         });
-    let fill_voxel = if count > 0 {
-        Voxel::from_rgb(
+    // `NonZeroU64` rather than a `count > 0` guard: the divisor's
+    // invariant then lives in the type instead of in a check three
+    // lines above the three divisions that depend on it.
+    let fill_voxel = match std::num::NonZeroU64::new(count) {
+        Some(count) => Voxel::from_rgb(
             (r_sum / count) as u8,
             (g_sum / count) as u8,
             (b_sum / count) as u8,
-        )
-    } else {
-        Voxel::from_rgb(180, 180, 180)
+        ),
+        // Nothing on the surface to average — a mid gray keeps an
+        // interior that shows through from reading as a color choice.
+        None => Voxel::from_rgb(180, 180, 180),
     };
 
     let mut result = surface.clone();

@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 use thiserror::Error;
 
 /// Project file magic bytes
-const PROJECT_MAGIC: [u8; 4] = [b'V', b'X', b'L', b'T'];
+const PROJECT_MAGIC: [u8; 4] = *b"VXLT";
 /// Current project format version. Has been 1 since the very first
 /// commit that could write a `.vxlt`, which is why the loader rejects
 /// version 0 outright: no build ever wrote one, so a zero here is file

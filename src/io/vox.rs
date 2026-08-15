@@ -22,7 +22,7 @@ use std::io::{self, Read, Write};
 use thiserror::Error;
 
 /// VOX file magic number: "VOX "
-const VOX_MAGIC: [u8; 4] = [b'V', b'O', b'X', b' '];
+const VOX_MAGIC: [u8; 4] = *b"VOX ";
 /// Caps for `Vec`/`HashMap` capacity *hints* taken from file-declared
 /// counts. Those counts come from untrusted files; the hint is only a
 /// preallocation optimization, so capping it prevents a bogus count

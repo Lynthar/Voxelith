@@ -651,10 +651,7 @@ impl VoxelGenerator for WfcGenerator {
 
         // Main collapse loop. Pick the lowest-entropy cell, observe
         // it, propagate. Bail when nothing's left to collapse.
-        loop {
-            let Some(target) = lowest_entropy(&cells, &mut rng) else {
-                break;
-            };
+        while let Some(target) = lowest_entropy(&cells, &mut rng) {
             collapse(&mut cells[target], &weights, &mut rng);
             propagate(&mut cells, w, d, target, &tileset.tiles);
         }

@@ -1263,7 +1263,7 @@ impl Ui {
                     ui.painter().rect_stroke(
                         rect,
                         4.0,
-                        egui::Stroke::new(1.0, egui::Color32::WHITE),
+                        egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
                     );
 
                     ui.add_space(8.0);
@@ -1722,7 +1722,7 @@ impl Ui {
                                 ui.painter().rect_stroke(
                                     rect,
                                     2.0,
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                    egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
                                 );
                             }
 
@@ -2754,7 +2754,7 @@ fn paint_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
         let t = i as f32 / SEGMENTS as f32;
         pts.push(cubic_bezier_point(from, c1, c2, to, t));
     }
-    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, color)));
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0_f32, color)));
 }
 
 /// Visual graph editor canvas. Renders nodes + wires, handles
@@ -2884,9 +2884,9 @@ fn graph_canvas(
         // Body fill + outline.
         painter.rect_filled(body, 4.0, egui::Color32::from_rgb(50, 50, 60));
         let outline = if is_selected {
-            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE)
+            egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE)
         } else {
-            egui::Stroke::new(1.0, egui::Color32::from_gray(80))
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80))
         };
         painter.rect_stroke(body, 4.0, outline);
 
@@ -2954,7 +2954,7 @@ fn graph_canvas(
             painter.circle_stroke(
                 center,
                 SOCKET_R,
-                egui::Stroke::new(1.0, egui::Color32::BLACK),
+                egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
             );
         }
 
@@ -2971,7 +2971,7 @@ fn graph_canvas(
             painter.circle_stroke(
                 center,
                 SOCKET_R,
-                egui::Stroke::new(1.0, egui::Color32::BLACK),
+                egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
             );
             if out_resp.drag_started() {
                 *drag_wire = Some(node.id);
