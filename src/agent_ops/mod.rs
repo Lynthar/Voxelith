@@ -1,46 +1,6 @@
-//! Agent-facing operation layer: a JSON edit protocol over the
-//! editor's own primitives.
-//!
-//! An external agent (Claude, ChatGPT, …) can't click a viewport, and
-//! asking an LLM to emit voxels one at a time is hopeless token
-//! economics. So this module exposes the *high-level* primitives the
-//! editor already has — boxes, spheres, cylinders, lines, hollowing,
-//! selection transforms, parametric generators — as a batch of JSON
-//! ops, and hands back a report the agent can read to decide what to
-//! do next.
-//!
-//! ```text
-//! OpsBatch (JSON) → validate → run on a scratch World → one
-//!   Command::SetVoxels → CommandHistory → ApplyReport (JSON)
-//! ```
-//!
-//! Three properties are load-bearing, in this order:
-//!
-//! 1. **Atomic.** Ops run against a [`World::deep_clone`] of the
-//!    session world. Any failure discards the copy, so a batch either
-//!    lands whole or changes nothing. An agent recovers from a clean
-//!    failure far better than from half an edit.
-//! 2. **Sequential.** Each op sees the results of the ones before it,
-//!    which is what makes `rotate` / `mirror` / `hollow` mean anything
-//!    inside a batch.
-//! 3. **One undo entry per batch.** The accumulated changes commit as a
-//!    single command — with any graph the batch installed riding inside
-//!    it as a before/after transition — so a human at the editor undoes
-//!    an agent's whole step, voxels and graph both, with one Ctrl+Z.
-//!    When the editor is the one hosting the agent, that is literally
-//!    the same undo stack their own brush strokes push onto (see
-//!    [`BatchOutcome`]).
-//!
-//! Errors are the product here as much as the edits are: every failure
-//! carries the offending `op_index`, a stable machine-readable
-//! [`ErrorCode`], and a message that says what to do instead. That is
-//! the loop an agent iterates on.
-//!
-//! Dependency direction is one-way — `agent_ops → editor / procgen /
-//! core` — one-way, never the inverse. Nothing here
-//! knows about `app`, winit, or egui; file dialogs and other UI-bound
-//! side effects are deliberately absent (an agent-triggered `rfd`
-//! dialog would block the main thread with no one to click it).
+//! The agent-facing edit protocol: a batch of JSON ops over the
+//! editor's own primitives, answered with a report. Atomic, sequential,
+//! one undo entry per batch.
 
 use serde::Serialize;
 
@@ -65,9 +25,8 @@ pub use schema::{
 };
 
 /// Wire-format version an [`OpsBatch`] must declare. Bumped only for a
-/// breaking change; additive fields keep version 1 (new fields get
-/// `#[serde(default)]`, the same forward-compat discipline `prefs.ron`
-/// and `.vxlt` follow).
+/// breaking change; additive fields keep version 1 and carry
+/// `#[serde(default)]`.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Undo depth of a session, matching the interactive editor's.
@@ -87,31 +46,18 @@ pub const MAX_SET_VOXELS_PER_OP: usize = 4096;
 pub const MAX_OP_REGION_CELLS: u64 = 128 * 128 * 128;
 
 /// Cells one batch may touch in total, counting every cell an op
-/// writes, scans, or has masked out by its `write_mode`. It's an
-/// upper-bound accounting on purpose: the point is to bound work and
-/// memory, not to bill precisely.
+/// writes, scans or masks out. Upper-bound accounting on purpose — the
+/// point is to bound work and memory, not to bill precisely.
 pub const MAX_BATCH_CELLS: u64 = 8_388_608;
 
-/// Coordinate ceiling on every axis. The world itself is unbounded —
-/// any `i32` cell is writable — but an agent that means `y = 5` and
-/// emits `y = 5000000` should hear about it rather than silently
-/// building 5 km up. It also keeps the mirror reflection (`2·plane −
-/// 1 − p`) and shape bounding boxes far away from `i32` overflow.
+/// Coordinate ceiling on every axis. The world itself is unbounded, but
+/// an agent that means `y = 5` and emits `y = 5000000` should hear about
+/// it. Also keeps mirror and bbox math clear of `i32` overflow.
 pub const MAX_COORD: i32 = 1 << 20;
 
-/// Source nodes one graph may hold.
-///
-/// Evaluation drops a node's patch as soon as its last reader has run,
-/// so what is resident is the working front rather than the whole
-/// graph — and the sources are the floor under that front: each one
-/// exists from the moment it is generated until whatever consumes it
-/// runs, and all of that happens before the first cell reaches the
-/// batch cell budget. (It did not always work this way. A cache that
-/// only grew held one full copy per node, so a long enough chain of
-/// transforms over a legal source reached gigabytes while this comment
-/// claimed the sources bounded it.) A graph that needs more than eight
-/// sources wants to be run in stages, which is free: its output is
-/// already in the world.
+/// Source nodes one graph may hold. Evaluation keeps only the working
+/// front resident and the sources are the floor under it. A graph
+/// needing more wants to run in stages — its output is in the world.
 pub const MAX_GRAPH_SOURCES: usize = 8;
 
 /// Edits one `graph_edit` op may carry. A graph tops out at 64 nodes,
@@ -119,11 +65,9 @@ pub const MAX_GRAPH_SOURCES: usize = 8;
 /// graph — and cheaper for the agent to get right.
 pub const MAX_GRAPH_EDITS: usize = 64;
 
-/// Chunks one batch may bring into existence beyond what the session
-/// already had. Each is a 256 KB allocation, so scattered writes are
-/// the cheap way to ask for a lot of memory: 4096 stray `set_voxels`
-/// entries in 4096 distinct chunks is a gigabyte. The cap is on *new*
-/// chunks, not total, so a legitimately large document keeps working.
+/// Chunks one batch may bring into existence. Each is a 256 KB
+/// allocation, so scattered writes are the cheap way to ask for a lot of
+/// memory. The cap is on *new* chunks, so large documents keep working.
 pub const MAX_NEW_CHUNKS: usize = 2048;
 
 /// Machine-readable failure reason. Agents branch on this; humans read
@@ -249,46 +193,27 @@ pub struct ApplyReport {
     pub notes: Vec<String>,
 }
 
-/// A batch run against a copy of the session, committing nothing.
-///
-/// This is what makes a dry run an actual *preview* rather than a
-/// prediction the agent has to take on faith: the caller can
-/// [`describe`](AgentSession::describe) or [`slice`](AgentSession::slice)
-/// the result before deciding to run it for real. Without it, a dry run
-/// paired with a description reports two contradictory pictures of the
-/// document in one breath — the report describing the world after the
-/// batch, the description the world before it.
+/// A batch run against a copy of the session, committing nothing. The
+/// caller can [`describe`](AgentSession::describe) or
+/// [`slice`](AgentSession::slice) it before running it for real.
 pub struct Preview {
     /// Always `dry_run: true` — a preview commits nothing, whatever the
     /// batch asked for.
     pub report: ApplyReport,
     /// The session as the batch would leave it: world and selection
     /// after the last op, sockets carried across. Its history is empty,
-    /// because nothing was committed — `describe()` on a preview
-    /// therefore reports depth 0 rather than the real session's.
+    /// so `describe()` on a preview reports depth 0.
     pub session: AgentSession,
 }
 
 /// A batch that has run, handed back for its caller to commit or throw
-/// away.
-///
-/// [`AgentSession`] is one shape of host: it owns its world and commits
-/// into its own history, which is all a headless run needs. The editor
-/// is the other shape, and the difference is whose undo stack it is —
-/// there the world and the history belong to the *user*, so an agent's
-/// batch has to arrive as a change list the editor commits through the
-/// same `CommandHistory` its own brush strokes go through. One stack,
-/// one Ctrl+Z, no reconciliation between an agent's history and a
-/// human's; the alternative is two stacks that undo past each other.
-///
-/// Both hosts get here through [`run_batch`], so neither can drift into
-/// validating differently or reporting differently than the other.
+/// away. Both hosts — a session and the editor — reach it through
+/// [`run_batch`], so neither can validate or report differently.
 pub struct BatchOutcome {
     pub report: ApplyReport,
     /// Cells whose value actually changed, ready to become one
-    /// [`Command::set_voxels`] — already de-duplicated by position,
-    /// identity writes dropped, and sorted, so a caller can commit it
-    /// as-is.
+    /// [`Command::set_voxels`]: de-duplicated by position, identity
+    /// writes dropped, sorted.
     pub changes: Vec<VoxelChange>,
     /// The selection after the last op, which is *not* undo-stack data
     /// on either host — a caller that commits `changes` assigns this
@@ -296,25 +221,17 @@ pub struct BatchOutcome {
     pub selection: Option<Selection>,
     /// The pipeline graph a `graph` op left on the document, if the
     /// batch carried one. Document data, assigned by whoever commits —
-    /// same contract as `selection`, and the reason an agent's graph
-    /// ends up in front of the human who opens the project: in the
-    /// editor this is the graph its own Graph panel shows.
+    /// the same contract as `selection`.
     pub graph: Option<PipelineGraph>,
-    /// The world the batch produced. A caller that commits ignores it
-    /// (`changes` is the same edit, without replacing the world the
-    /// renderer already has meshes for); one that only wants a look —
-    /// a dry run, or an edit awaiting a human's approval — describes,
-    /// slices or renders *this* rather than predicting from the report.
+    /// The world the batch produced. A committing caller ignores it and
+    /// applies `changes`; one that only wants a look describes, slices
+    /// or renders this rather than predicting from the report.
     pub world: World,
 }
 
 /// The document a batch runs against, borrowed from whoever owns it.
-///
-/// The same shape — and the same reason — as [`DocumentView`]: an
-/// [`AgentSession`] keeps these together, the editor keeps them on
-/// three different structs, and neither should have to pretend to be
-/// the other. Growing a field here beats growing another positional
-/// parameter on [`run_batch`] every time the document does.
+/// Growing a field here beats growing another positional parameter on
+/// [`run_batch`] every time the document does.
 pub struct BatchInput<'a> {
     pub world: &'a World,
     pub selection: Option<Selection>,
@@ -324,36 +241,16 @@ pub struct BatchInput<'a> {
     pub graph: &'a PipelineGraph,
 }
 
-/// Everything that has to hold before a graph is worth evaluating.
-///
-/// Two checks that are easy to mistake for one: [`PipelineGraph::validate`]
-/// covers the *shape* (unique ids, no dangling wires, no cycles, one
-/// output, and — the one that isn't taste — no more nodes than the
-/// evaluator's recursive descent has stack for), and
-/// `check_graph_sources` covers the *size* (every source node against
-/// the same ceiling a `generate` op would hit, plus what the whole
-/// graph can materialize at once).
-///
-/// Public because the editor needs it too. A graph arrives there out of
-/// a `.vxlt` — an external file that can hold anything — and is then
-/// evaluated by Run Pipeline and, if the preview toggle is on, by the
-/// frame loop with nobody clicking anything. Both of those walked past
-/// both checks: a long enough chain overflowed the stack, and a source
-/// node past the registry's ceiling took the generator's own arithmetic
-/// with it. Neither is recoverable, and both are on the thread that
-/// draws.
+/// Everything that must hold before a graph is worth evaluating:
+/// [`PipelineGraph::validate`] covers the shape, `check_graph_sources`
+/// the size. Public because the editor evaluates graphs from files too.
 pub fn check_graph(graph: &PipelineGraph) -> Result<(), OpsError> {
     compile::check_graph(graph)
 }
 
 /// Validate a batch and run it against a copy of the document,
-/// committing nothing.
-///
-/// The single execution path. Every entry point above this layer — the
-/// CLI, the MCP server, the editor's own agent bridge — comes through
-/// here, which is what makes a preview and a real run incapable of
-/// disagreeing: they are the same run, and only the caller's decision
-/// afterwards differs.
+/// committing nothing. The single execution path — every entry point
+/// comes through here, so a preview and a real run cannot disagree.
 pub fn run_batch(input: BatchInput<'_>, batch: &OpsBatch) -> Result<BatchOutcome, OpsError> {
     if batch.version != SCHEMA_VERSION {
         return Err(OpsError::new(
@@ -397,10 +294,8 @@ pub fn run_batch(input: BatchInput<'_>, batch: &OpsBatch) -> Result<BatchOutcome
 }
 
 /// A headless editing session: the document an agent operates on.
-///
-/// Fields are public because the consumers above this layer (the CLI in
-/// P1, the MCP server in P2) legitimately need to swap the world in
-/// after loading a `.vxlt` or read the sockets out for export.
+/// Fields are public because the CLI and the MCP server legitimately
+/// swap the world in after a load and read the sockets out for export.
 pub struct AgentSession {
     pub world: World,
     pub history: CommandHistory,
@@ -411,11 +306,9 @@ pub struct AgentSession {
     /// and export to glTF), carried here so a load → edit → save round
     /// trip doesn't drop them. No v1 op modifies them.
     pub sockets: Vec<Socket>,
-    /// The document's procedural pipeline graph. Document data for the
-    /// same reason the sockets are — it persists in `.vxlt` and a round
-    /// trip must not drop it — and the reason it is *here* rather than
-    /// only in the editor: a graph an agent built has to be reachable
-    /// by the human who opens the project afterwards.
+    /// The document's pipeline graph. Document data like the sockets,
+    /// and here rather than only in the editor so a graph an agent built
+    /// reaches the human who opens the project.
     pub graph: PipelineGraph,
     /// The project's identity (`name` / `author` / `created_at`).
     /// Loaded with the file and handed back to the save, so a headless
@@ -448,13 +341,9 @@ impl AgentSession {
         let outcome = run_batch(self.batch_input(), batch)?;
 
         if !batch.options.dry_run {
-            // One command for the whole batch: one undo entry, and a
-            // no-op batch pushes nothing (`execute_with_graph` drops
-            // no-ops). A graph the batch carried rides inside the same
-            // command, so undo steps the graph back with the voxels —
-            // assigning it beside the history (as this used to) left a
-            // graph-only batch with no undo entry at all, and a mixed
-            // batch whose undo kept the new graph over the old voxels.
+            // One command for the whole batch, so a graph it carried
+            // rides inside and undo steps both back. A no-op batch
+            // pushes nothing.
             let graph = outcome.graph.map(|after| crate::editor::GraphTransition {
                 before: self.graph.clone(),
                 after,
@@ -470,12 +359,8 @@ impl AgentSession {
     }
 
     /// Run a batch and hand back the result instead of committing it.
-    ///
-    /// Same validation, same executor, same report as [`apply_ops`] —
-    /// they share [`run_batch`] precisely so a preview and the real
-    /// thing can't drift apart — but the session is left untouched and
-    /// the resulting world comes back inside a [`Preview`] to be looked
-    /// at.
+    /// Same validation, executor and report as [`apply_ops`] — they
+    /// share [`run_batch`] — but the session is left untouched.
     pub fn preview_ops(&self, batch: &OpsBatch) -> Result<Preview, OpsError> {
         let mut outcome = run_batch(self.batch_input(), batch)?;
         // Nothing was committed, whatever the batch asked for. A batch
@@ -569,12 +454,9 @@ mod tests {
         {"op":"hollow","min":[0,0,0],"max":[4,4,4]}
     ]}"#;
 
-    /// The editor's half of the contract: an agent's batch arrives as a
-    /// change list, the *user's* `CommandHistory` commits it, and the
-    /// world that lands is the one the agent's own session would have
-    /// built. This is what "one undo stack" costs — without it the
-    /// editor would need a second history beside the user's, and the two
-    /// would undo past each other.
+    /// The editor's half of the contract: a batch arrives as a change
+    /// list, the *user's* history commits it, and the world that lands
+    /// is the one the agent's own session would have built.
     #[test]
     fn a_foreign_history_commits_the_world_the_session_would_have() {
         let batch = parse(BATCH);
@@ -646,9 +528,8 @@ mod tests {
     }
 
     /// A preview commits nothing whatever the batch asked for, so its
-    /// report has to say `dry_run` even when the batch didn't set it —
-    /// otherwise the editor's approval path would hand an agent a report
-    /// claiming an edit landed while it was still waiting for a human.
+    /// report says `dry_run` regardless — or the approval path claims
+    /// an edit landed while it is still waiting for a human.
     #[test]
     fn a_preview_reports_a_dry_run_the_batch_never_asked_for() {
         let session = AgentSession::new();
@@ -668,10 +549,9 @@ mod tests {
         ))
     }
 
-    /// "One undo entry per batch" has to cover the graph half of a
-    /// batch, not just its voxels. A graph-only batch used to assign
-    /// the graph beside the history — no undo entry at all, and the
-    /// graph it replaced was gone for good.
+    /// "One undo entry per batch" has to cover the graph half too, not
+    /// just the voxels — otherwise a graph-only batch gets no undo entry
+    /// and the graph it replaced is gone for good.
     #[test]
     fn a_graph_only_batch_is_one_undoable_entry() {
         let mut session = AgentSession::new();

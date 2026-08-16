@@ -1,10 +1,6 @@
-//! Rendering system using wgpu.
-//!
-//! This module handles all GPU-related operations:
-//! - Device initialization
-//! - Shader compilation
-//! - Render pipeline management
-//! - Mesh rendering
+//! The interactive viewport: wgpu device setup, pipelines, camera and
+//! mesh upload. GPU and window only — the headless views live in
+//! `crate::view`.
 
 mod camera;
 mod gpu_mesh;
@@ -43,26 +39,20 @@ pub struct Renderer {
     /// `pipeline.transparent_pipeline` after opaque chunks. `None`
     /// when preview is disabled or the generator output is empty.
     pub preview_mesh: Option<GpuMesh>,
-    /// Translucent overlay showing the brush's hovered target cells
-    /// (Place: adjacent face cell; Remove/Paint: the hovered cell;
-    /// Eyedropper/Fill: just the hovered cell). Updated as the
-    /// cursor moves so the user can see where a click would land.
+    /// Translucent overlay showing the cells a click would land on,
+    /// updated as the cursor moves.
     pub brush_preview_mesh: Option<GpuMesh>,
-    /// Wireframe AABB for the active box selection (or the live
-    /// preview during a Select-tool drag). Drawn through the same
-    /// `LinePipeline` as the grid/axes — bright yellow, 12 edges.
-    /// `None` when no selection is active and no drag is in progress.
+    /// Wireframe AABB for the active selection, or the live preview
+    /// during a Select drag. Drawn through the same `LinePipeline` as
+    /// the grid and axes; `None` when neither is present.
     pub selection_mesh: Option<SelectionMesh>,
-    /// Translucent voxel-content ghost shown while dragging a box
-    /// selection to a new location — the picked-up voxels following
-    /// the cursor, alpha-blended through `transparent_pipeline` like
-    /// the brush hover overlay. `None` unless a move drag is in
-    /// progress. Owned solely by `App::update_selection_visualization`.
+    /// Translucent ghost of the picked-up voxels while a selection is
+    /// being dragged. `None` unless a move drag is in progress; owned
+    /// by `App::update_selection_visualization`.
     pub move_ghost_mesh: Option<GpuMesh>,
-    /// Gizmo lines for the named sockets (attachment points), drawn
-    /// through the `LinePipeline` like the selection wireframe. `None`
-    /// when the scene has no sockets. Rebuilt by
-    /// `App::update_socket_visualization` when the socket set changes.
+    /// Gizmo lines for the named sockets, through the same
+    /// `LinePipeline` as the selection wireframe. `None` when the scene
+    /// has none; rebuilt when the socket set changes.
     pub socket_mesh: Option<SocketMesh>,
     /// Whether wireframe mode is supported
     pub wireframe_supported: bool,
@@ -155,22 +145,16 @@ impl Renderer {
         let line_pipeline =
             LinePipeline::new(&device, surface_format, &pipeline.camera_bind_group_layout);
 
-        // Create camera
-        // The same constant a headless-built project is saved with, so a
-        // scene an agent made opens on the view a new one starts at
-        // rather than somewhere else.
+        // The same constant a headless-built project is saved with, so
+        // a scene an agent made opens on the view a new one starts at.
         let camera = Camera::new(
             glam::Vec3::from_array(crate::io::DEFAULT_CAMERA_POSITION),
             glam::Vec3::ZERO,
             size.width as f32 / size.height as f32,
         );
         // Sync the controller's cached orbit state from the camera's
-        // actual pose. `CameraController::new`'s defaults
-        // (yaw=0 / pitch=0.5 / distance=40) don't match the initial
-        // camera position above; without this sync, any path that
-        // reads the cached angles via `update_camera_position` (Reset
-        // Camera, Set Camera View, the first orbit drag's spherical
-        // recompute) would teleport the camera 90° on first use.
+        // actual pose: its defaults don't match the position set above,
+        // so the first path reading them would teleport the camera.
         let mut camera_controller = CameraController::new(0.5, 0.003);
         camera_controller.sync_orbit_state_from_camera(&camera);
 
@@ -221,11 +205,9 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            // RENDER_ATTACHMENT only. Nothing samples this — the main
-            // pass writes it and the egui overlay pass runs without a
-            // depth attachment at all — and a `TEXTURE_BINDING` a
-            // texture never needs can cost the driver's compression
-            // paths for it.
+            // RENDER_ATTACHMENT only: nothing samples this, and a
+            // `TEXTURE_BINDING` a texture never needs can cost the
+            // driver's compression paths for it.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -334,10 +316,9 @@ impl Renderer {
         }
     }
 
-    /// Replace the box-selection wireframe with one covering the
-    /// closed AABB `[min, max]` (in world cell coordinates). The
-    /// rendered mesh expands to `max + 1` so it envelops the outer
-    /// face of the corner cells.
+    /// Replace the selection wireframe with one covering the closed
+    /// AABB `[min, max]` in cells. The mesh expands to `max + 1` so it
+    /// envelops the outer face of the corner cells.
     pub fn set_selection_mesh(&mut self, min: (i32, i32, i32), max: (i32, i32, i32)) {
         self.selection_mesh = Some(SelectionMesh::new(&self.device, min, max));
     }
@@ -396,14 +377,9 @@ impl Renderer {
         render_pass.draw(0..self.axis_mesh.vertex_count, 0..1);
     }
 
-    // NOTE: there is deliberately no `Renderer::render()`. The frame is
-    // assembled by `App::render` (`app/render.rs`), which owns the pass
-    // order the editor actually needs: opaque chunks, then the
-    // translucent generator preview, sockets, selection wireframe, grid
-    // and axes, and finally egui. A convenience method here could only
-    // ever draw the chunk subset — and, presenting the surface itself,
-    // would swap out a half-drawn frame for whoever reached for the
-    // obvious-sounding name.
+    // There is deliberately no `Renderer::render()`: `App::render` owns
+    // the pass order. A convenience method here could only draw the
+    // chunk subset, then present a half-drawn frame.
 
     /// Get total triangle count
     pub fn total_triangles(&self) -> usize {

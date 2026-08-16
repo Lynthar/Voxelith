@@ -1,19 +1,6 @@
-//! Background tokio runtime, owned for the life of the process.
-//!
-//! winit owns the main thread and its event loop is synchronous, so
-//! anything async has to live somewhere else. This spawns a tokio
-//! multi-thread runtime on a dedicated OS thread and hands out a
-//! [`tokio::runtime::Handle`]; the main thread starts work with
-//! `handle.spawn(...)` and never blocks on it.
-//!
-//! Its one consumer today is the in-editor agent bridge, whose HTTP
-//! server runs here (`app::agent_bridge`). It was originally written
-//! for the AI worker and outlived it — the need is not "AI", it is
-//! "winit's main thread cannot await".
-//!
-//! The runtime thread is intentionally never joined: it lives the whole
-//! process lifetime and OS exit cleans it up. An explicit
-//! `shutdown_background()` on drop would only slow the close path.
+//! Background tokio runtime on its own thread, owned for the life of
+//! the process: winit's main thread is synchronous and cannot await.
+//! Never joined — OS exit cleans it up.
 
 use std::sync::mpsc;
 use std::thread;
@@ -25,22 +12,17 @@ use tokio::runtime::Handle;
 pub struct AsyncRuntime {
     handle: Handle,
     // Kept only to document that this thread is owned for the life of
-    // the process. Holding the handle without joining is behaviourally
-    // identical to detaching, and in particular does NOT make a panic
-    // any more visible — the panic hook prints either way. The one
-    // realistic panic here (the runtime failing to build) happens
-    // before the handle handshake below and is already surfaced by the
-    // `recv().expect`. A spawned task's panic never reaches this thread
-    // at all: tokio catches it per-task, and the caller notices through
-    // whatever channel that task was feeding.
+    // the process — holding the handle without joining is identical to
+    // detaching, and makes no panic more visible either way.
     _runtime_thread: thread::JoinHandle<()>,
 }
 
 impl AsyncRuntime {
-    /// Spawn the background tokio runtime and wait for its handle to
-    /// become available. Synchronous; returns once the runtime is
-    /// ready to accept tasks. Panics on tokio init failure (we treat
-    /// this the same as wgpu init failure — fatal).
+    /// Spawn the background runtime and wait for its handle. Returns
+    /// once it can accept tasks.
+    ///
+    /// # Panics
+    /// On tokio init failure, treated as fatal like wgpu init failure.
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
         let runtime_thread = thread::Builder::new()

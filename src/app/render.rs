@@ -1,8 +1,6 @@
-//! Per-frame render pipeline.
-//!
-//! The flow is: drive the egui pass → drain UI actions → grid/axes/voxel
-//! main pass → egui overlay pass → submit. Wireframe replaces the voxel
-//! pipeline when enabled (and supported by the GPU).
+//! Per-frame render: egui pass, drain UI actions, the main voxel pass
+//! with grid and axes, the egui overlay, submit. Wireframe replaces the
+//! voxel pipeline where the GPU supports it.
 
 use super::App;
 
@@ -18,10 +16,8 @@ impl App {
         egui_ctx.begin_pass(raw_input);
 
         let stats = self.calculate_stats();
-        // Mirror clipboard presence into Ui so Tools-panel buttons can
-        // gray out Paste when there's nothing to paste. Cheap (bool
-        // copy) and avoids leaking App::clipboard across the UI
-        // boundary.
+        // Mirror clipboard presence into `Ui` so Paste can gray out,
+        // without leaking `App::clipboard` across the UI boundary.
         self.ui.has_clipboard = self.clipboard.is_some();
         // Ditto for the agent bridge: a listening socket, a channel and
         // possibly a batch parked mid-call, condensed to what the panel
@@ -150,12 +146,9 @@ impl App {
                 mesh.draw(&mut render_pass);
             }
 
-            // Box-selection wireframe (yellow AABB). Drawn after
-            // opaque chunks but before the translucent overlays so
-            // brush hover hints stay readable on top of the selection.
-            // Uses `LinePipeline` (depth-test on, depth-write off) —
-            // the wireframe is correctly occluded by intervening
-            // voxels, matching how Goxel renders its selection.
+            // Selection wireframe, after opaque chunks but before the
+            // translucent overlays so hover hints stay readable on top.
+            // Depth-test on, write off, so voxels occlude it correctly.
             renderer.draw_selection(&mut render_pass);
 
             // Socket gizmos (magenta attachment-point pins). Same line
@@ -163,20 +156,18 @@ impl App {
             // socket tucked behind solid voxels is occluded too.
             renderer.draw_socket(&mut render_pass);
 
-            // Procgen preview overlay (alpha-blended). Drawn after
-            // opaque chunks so the depth buffer already correctly
-            // gates it; the transparent pipeline reads but does not
-            // write depth so multiple translucent fragments composite.
+            // Preview overlay, after opaque chunks so the depth buffer
+            // gates it. The transparent pipeline reads depth without
+            // writing, so translucent fragments composite.
             renderer.draw_preview(&mut render_pass);
 
             // Brush hover overlay — shows where the next click will
             // land. Same transparent-pipeline rules.
             renderer.draw_brush_preview(&mut render_pass);
 
-            // Move-drag voxel ghost — the selection's content trailing
-            // the cursor while it's relocated. Same transparent rules;
-            // during a move drag the brush hover slot above is empty
-            // (Select tool), so the two never fight for the frame.
+            // The move ghost, under the same transparent rules. During a
+            // move the hover slot above is empty, so the two never fight
+            // for the frame.
             renderer.draw_move_ghost(&mut render_pass);
         }
 

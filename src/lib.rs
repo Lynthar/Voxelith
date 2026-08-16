@@ -1,29 +1,6 @@
-//! Voxelith - Procedural-first voxel asset creation tool
-//!
-//! This library provides core functionality for:
-//! - Voxel data storage and manipulation
-//! - Mesh generation from voxel data
-//! - GPU rendering with wgpu, and CPU ray-cast views without it
-//! - User interface with egui
-//! - Headless entry points an agent drives: ops, CLI, MCP
-//!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────┐
-//! │              User Interface             │
-//! │              (ui module)                │
-//! ├─────────────────────────────────────────┤
-//! │        Agent front ends (headless)      │
-//! │        (agent_ops, exec, mcp)           │
-//! ├─────────────────────────────────────────┤
-//! │           Application Logic             │
-//! │         (editor, commands)              │
-//! ├─────────────────────────────────────────┤
-//! │             Core Engine                 │
-//! │  (core, mesh, view, render, procgen)    │
-//! └─────────────────────────────────────────┘
-//! ```
+//! Voxelith — procedural-first voxel asset creation. Voxel storage,
+//! meshing, rendering, procgen, I/O, and the headless entry points an
+//! agent drives.
 
 pub mod agent_ops;
 pub mod bake;
@@ -35,10 +12,8 @@ pub mod io;
 pub mod mesh;
 pub mod procgen;
 
-// CPU ray-cast views of a world. Sits below the agent front ends and
-// beside `mesh` rather than inside `render`: it needs no GPU and no
-// window, which is the whole point — an agent runs where there is
-// neither.
+// CPU ray-cast views. Beside `mesh` rather than inside `render`,
+// because it needs no GPU and no window — which is the whole point.
 pub mod view;
 
 // The MCP server. Gated because it carries rmcp + schemars, which a
@@ -46,11 +21,9 @@ pub mod view;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
-// The editor half. Gated on `gui` so `--no-default-features` builds the
-// library and the headless subcommands without winit / wgpu / egui in
-// the tree at all. `prefs` sits here rather than below because it is
-// exactly the editor's saved workspace (window, panels, viewport,
-// recent files) — nothing headless reads it.
+// The editor half, gated on `gui` so `--no-default-features` builds
+// without winit / wgpu / egui in the tree. `prefs` is here because it
+// is the editor's saved workspace — nothing headless reads it.
 #[cfg(feature = "gui")]
 pub mod prefs;
 #[cfg(feature = "gui")]

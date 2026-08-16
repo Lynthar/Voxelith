@@ -3,24 +3,13 @@
 use crate::core::ChunkPos;
 use bytemuck::{Pod, Zeroable};
 
-/// Ambient floor used when baking per-vertex AO into exported vertex
-/// colors. **Kept in sync with `ambient_min` in
-/// `render/shaders/voxel.wgsl`** — the renderer multiplies brightness by
-/// `ambient_min + (1 - ambient_min) * ao`, and [`Vertex::baked_color`]
-/// bakes the same factor so an exported model carries the AO shading the
-/// editor shows. If you change the shader's `ambient_min`, change this too.
+/// Ambient floor for baking AO into exported vertex colors. Must stay
+/// in sync with `ambient_min` in `render/shaders/voxel.wgsl` — the
+/// renderer and [`Vertex::baked_color`] apply the same factor.
 pub const AO_AMBIENT_MIN: f32 = 0.5;
 
-/// Vertex format for voxel rendering.
-///
-/// Layout optimized for GPU:
-/// - Position: 3 floats (12 bytes)
-/// - Normal: 3 floats (12 bytes)
-/// - Color: 4 floats (16 bytes)
-/// - AO: 1 float (4 bytes) — 0 = fully occluded, 1 = no occlusion
-/// - Tint zone: 1 float (4 bytes) — faction recolor zone (export only)
-///
-/// Total: 48 bytes per vertex
+/// Vertex format for voxel rendering: position, normal, RGBA, AO and
+/// tint zone. 48 bytes, `#[repr(C)]` for direct GPU upload.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct Vertex {
@@ -30,24 +19,19 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// RGBA color (normalized 0.0-1.0)
     pub color: [f32; 4],
-    /// Per-vertex Ambient Occlusion in `[0, 1]`. 0 = fully
-    /// occluded (sharp inside corner), 1 = no occlusion (open
-    /// space). Mapped to brightness in the fragment shader as
-    /// `ambient_min + (1 - ambient_min) * ao`. Defaults to 1.0
-    /// when `Vertex::new` is used (back-compat for code that
-    /// hasn't computed AO yet — patch previews, tests, etc.).
+    /// Per-vertex AO in `[0, 1]`: 0 fully occluded, 1 open. The shader
+    /// maps it to `ambient_min + (1 - ambient_min) * ao`; `Vertex::new`
+    /// defaults it to 1.0.
     pub ao: f32,
-    /// Per-vertex tint zone for faction recoloring (mirrors
-    /// `Voxel::tint_zone`): 0 = none, 1 = primary, 2 = secondary,
-    /// 3 = reserved. Carried into GLB export as the `_TINTZONE`
-    /// attribute; the renderer ignores it. Defaults to 0.0.
+    /// Faction recolor zone, mirroring `Voxel::tint_zone`: 0 none,
+    /// 1 primary, 2 secondary, 3 reserved. Exported as `_TINTZONE`;
+    /// the renderer ignores it.
     pub tint_zone: f32,
 }
 
 impl Vertex {
-    /// Create a new vertex with no occlusion (`ao = 1.0`). Code
-    /// paths that haven't yet computed AO (procgen preview, tests)
-    /// can use this; the mesher emits via `new_with_ao` instead.
+    /// A vertex with no occlusion (`ao = 1.0`), for paths that compute
+    /// no AO — previews and tests. The mesher uses `new_with_ao`.
     pub fn new(position: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> Self {
         Self::new_with_ao(position, normal, color, 1.0)
     }
@@ -64,14 +48,9 @@ impl Vertex {
         }
     }
 
-    /// The vertex color with per-vertex AO baked into RGB, matching the
-    /// renderer's AO darkening (`AO_AMBIENT_MIN + (1 - AO_AMBIENT_MIN) *
-    /// ao`). The GLB / OBJ exporters use this so a model opened in
-    /// Blender / Unity carries the same contact-shadow shading the editor
-    /// shows. The runtime *directional* light term is deliberately NOT
-    /// baked (the target engine relights); alpha is left untouched.
-    /// Meshes without computed AO (MC-smoothed export, previews) carry
-    /// `ao = 1.0`, so this is the identity there.
+    /// The color with AO baked into RGB, matching the renderer's
+    /// darkening. The directional light term is not baked and alpha is
+    /// untouched; without AO (`1.0`) this is the identity.
     pub fn baked_color(&self) -> [f32; 4] {
         let f = AO_AMBIENT_MIN + (1.0 - AO_AMBIENT_MIN) * self.ao;
         [
@@ -82,13 +61,9 @@ impl Vertex {
         ]
     }
 
-    /// Get the vertex buffer layout for wgpu.
-    ///
-    /// The one place the mesh layer touches a GPU type, and the reason
-    /// it's gated: everything else here is plain data the headless
-    /// exporters (`bake`, `exec`) rely on, so `wgpu` must stay out of a
-    /// `--no-default-features` build. The layout is only ever read by
-    /// `render::pipeline`, which is gated the same way.
+    /// The wgpu vertex buffer layout — the one place the mesh layer
+    /// touches a GPU type, which is why it is gated: everything else
+    /// here is plain data the headless exporters rely on.
     #[cfg(feature = "gui")]
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -180,24 +155,16 @@ impl ChunkMesh {
         self.vertices.len()
     }
 
-    /// Add a quad (two triangles) to the mesh with the default
-    /// 0–2 diagonal split. Fine for AO-uniform faces (or AO-less
-    /// previews); for AO-shaded faces use `add_quad_with_ao_flip`
-    /// so the diagonal can flip to follow the dark pair.
+    /// Add a quad with the default 0–2 diagonal split. Fine for
+    /// AO-uniform faces and AO-less previews; AO-shaded faces should
+    /// use `add_quad_with_ao_flip`.
     pub fn add_quad(&mut self, vertices: [Vertex; 4]) {
         self.push_quad(vertices, false);
     }
 
-    /// Add a quad picking the triangle split based on the 4 corner
-    /// AO values (0fps standard rule). Flips the diagonal when the
-    /// 0-2 corners are brighter than 1-3 so the visible fold runs
-    /// through the darker pair — visually less jarring than a
-    /// bright/dark split across one triangle.
-    ///
-    /// Both splits go through `push_quad`, which reverses the
-    /// natural ABCD walk order so the resulting triangles are
-    /// CCW-from-outside (cross product parallel to face normal).
-    /// See `push_quad` for the full winding rationale.
+    /// Add a quad, choosing the split from the four corner AO values so
+    /// the fold runs through the darker pair. Both splits go through
+    /// `push_quad`, which is where the winding is fixed.
     pub fn add_quad_with_ao_flip(&mut self, vertices: [Vertex; 4]) {
         let flip = vertices[0].ao + vertices[2].ao > vertices[1].ao + vertices[3].ao;
         self.push_quad(vertices, flip);
@@ -206,14 +173,9 @@ impl ChunkMesh {
     fn push_quad(&mut self, vertices: [Vertex; 4], flip: bool) {
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&vertices);
-        // Triangle index order is REVERSED from the visual ABCD
-        // walk so each triangle's cross product comes out parallel
-        // to the face normal — i.e., vertices appear CCW *from
-        // outside* in world space, matching the wgpu / glTF /
-        // standard convention. `face_quad_vertices_sized` emits
-        // vertices in a walk order that's CW from outside; the
-        // reversed triangle indices below flip that to CCW. Don't
-        // change without verifying with `test_winding_*` tests.
+        // Reversed from the ABCD walk so each triangle's cross product
+        // is parallel to the face normal — CCW from outside, per wgpu
+        // and glTF. Verify with `test_winding_*` before changing.
         if flip {
             // Diagonal split along 1-3 (B-D): triangles
             // (A, D, B) + (B, D, C).
@@ -309,14 +271,9 @@ mod tests {
 
     #[test]
     fn test_winding_cross_parallel_to_face_normal() {
-        // The wgpu / glTF / standard convention is "vertices CCW
-        // from outside" — meaning each triangle's cross product
-        // (v1-v0) × (v2-v0) should be PARALLEL to the face normal.
-        // After `perspective_rh × look_at_rh` (det negative) this
-        // becomes CCW in NDC = front per `FrontFace::Ccw`.
-        //
-        // This test runs through ALL 6 face directions for both
-        // split paths and verifies cross direction.
+        // CCW from outside means each triangle's cross product
+        // (v1-v0) × (v2-v0) is parallel to the face normal. Checked
+        // across all six directions and both split paths.
         use crate::mesh::{face_quad_vertices_sized, Face};
 
         for face in Face::ALL {

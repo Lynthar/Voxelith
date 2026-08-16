@@ -1,33 +1,6 @@
-//! GLB → `procgen::VoxelPatch` conversion.
-//!
-//! Pipeline:
-//! 1. Parse GLB via the `gltf` crate.
-//! 2. Walk the scene graph, applying cumulative node transforms.
-//! 3. Extract triangles with vertex positions + per-vertex colors.
-//!    Color follows the glTF composition rule — baseColorFactor ×
-//!    baseColorTexture (sampled at the vertex UV) × COLOR_0 — with any
-//!    absent source contributing identity 1.0. When there is no COLOR_0,
-//!    no texture, and the factor is the default white, a neutral 200-gray
-//!    is substituted so the model reads as solid rather than pure white.
-//! 4. Voxelize the surface by grid-sampling each triangle (sample
-//!    density tied to both triangle area / voxel area and the longest
-//!    edge in voxels, so even large *or* thin sliver triangles fill
-//!    their full voxel footprint without holes).
-//! 5. Fill the interior by a 3-axis parity scan + majority vote — a
-//!    cell is "inside" when ≥ 2 of the 3 axis scans say so. Robust to
-//!    minor mesh defects (a single missed surface crossing on one
-//!    axis won't leak the whole interior).
-//! 6. Translate to non-negative coordinates and emit as `VoxelPatch`
-//!    so the caller can apply it via `Command::set_voxels` and the
-//!    result lands at the world origin (downstream tools can Move it).
-//!
-//! This was written to land the output of a remote text-to-3D service.
-//! That feature is gone; the conversion outlived it because nothing
-//! about it was ever AI-specific — it turns a triangle mesh into voxels,
-//! and a mesh off the network and a mesh off the disk are the same
-//! problem. The hardening stayed for the same reason: `File ▸ Import`
-//! opens a file the user did not write either, and a GLB can declare a
-//! 20000×20000 texture whichever way it arrived.
+//! GLB → `procgen::VoxelPatch`: walk the scene graph, sample every
+//! triangle onto the grid, then fill the interior by a 3-axis parity
+//! scan with majority vote. The file is untrusted throughout.
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,29 +10,21 @@ use glam::{Mat4, Quat, Vec3};
 use crate::core::Voxel;
 use crate::procgen::VoxelPatch;
 
-/// Voxelize a GLB binary into a `VoxelPatch` whose coordinates start
-/// at `(0, 0, 0)`. `resolution` is the number of voxels along the
-/// mesh's longest axis; the other two axes shrink in proportion.
+/// Voxelize a GLB into a `VoxelPatch` starting at `(0, 0, 0)`.
+/// `resolution` is the voxel count along the mesh's longest axis; the
+/// other two shrink in proportion.
 ///
-/// Bails on:
-/// - resolution out of range (4..=256)
-/// - malformed GLB
-/// - GLB with no triangle primitives
+/// # Errors
+/// A resolution outside 4..=256, a malformed GLB, or a file carrying no
+/// triangle primitives.
 pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     if !(4..=256).contains(&resolution) {
         bail!("Resolution must be in 4..=256, got {}", resolution);
     }
 
-    // Parse structure first, decode pixels ourselves.
-    //
-    // `gltf::import_slice` would do both in one call, but it decodes
-    // *every* embedded image eagerly, keeps them all resident, and
-    // offers nowhere to hand the image crate a `Limits`. A
-    // few-hundred-KB file can declare a 20000×20000 PNG and turn into a
-    // multi-gigabyte allocation — and a failed allocation aborts the
-    // process, which here is the editor and everything unsaved in it.
-    // Splitting the two steps lets us decode only the textures a
-    // material actually samples, under explicit limits.
+    // Parse structure first, decode pixels ourselves: `import_slice`
+    // decodes every embedded image eagerly with nowhere to pass a
+    // `Limits`, and a failed allocation aborts the editor.
     let gltf::Gltf { document, blob } = gltf::Gltf::from_slice(bytes).context("Parsing GLB")?;
     // `None` base path: any image or buffer referencing an external
     // file URI is refused rather than read off the local disk.
@@ -119,10 +84,9 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     let filled = fill_interior(&surface);
     let mut patch = build_patch(filled);
     if limits.exhausted {
-        // The log line says which limit; this is the half the person
-        // who picked the file gets to see. A truncated import that
-        // looks like a complete one is how someone exports a model with
-        // half its geometry.
+        // The log line says which limit; this is the half the person who
+        // picked the file sees. A truncated import that looks complete
+        // is how a model ships with half its geometry.
         patch.notes.push(
             "only part of this file was voxelized — see the log for which limit it hit".into(),
         );
@@ -156,14 +120,8 @@ const MAX_TEXTURE_ALLOC: u64 = 256 * 1024 * 1024;
 const MAX_TEXTURE_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Decode the base-color textures the materials actually sample, keyed
-/// by image index.
-///
-/// Only referenced images are touched: a GLB can carry normal /
-/// occlusion / unused maps we'd never read, and decoding those was pure
-/// cost and pure risk. A texture that fails to decode (unsupported
-/// format, over the limits, a decompression bomb) is logged and
-/// skipped — the model still voxelizes, just with the material's factor
-/// or vertex colors instead of that map.
+/// by image index. One that fails to decode is logged and skipped — the
+/// model still voxelizes, from the factor or vertex colors instead.
 fn decode_base_color_textures(
     document: &gltf::Document,
     buffers: &[gltf::buffer::Data],
@@ -244,27 +202,17 @@ const MAX_NODE_DEPTH: usize = 256;
 
 /// Triangles one file may hand over. Nothing else bounds this: a mesh
 /// can be referenced from any number of nodes, so a few hundred bytes
-/// of JSON can ask for the same geometry a thousand times over. At
-/// ~48 bytes each this is about a hundred megabytes, well past any
-/// mesh worth voxelizing at 256³.
+/// of JSON can ask for the same geometry a thousand times.
 const MAX_TRIANGLES: usize = 2_000_000;
 
-/// Budget tracking for [`walk_node`], the same shape and the same
-/// reason as `.vox`'s `FlattenLimits`: an imported file is one the user
-/// didn't write, and these limits are about refusing to be talked into
-/// a stack overflow or an out-of-memory abort by a small one.
+/// Budget tracking for [`walk_node`] — the same shape and reason as
+/// `.vox`'s `FlattenLimits`: refuse to be talked into a stack overflow
+/// or an out-of-memory abort by a small file.
 #[derive(Default)]
 struct WalkLimits {
-    /// Nodes already walked. glTF 2.0 requires the node hierarchy to be
-    /// "a set of disjoint strict trees" — no cycles, and no node with
-    /// two parents — so arriving at one twice means the file is
-    /// malformed, and refusing the second arrival loses nothing a
-    /// conforming file would have had. (`.vox` is the opposite case and
-    /// its walk is written the opposite way: there a shared subtree is
-    /// how the format says "this part appears in several places", so it
-    /// guards the current path only.) The `gltf` crate's validation
-    /// checks that indices are in range and nothing more, so without
-    /// this a node listing itself as its own child is a stack overflow.
+    /// Nodes already walked. glTF requires disjoint strict trees, so a
+    /// second arrival means a malformed file — and a node listing
+    /// itself as its child would overflow the stack.
     visited: std::collections::HashSet<usize>,
     exhausted: bool,
 }
@@ -366,12 +314,9 @@ fn extract_from_mesh(
             continue;
         }
 
-        // Budget the primitive BEFORE collecting it: the accessor
-        // declares its counts up front, so an oversized primitive can
-        // be refused for the cost of two lookups. Checking only after
-        // the collect (as the walk's own post-mesh check does) let one
-        // huge primitive complete a multi-gigabyte allocation and
-        // *then* get discarded.
+        // Budget the primitive before collecting it: the accessor
+        // declares its counts up front, so an oversized one is refused
+        // for two lookups instead of after a huge allocation.
         let vertex_count = primitive
             .get(&gltf::Semantic::Positions)
             .map(|a| a.count())
@@ -393,11 +338,9 @@ fn extract_from_mesh(
             None => continue,
         };
 
-        // Vertex colors (optional). Per the glTF spec COLOR_0 is an
-        // additional linear multiplier on the base color — it multiplies
-        // with the texture and factor rather than replacing them. Most
-        // exported meshes omit it entirely and let the texture (or the
-        // bare factor) carry the color.
+        // Vertex colors are optional and, per the spec, an additional
+        // linear multiplier — they multiply with the texture and factor
+        // rather than replacing them.
         let vertex_colors: Option<Vec<[f32; 4]>> =
             reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
 
@@ -460,14 +403,9 @@ fn sample_texture(tex: &DecodedImage, u: f32, v: f32) -> [f32; 4] {
     let u = u.rem_euclid(1.0);
     let v = v.rem_euclid(1.0);
     let x = ((u * tex.width as f32) as u32).min(tex.width.saturating_sub(1));
-    // No flip. glTF 2.0 puts UV origin (0,0) at the image's **top-left**
-    // and grows v downward, which is the same direction `to_rgba8()`
-    // lays its rows out — so v maps straight onto the row index. This
-    // line used to read `(1.0 - v)` under a comment asserting a
-    // bottom-left origin; that was a net second flip, and every model
-    // with a base-color texture took its colors from the vertically
-    // mirrored position (a face sampling the legs) while still looking
-    // plausible enough to survive four months.
+    // No flip: glTF puts UV origin (0,0) at the image's top-left and
+    // grows v downward, the same direction `to_rgba8()` lays its rows
+    // out, so v maps straight onto the row index.
     let y = ((v * tex.height as f32) as u32).min(tex.height.saturating_sub(1));
     let idx = ((y * tex.width + x) * 4) as usize;
     [
@@ -487,14 +425,9 @@ fn pack_rgba(c: [f32; 4]) -> [u8; 4] {
     ]
 }
 
-/// glTF base-color composition for one vertex: `baseColorFactor ×
-/// baseColorTexture × COLOR_0`, each *absent* source contributing an
-/// identity 1.0 (per the glTF 2.0 spec, COLOR_0 is "an additional linear
-/// multiplier to base color" — it multiplies with the texture and factor,
-/// it does not replace them). When there is no vertex color, no texture,
-/// and the factor is the glTF default white, there is nothing to derive a
-/// color from, so a neutral 200-gray is returned instead of pure white.
-/// An explicit non-default factor is always honored.
+/// glTF base-color composition for one vertex: `factor × texture ×
+/// COLOR_0`, each absent source contributing 1.0. With no source at all
+/// a neutral 200-gray is returned rather than pure white.
 fn compose_base_color(
     vertex: Option<[f32; 4]>,
     tex_sample: Option<[f32; 4]>,
@@ -539,14 +472,9 @@ fn rasterize_triangles(
     resolution: u32,
 ) -> HashMap<(i32, i32, i32), ColorAccum> {
     let mut grid: HashMap<(i32, i32, i32), ColorAccum> = HashMap::new();
-    // The last cell index each axis has. Geometry sitting exactly on
-    // the box's far face divides to a whole number and `floor` keeps
-    // it, which puts those samples one layer past the model: an
-    // axis-aligned cube — Blender's default export — came out
-    // `resolution + 1` cells across, with the extra layer covering only
-    // the faces that touched the plane, so the outer shell broke up
-    // into a fringe. A cell spans `[p, p+1)`; the face at the end
-    // belongs to the cell before it.
+    // The last cell index each axis has. Geometry on the box's far face
+    // divides exactly, so `floor` would put those samples one layer
+    // past the model: a cell spans `[p, p+1)` and the end face is its.
     let last_cell = |extent: f32| ((extent / voxel_size).ceil() as i32 - 1).max(0);
     let last = (
         last_cell(far_corner.x - origin.x),
@@ -554,28 +482,15 @@ fn rasterize_triangles(
         last_cell(far_corner.z - origin.z),
     );
     let voxel_area = voxel_size * voxel_size;
-    // No triangle can be bigger than the box every triangle sits in, so
-    // an honest sample grid tops out near 2·`resolution` a side (the
-    // biggest triangle that fits has ~1.2·extent² of area, and
-    // `voxel_size` is that extent over `resolution`). Twice that is the
-    // ceiling, and it is here because the area below is an `f32`
-    // product of coordinate differences: vertices around 2e10 — a
-    // `scale` of 1e10 on a unit cube — overflow it to infinity, and
-    // `f32 → usize` saturates rather than wrapping, so `grid_n` came
-    // out at 4.29 billion and the loop below asked for 1.8e19
-    // iterations on the thread that draws. Bounded work is the fix;
-    // clamping costs nothing on a mesh whose numbers are real.
+    // An honest sample grid tops out near 2·`resolution` a side, since
+    // no triangle exceeds the box it sits in. The clamp matters because
+    // an overflowing `f32` area saturates on the cast rather than wraps.
     let max_grid = 4 * resolution as usize;
 
     for tri in triangles {
-        // Adaptive sampling density. The area term gives ≈4 samples per
-        // voxel-cell area so big flat triangles fill solidly. But area
-        // badly underestimates long thin slivers — a triangle spanning
-        // ~100 voxels can have near-zero area and would get only the
-        // 4-sample floor, leaving holes along its length (which then let
-        // the parity interior-fill leak). So also floor grid_n at the
-        // longest edge measured in voxels, guaranteeing ≥1 sample per
-        // voxel it crosses.
+        // Adaptive density: the area term gives ~4 samples per voxel
+        // cell, but area underestimates slivers, so the floor is also
+        // the longest edge in voxels — one sample per voxel crossed.
         let area = 0.5 * (tri.v1 - tri.v0).cross(tri.v2 - tri.v0).length();
         let target_samples = ((area / voxel_area * 4.0).ceil() as usize).max(4);
         let area_n = (target_samples as f32).sqrt().ceil() as usize;
@@ -623,15 +538,9 @@ fn rasterize_triangles(
     grid
 }
 
-/// Average each cell's accumulated samples into a voxel.
-///
-/// Alpha is dropped, not averaged. Every voxel that reaches the world
-/// is opaque (the greedy mesher's zero-key sentinel depends on it, and
-/// `io::vox` normalizes imports the same way); nothing downstream reads
-/// voxel alpha, so a texture's transparency would only have travelled
-/// into the glTF export's `COLOR_0.a` to confuse an engine shader — or,
-/// for a fully transparent black texel, produced a solid voxel that
-/// packs to exactly the "no face here" sentinel.
+/// Average each cell's accumulated samples into a voxel. Alpha is
+/// dropped rather than averaged — every voxel that reaches the world is
+/// opaque, and a transparent black texel would pack to the sentinel.
 fn finalize_surface(grid: HashMap<(i32, i32, i32), ColorAccum>) -> HashMap<(i32, i32, i32), Voxel> {
     grid.into_iter()
         .map(|(pos, [r, g, b, _a, count])| {
@@ -668,10 +577,9 @@ fn fill_interior(surface: &HashMap<(i32, i32, i32), Voxel>) -> HashMap<(i32, i32
         max_z = max_z.max(z);
     }
 
-    // Bitmask per non-surface cell: which axes' parity scans flagged
-    // it as "inside". A cell with ≥ 2 bits set is voted inside and
-    // gets filled; this tolerates a single axis miscount (e.g. from a
-    // grazing surface crossing).
+    // Bitmask per non-surface cell: which axes' parity scans called it
+    // inside. Two or more bits fills the cell, which tolerates a single
+    // axis miscounting a grazing crossing.
     let mut inside_mask: HashMap<(i32, i32, i32), u8> = HashMap::new();
 
     // X-axis scan
@@ -769,11 +677,9 @@ fn build_patch(voxels: HashMap<(i32, i32, i32), Voxel>) -> VoxelPatch {
     let min_x = voxels.keys().map(|&(x, _, _)| x).min().unwrap();
     let min_y = voxels.keys().map(|&(_, y, _)| y).min().unwrap();
     let min_z = voxels.keys().map(|&(_, _, z)| z).min().unwrap();
-    // Sorted so the patch is byte-reproducible for a given input.
-    // `HashMap` iteration order is randomized per instance, which would
-    // otherwise make two voxelizations of the same GLB differ in
-    // ordering alone. Positions are unique here (they're map keys), so
-    // sorting can't disturb any same-cell write ordering.
+    // Sorted so the patch is reproducible for a given input; `HashMap`
+    // order is randomized per instance. Positions are map keys, so
+    // sorting can't disturb any same-cell write order.
     let mut cells: Vec<_> = voxels.into_iter().collect();
     cells.sort_unstable_by_key(|&(pos, _)| pos);
     let mut patch = VoxelPatch::with_capacity(cells.len());
@@ -809,12 +715,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Two rows, red on top and blue on the bottom. glTF's v grows
-    /// downward from a top-left origin, so v = 0 has to land on red.
-    ///
-    /// This is the test that was missing while `sample_texture` carried
-    /// a net vertical flip: every assertion here fails with the axis
-    /// inverted, and none of them needs a GLB, a network, or a GPU.
+    /// Two rows, red on top and blue below. glTF's v grows downward
+    /// from a top-left origin, so v = 0 must land on red — every
+    /// assertion here fails with the axis inverted.
     #[test]
     fn texture_v_axis_runs_top_down_like_gltf_says() {
         let tex = DecodedImage {
@@ -919,12 +822,9 @@ mod tests {
         }
     }
 
-    /// `resolution` is "the number of voxels along the longest axis",
-    /// and geometry touching the far face used to make it one more than
-    /// that: the division is exact there, `floor` keeps the whole
-    /// number, and the samples land a layer past the model. An
-    /// axis-aligned cube — the default export out of every DCC tool —
-    /// touches that face with a whole side.
+    /// `resolution` counts voxels along the longest axis. Geometry on
+    /// the far face divides exactly, so `floor` would put those samples
+    /// a layer past the model — which an axis-aligned cube always hits.
     #[test]
     fn geometry_on_the_far_face_lands_in_the_last_cell_not_past_it() {
         let c = [255u8, 255, 255, 255];
@@ -943,12 +843,9 @@ mod tests {
         assert_eq!(tallest, 9);
     }
 
-    /// A node listing itself as its own child. The `gltf` crate's
-    /// validation only checks that indices are in range, so this used
-    /// to recurse until the stack ran out — an abort, on the thread
-    /// holding whatever the user hadn't saved, from a file 112 bytes
-    /// long. It is also invalid glTF: the spec requires the node
-    /// hierarchy to be a set of disjoint strict trees.
+    /// A node listing itself as its own child. The `gltf` crate only
+    /// validates that indices are in range, so without the visited set
+    /// a 112-byte file recurses until the stack runs out.
     #[test]
     fn a_self_referencing_node_is_pruned_rather_than_followed() {
         let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"children":[0]}]}"#;
@@ -973,11 +870,9 @@ mod tests {
         );
     }
 
-    /// Vertices around 2e10 — a node `scale` of 1e10 on a unit cube —
-    /// overflow the `f32` cross product to infinity, and `f32 → usize`
-    /// saturates rather than wrapping. The sample grid used to come out
-    /// at 4.29 billion a side: 1.8e19 iterations of the inner loop, on
-    /// the thread that draws, with nothing to do but kill the process.
+    /// Vertices around 2e10 overflow the `f32` cross product to
+    /// infinity, and `f32 → usize` saturates: without the clamp the
+    /// sample grid is 4.29 billion a side, on the drawing thread.
     #[test]
     fn a_triangle_with_overflowing_coordinates_samples_a_bounded_grid() {
         let c = [255u8, 255, 255, 255];
@@ -1098,10 +993,9 @@ mod tests {
 
     #[test]
     fn finalize_surface_ignores_texture_alpha() {
-        // Voxels in the world are always opaque; a semi- or fully
-        // transparent texel must not carry its alpha through. The
-        // fully-transparent black case is the dangerous one — it would
-        // otherwise pack to the greedy mesher's "no face" sentinel.
+        // Voxels in the world are always opaque, so a transparent texel
+        // must not carry its alpha through. Transparent black is the
+        // dangerous case — it packs to the mesher's "no face" sentinel.
         let mut grid: HashMap<(i32, i32, i32), ColorAccum> = HashMap::new();
         grid.insert((0, 0, 0), [120, 130, 140, 40, 1]);
         grid.insert((1, 0, 0), [0, 0, 0, 0, 1]);

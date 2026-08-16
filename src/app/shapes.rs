@@ -1,8 +1,6 @@
-//! Built-in primitive generators (sphere, pyramid).
-//!
-//! These produce voxels directly into the world without going through
-//! the undo history — they're invoked on a freshly-cleared world from
-//! the Generate menu.
+//! Built-in primitive generators. These write straight into the world
+//! without the undo history, since the Generate menu invokes them on a
+//! freshly cleared one.
 
 use voxelith::core::Voxel;
 

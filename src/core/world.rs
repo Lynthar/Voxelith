@@ -1,7 +1,5 @@
-//! World: Collection of chunks with spatial indexing.
-//!
-//! The World provides a unified interface for accessing voxels across
-//! multiple chunks, handling chunk boundaries transparently.
+//! World: chunks with spatial indexing, presenting one voxel space
+//! across chunk boundaries.
 
 use super::{Chunk, ChunkPos, Voxel, CHUNK_SIZE, CHUNK_SIZE_I32};
 use glam::Vec3;
@@ -13,16 +11,9 @@ use std::sync::Arc;
 /// shape every "bounds of some cells" answer in the codebase takes.
 pub type CellAabb = ((i32, i32, i32), (i32, i32, i32));
 
-/// A world containing multiple chunks.
-///
-/// Unbounded: chunks are created on demand wherever a write lands, so
-/// any `i32` voxel coordinate is writable. (There used to be an
-/// optional `WorldBounds` for fixed-size worlds. Nothing ever built
-/// one — no UI, no file format, no importer — and its only lasting
-/// effect was forcing every caller of `get_or_create_chunk` to handle
-/// a `None` that could not happen.)
-///
-/// Thread-safe access is provided through RwLock.
+/// A world of chunks behind `RwLock`. Unbounded — chunks are created
+/// on demand wherever a write lands, so any `i32` voxel coordinate is
+/// writable.
 #[derive(Default)]
 pub struct World {
     /// Chunks indexed by their position
@@ -40,16 +31,11 @@ impl World {
         self.chunks.contains_key(&pos)
     }
 
-    /// Get chunk at position (returns None if not loaded).
+    /// The chunk at `pos`, or `None` when it isn't loaded.
     ///
-    /// `pub(crate)`, and so is `get_or_create_chunk`: the guard these
-    /// hand out is a *write* lock away from mutating a chunk behind
-    /// `World::set_voxel`'s back, and set_voxel is where the dirty
-    /// propagation across the full Moore neighborhood lives — a bypass
-    /// write renders with stale AO on every diagonal neighbor and
-    /// nothing ever corrects it. Inside the crate the callers are known
-    /// (meshing reads, the serializers, the batch scratch); outside it
-    /// the safe API is `get_voxel` / `set_voxel`.
+    /// # Safety
+    /// Read through the guard. Writing bypasses `set_voxel`'s Moore
+    /// dirty propagation, leaving diagonal neighbors with stale AO.
     pub(crate) fn get_chunk(&self, pos: ChunkPos) -> Option<Arc<RwLock<Chunk>>> {
         self.chunks.get(&pos).cloned()
     }
@@ -87,25 +73,15 @@ impl World {
 
         chunk.write().set(lx, ly, lz, voxel);
 
-        // If the write touched a chunk-boundary cell, the neighbors'
-        // meshes may be stale: their boundary faces can flip visibility,
-        // and their per-vertex AO can change. Mark loaded neighbors
-        // dirty so they re-mesh. Missing neighbors aren't created —
-        // there's nothing to re-mesh and we don't want to spawn empty
-        // chunks.
+        // A boundary write can flip neighbors' face visibility and
+        // change their AO, so mark loaded ones dirty. Missing neighbors
+        // aren't created — there is nothing to re-mesh.
         self.mark_boundary_neighbors_dirty(chunk_pos, lx, ly, lz);
     }
 
-    /// Mark every loaded neighbor chunk a boundary write can affect.
-    ///
-    /// Scope is the full Moore neighborhood, not just the 6 face-
-    /// neighbors: per-vertex AO samples the 26 chunks around the one
-    /// being meshed (`mesh::compute_face_ao` offsets all three axes at
-    /// once for corner samples), so a write in a chunk *corner* changes
-    /// AO in the diagonal neighbors too. Marking faces only left those
-    /// diagonals rendering stale AO until some unrelated edit happened
-    /// to dirty them. A write on a face reaches 1 neighbor, on an edge
-    /// 3, in a corner 7.
+    /// Mark every loaded neighbor a boundary write can affect — the
+    /// full Moore neighborhood, since AO samples all 26 chunks. A face
+    /// write reaches 1 neighbor, an edge 3, a corner 7.
     fn mark_boundary_neighbors_dirty(&self, chunk_pos: ChunkPos, lx: usize, ly: usize, lz: usize) {
         let last = CHUNK_SIZE - 1;
         // Per axis: the neighbor offsets this coordinate reaches into.
@@ -140,22 +116,18 @@ impl World {
         self.chunks.keys()
     }
 
-    /// Get all chunks.
+    /// Every loaded chunk, for read-only enumeration.
     ///
-    /// Read through the guards this yields; never write through them.
-    /// Writes belong to `set_voxel`, which owes its neighbors the
-    /// Moore-neighborhood dirty propagation (see `get_chunk` — this
-    /// iterator stays public only because the app shell enumerates
-    /// chunks for read-only statistics and rendering).
+    /// # Safety
+    /// Never write through these guards — writes belong to `set_voxel`,
+    /// which owes its neighbors the dirty propagation.
     pub fn chunks(&self) -> impl Iterator<Item = (&ChunkPos, &Arc<RwLock<Chunk>>)> {
         self.chunks.iter()
     }
 
     /// Chunk positions in deterministic (x, y, z) order. The backing
-    /// store is a `HashMap`, whose iteration order is unspecified and
-    /// re-seeded per process, so any export that must be byte-reproducible
-    /// across runs (`.glb` / `.obj` / `.vox` / `.vxlt`) walks this instead
-    /// of `chunks()` directly, fetching each lock with `get_chunk`.
+    /// `HashMap` iterates unpredictably, so byte-reproducible exports
+    /// walk this rather than `chunks()`.
     pub fn sorted_chunk_positions(&self) -> Vec<ChunkPos> {
         let mut positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
         positions.sort_unstable_by_key(|p| (p.x, p.y, p.z));
@@ -167,18 +139,9 @@ impl World {
         self.chunks.len()
     }
 
-    /// Copy the world, chunk contents and all.
-    ///
-    /// Deliberately *not* `impl Clone`: chunks live behind
-    /// `Arc<RwLock<…>>`, so a derived clone would hand back a second
-    /// `World` that writes through to the first one's voxels — a
-    /// shallow copy wearing a deep copy's name. The explicit method
-    /// name also keeps the cost visible at the call site (a full copy
-    /// of every loaded chunk, 256 KB each).
-    ///
-    /// Used by `agent_ops` to run a batch of operations on a scratch
-    /// copy: later ops read the results of earlier ones, and a failure
-    /// anywhere throws the copy away with the real world untouched.
+    /// Copy the world, chunk contents and all. Not `impl Clone` —
+    /// chunks live behind `Arc<RwLock<…>>`, so a derived clone would
+    /// write through to this world's voxels. 256 KB per chunk.
     pub fn deep_clone(&self) -> World {
         World {
             chunks: self
@@ -189,14 +152,9 @@ impl World {
         }
     }
 
-    /// Inclusive world-space AABB `(min, max)` cell coordinates of every
-    /// solid (non-air) voxel. `None` when the world has no non-air
-    /// voxels. The box spans `[min, max + 1)` in continuous space (each
-    /// cell occupies `[n, n+1)`).
-    ///
-    /// Iterates every solid voxel in every loaded chunk; intended for
-    /// occasional UI events (recenter, frame, select-all), not per-frame
-    /// use. Shared by [`Self::scene_center`] and the camera-framing path.
+    /// Inclusive cell-space AABB of every solid voxel, or `None` when
+    /// there are none; spans `[min, max + 1)` continuously. Walks every
+    /// solid voxel, so it is for occasional events, not per frame.
     pub fn scene_aabb(&self) -> Option<CellAabb> {
         let mut bounds: Option<CellAabb> = None;
         for (chunk_pos, chunk) in self.chunks() {
@@ -219,18 +177,9 @@ impl World {
         bounds
     }
 
-    /// Center of the AABB of all non-air voxels, in continuous world
-    /// coordinates. `None` when the world has no non-air voxels.
-    ///
-    /// Cells span `[n, n+1)` in continuous space, so a single voxel at
-    /// integer position `p` has AABB `[p, p+1)` and center `p + 0.5`.
-    /// For multi-voxel scenes the center sits between the corner cell
-    /// centers (in the cell *interior*, never on a cell boundary).
-    ///
-    /// Used as the default orbit pivot — placing `camera.target` here
-    /// at startup / after world replacement makes middle-mouse orbit
-    /// circle the visible model rather than the world origin (which
-    /// is often empty / underground for non-trivial scenes).
+    /// Center of the solid AABB in continuous coordinates, or `None`
+    /// when the world is empty. A lone voxel at `p` centers at `p + 0.5`.
+    /// Used as the default orbit pivot.
     pub fn scene_center(&self) -> Option<Vec3> {
         self.scene_aabb().map(|(min, max)| {
             // AABB in continuous space is [min, max+1); center is the
@@ -326,10 +275,9 @@ mod tests {
 
     #[test]
     fn sorted_chunk_positions_are_ordered_regardless_of_insertion() {
-        // Export determinism (#11) hinges on this: whatever order chunks
-        // were created in, `sorted_chunk_positions` returns them ascending
-        // by (x, y, z). Insert across several chunks in a scrambled order
-        // and assert the result is fully sorted and loses nothing.
+        // Export determinism hinges on this: whatever order chunks were
+        // created in, `sorted_chunk_positions` returns them ascending by
+        // (x, y, z). Insert scrambled and assert nothing is lost.
         let mut world = World::new();
         let cells = [
             (40, 0, 40),
@@ -411,10 +359,9 @@ mod tests {
 
     #[test]
     fn corner_write_marks_diagonal_neighbors_dirty() {
-        // AO samples the full 26-chunk Moore neighborhood, so a write
-        // in a chunk corner changes AO in the diagonal neighbors as
-        // well — they have to re-mesh too, or that corner keeps
-        // rendering stale shading.
+        // AO samples the full 26-chunk neighborhood, so a corner write
+        // changes AO in the diagonal neighbors — they must re-mesh too
+        // or that corner keeps rendering stale shading.
         let mut world = World::new();
         // Pre-create every chunk around the (0,0,0)/(1,1,1) corner.
         for &(cx, cy, cz) in &[
@@ -500,10 +447,8 @@ mod tests {
 
     #[test]
     fn scene_center_spans_aabb_of_all_solid_voxels() {
-        // Two voxels at opposite corners of a 3-cell range. AABB is
-        // [0, 3) ∪ [2, 3) — wait, let me redo: AABB of two cells at
-        // (0,0,0) and (2,2,2) covers integers {0..2} per axis, so
-        // continuous AABB is [0, 3) per axis, center (1.5, 1.5, 1.5).
+        // Two cells at (0,0,0) and (2,2,2) cover integers 0..2 per axis,
+        // so the continuous AABB is [0, 3) and the center 1.5 each way.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(2, 2, 2, Voxel::from_rgb(0, 255, 0));

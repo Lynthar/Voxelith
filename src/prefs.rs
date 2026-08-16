@@ -1,17 +1,6 @@
-//! User preferences persisted across sessions.
-//!
-//! `Prefs` holds everything the user expects to survive a restart:
-//! window geometry, panel visibility toggles, viewport + procgen
-//! settings, last-used brush state, and a recent-files MRU list. The
-//! file lives at the platform-standard config dir
-//! (`%APPDATA%\voxelith\prefs.ron` on Windows, `~/.config/voxelith/`
-//! on Linux, `~/Library/Application Support/voxelith/` on macOS) and
-//! is encoded as `ron`.
-//!
-//! Every nested struct uses `#[serde(default)]` so an older prefs
-//! file that's missing fields still loads — defaults fill the gaps.
-//! Same goes for parse errors: a corrupt file is logged and replaced
-//! with defaults rather than blocking startup.
+//! The editor's saved workspace — window geometry, panel visibility,
+//! viewport and procgen settings, brush state, recent files — as `ron`
+//! in the platform config dir. Every nested struct defaults.
 
 use std::path::{Path, PathBuf};
 
@@ -40,11 +29,9 @@ pub struct Prefs {
     pub procgen: ProcgenSettings,
     pub editor: EditorPrefs,
     pub recent_files: Vec<PathBuf>,
-    /// Directory of the last successful export. Seeds the next export
-    /// dialog so an export-heavy workflow doesn't re-navigate to the
-    /// asset folder every time. Exports deliberately do NOT go into
-    /// `recent_files` (see `touch_recent`), so this is where that
-    /// "where was I working" information lives instead.
+    /// Directory of the last successful export, seeding the next export
+    /// dialog. Exports deliberately stay out of `recent_files`, so this
+    /// is where that information lives instead.
     pub last_export_dir: Option<PathBuf>,
     /// Directory of the last successful `.vox` import, same rationale.
     pub last_import_dir: Option<PathBuf>,
@@ -66,18 +53,9 @@ impl Default for WindowPrefs {
     }
 }
 
-/// Which workspace panels are open. `ui::UiState` holds one of these
-/// directly (rather than its own parallel set of booleans), so loading
-/// and saving are whole-struct assignments and a newly added panel
-/// can't be persisted at one end only. That failure has actually
-/// happened here: the since-removed AI panel's toggle was written at
-/// load and never at save, because it was a loose `bool` on `UiState`
-/// instead of a field in this struct. Transient windows (help,
-/// about, crash-recovery prompt) deliberately stay off this struct;
-/// they aren't part of a saved layout.
-///
-/// Lives here rather than in `ui` so the action-queue / status-message
-/// parts of `UiState` never have to learn to serialize.
+/// Which workspace panels are open. `UiState` holds one of these
+/// directly, so load and save are whole-struct assignments and a new
+/// panel can't be persisted at one end only. Transient windows stay off.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PanelVisibility {
@@ -93,12 +71,9 @@ pub struct PanelVisibility {
 }
 
 impl Default for PanelVisibility {
-    /// The lean default workspace (a 2026-08 product decision): the
-    /// always-on surfaces are the left toolbar, the status bar and the
-    /// palette, plus the Inspector tracking the active tool; everything
-    /// else is opt-in via the View menu, same as the stats overlays.
-    /// Only a fresh install (or a deleted `prefs.ron`) sees these
-    /// values — an existing file's own panel set wins.
+    /// The lean default workspace: toolbar, status bar, palette and the
+    /// Inspector; everything else is opt-in via the View menu. Only a
+    /// fresh install sees these — an existing file's own set wins.
     fn default() -> Self {
         Self {
             show_stats: false,
@@ -112,11 +87,8 @@ impl Default for PanelVisibility {
 }
 
 /// Editor brush state worth restoring across sessions. `selected_tool`
-/// uses the same numeric encoding as `io::EditorState` for consistency
-/// with project files: 0=Place, 1=Remove, 2=Paint, 3=Eyedropper,
-/// 4=Fill, 5=Line, 6=Box, 7=Sphere, 8=Cylinder, 9=Select, 10=Socket
-/// (`app::tool_from_index` is the authority; it matches `Tool`'s
-/// declaration order, which is why `Socket` was appended last).
+/// uses the same numeric encoding as `io::EditorState`, with
+/// `app::tool_from_index` as the authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorPrefs {
@@ -181,11 +153,9 @@ impl Prefs {
                     path.display(),
                     e
                 );
-                // Set the broken file aside instead of leaving it to be
-                // overwritten on exit. Prefs are rebuildable workspace
-                // state, but a `.corrupt` file the user can inspect is
-                // still a better trade than silently overwriting the
-                // evidence of what went wrong.
+                // Set the broken file aside rather than let it be
+                // overwritten on exit: a `.corrupt` file the user can
+                // inspect beats silently destroying the evidence.
                 let quarantine = path.with_extension("ron.corrupt");
                 if let Err(rename_err) = std::fs::rename(&path, &quarantine) {
                     log::warn!(
@@ -218,18 +188,9 @@ impl Prefs {
         std::fs::write(path, data)
     }
 
-    /// Insert `path` at the head of `recent_files`, dedup, cap at
-    /// `MAX_RECENT_FILES`. Idempotent for paths already in the list
-    /// (just promotes them to the head).
-    ///
-    /// Only `.vxlt` projects are accepted. The MRU's sole consumer is
-    /// the Open Recent menu, which hands every entry straight to the
-    /// project loader — so an exported `.glb` in the list is an item
-    /// that can only ever fail with "bad magic bytes". Exports and
-    /// `.vox` imports used to land here too, which meant an
-    /// export-heavy session pushed every real project off the ten-entry
-    /// list and left the menu completely useless. Their directories are
-    /// remembered separately in `last_export_dir` / `last_import_dir`.
+    /// Insert `path` at the head of `recent_files`, deduped and capped.
+    /// Only `.vxlt` projects: the Open Recent menu hands every entry to
+    /// the project loader, so anything else can only fail there.
     pub fn touch_recent(&mut self, path: &Path) {
         if !is_project_file(path) {
             return;
@@ -263,11 +224,9 @@ mod tests {
     /// the move into project files — the user's work, not a cache.
     #[test]
     fn a_prefs_file_with_the_retired_graph_field_still_reads() {
-        // Builds up to 0.1.0 stored the pipeline graph in prefs.ron and
-        // a one-time migration carried it into the project file. The
-        // migration is gone; files written back then are still on disk,
-        // and their `graph` / `graph_migrated` fields must be ignored,
-        // not be the reason the whole prefs file fails to parse.
+        // A prefs file that still carries the old `graph` /
+        // `graph_migrated` fields must have them ignored, not fail the
+        // whole parse.
         let ron = r#"(
             graph: (
                 nodes: [

@@ -1,24 +1,6 @@
-//! The MCP server: the same editing primitives as a resident tool set,
-//! for agents that speak the protocol instead of running shell commands.
-//!
-//! The difference from [`crate::exec`] is the session, not the verbs.
-//! `exec` is one process per step and the `.vxlt` on disk *is* the
-//! state; here one [`AgentSession`] stays alive across calls, so undo
-//! history, the selection and an unsaved document all survive from one
-//! tool call to the next. That is why the tools worth having are the
-//! session verbs — open / save / undo / redo — rather than more ways to
-//! write voxels: the ops batch already covers writing.
-//!
-//! Two transports over one implementation: stdio for a local agent that
-//! launches this as a child process, Streamable HTTP (behind the
-//! `mcp-http` feature) for one that wants a URL. Both hand tool calls to
-//! the same handler, and both resolve every path through the same
-//! [`Root`] — see `paths.rs` for why that rule doesn't vary by
-//! transport.
-//!
-//! **Nothing here may write to stdout.** On the stdio transport stdout
-//! *is* the protocol stream, and one stray `println!` corrupts the
-//! session. Logs go to stderr.
+//! The MCP server: one [`AgentSession`] alive across calls, over stdio
+//! or Streamable HTTP. **Nothing here may write to stdout** — on stdio
+//! that is the protocol stream. Logs go to stderr.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,12 +17,9 @@ use crate::agent_ops::{AgentSession, ApplyReport, Description, OpsBatch, SliceRe
 use crate::exec::{self, ExecError, ExportInfo};
 use crate::io::EditorState;
 
-/// The viewpoints a render request actually means: empty defaults to
-/// one isometric view, and duplicates collapse to their first
-/// occurrence. `views` is an open list over the wire, so nothing stops
-/// a client repeating a view a thousand times — and every repeat was a
-/// full CPU render and another image in the answer. Seven distinct
-/// kinds exist, so the result is never longer than seven.
+/// The viewpoints a render request means: empty defaults to one
+/// isometric view and duplicates collapse, since `views` is an open list
+/// and every repeat would be another full CPU render.
 pub(crate) fn requested_views(views: Vec<crate::view::ViewKind>) -> Vec<crate::view::ViewKind> {
     if views.is_empty() {
         return vec![crate::view::ViewKind::Iso];
@@ -67,10 +46,8 @@ pub use paths::{display, PathError, Root};
 /// The document the agent is working on, and where it came from.
 struct Document {
     session: AgentSession,
-    /// Carried along from the loaded `.vxlt` so a save preserves the
-    /// artist's camera, palette and brush — an agent editing someone's
-    /// project has no business resetting their workspace. Same rule
-    /// `exec` follows.
+    /// Carried from the loaded `.vxlt` so a save preserves the artist's
+    /// camera, palette and brush. Same rule `exec` follows.
     state: EditorState,
     /// Where `save_project` writes when it isn't told where. `None`
     /// until the document has been opened from, or saved to, a file.
@@ -108,16 +85,9 @@ struct Status {
     redo_depth: usize,
 }
 
-/// Whether a successful edit is written straight back to the document's
-/// file.
-///
-/// Off is the default because writing someone's project on every batch
-/// is a side effect worth asking for. On, the file tracks the session
-/// step by step — which is what lets a human keep the same project open
-/// in the editor and watch the agent work (the editor reloads a project
-/// that changed underneath it). One writer at a time, though: while an
-/// agent is running with checkpoints on, hand edits to the same file are
-/// a race, and whoever saves last wins.
+/// Whether a successful edit is written back to the document's file.
+/// Off by default; on, the file tracks the session step by step so the
+/// editor can follow it. One writer at a time — hand edits then race.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Checkpoint {
     Off,
@@ -133,25 +103,21 @@ pub struct VoxelithMcp {
     root: Arc<Root>,
     checkpoint: Checkpoint,
     /// Built once and pointed at explicitly below. Left to its default,
-    /// `#[tool_handler]` calls `Self::tool_router()` on every request,
-    /// which regenerates every tool's JSON schema — including the
-    /// whole ops union — to answer a single call.
+    /// `#[tool_handler]` calls `Self::tool_router()` per request, which
+    /// regenerates every tool's schema — the ops union included.
     tool_router: ToolRouter<VoxelithMcp>,
 }
 
-/// What the agent sees when a call refuses. The body is the same
-/// `{"ok": false, "error": {code, message}}` the CLI prints, so an agent
-/// that has driven one knows the other; `is_error` is what tells the
-/// client this was a failed call rather than a result to read.
+/// What the agent sees when a call refuses: the same
+/// `{"ok": false, "error": {…}}` body the CLI prints, plus `is_error` to
+/// tell the client this was a failure rather than a result.
 fn refused(error: &ExecError) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::error(vec![ContentBlock::text(
         error.to_json(),
     )]))
 }
 
-/// A success: `{"ok": true, …}`, pretty-printed, as text.
-///
-/// Text rather than a structured payload because it's the one shape
+/// A success: `{"ok": true, …}`, pretty-printed as text — the one shape
 /// every MCP client renders and every model reads without help.
 fn answered<T: Serialize>(body: T) -> Result<CallToolResult, McpError> {
     #[derive(Serialize)]
@@ -166,10 +132,9 @@ fn answered<T: Serialize>(body: T) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
-/// A path that didn't pass [`Root`], as the same envelope as everything
-/// else. `path_refused` is a distinct code from `input_unreadable`: the
-/// file may well exist and be perfectly readable — it's just not
-/// somewhere this server will touch.
+/// A path that didn't pass [`Root`], in the usual envelope.
+/// `path_refused` is distinct from `input_unreadable`: the file may
+/// exist and be readable, just not somewhere this server will touch.
 fn path_error(error: PathError) -> ExecError {
     ExecError::new("path_refused", error.to_string())
 }
@@ -185,18 +150,9 @@ impl VoxelithMcp {
         }
     }
 
-    /// Write the document back to its own file after an edit changed it,
-    /// so whoever has that project open in the editor sees the step.
-    /// `None` — and no field in the answer at all — when the server runs
-    /// without checkpoints.
-    ///
-    /// A failed write does **not** fail the tool call: the edit itself
-    /// succeeded and the session still holds it, so reporting failure
-    /// would tell the agent to redo work that is already done. What it
-    /// must not do is stay quiet — a checkpoint that silently stopped
-    /// landing leaves the human watching a file that no longer follows
-    /// the session, which looks exactly like an agent that stopped
-    /// working.
+    /// Write the document back to its file after an edit changed it;
+    /// `None` when the server runs without checkpoints. A failed write
+    /// reports `saved: false` with a reason but does not fail the call.
     fn checkpoint(&self, document: &Document) -> Option<CheckpointReport> {
         if self.checkpoint == Checkpoint::Off {
             return None;
@@ -312,18 +268,12 @@ impl VoxelithMcp {
     ) -> Result<CallToolResult, McpError> {
         let mut document = self.document.lock();
         // A dry run reports on the preview, not on the session it left
-        // alone. Report and description come from the same world by
-        // construction — handing back numbers for the world after the
-        // batch beside a description of the world before it is the one
-        // way to make "what would this do?" actively misleading.
+        // alone, so the report and the description come from the same
+        // world by construction.
         let outcome = if batch.options.dry_run {
-            // The preview session carries its own empty history, and
-            // its depths are not the ones an `undo` call would act on —
-            // reporting them beside this answer's own `undo_depth`
-            // hands an agent two different numbers for the same stack.
-            // The history genuinely did not move, so the session's are
-            // the true ones. (The editor's bridge fixed this on its
-            // side; this is the same fix on the headless one.)
+            // The preview's history is empty and its depths are not the
+            // ones `undo` would act on. The history genuinely did not
+            // move, so the session's depths are the true ones.
             let depths = (
                 document.session.history.undo_count(),
                 document.session.history.redo_count(),
@@ -412,10 +362,9 @@ impl VoxelithMcp {
     fn undo(&self) -> Result<CallToolResult, McpError> {
         let mut document = self.document.lock();
         let moved = document.session.undo();
-        // Stepping the history is an edit like any other as far as the
-        // file is concerned. Leaving undo out would let the checkpoint
-        // drift from the session on the one move an agent makes
-        // precisely because the last one was wrong.
+        // Stepping the history is an edit as far as the file is
+        // concerned. Leaving undo out would drift the checkpoint on the
+        // one move an agent makes because the last one was wrong.
         let checkpoint = moved.then(|| self.checkpoint(&document)).flatten();
         answered(Stepped {
             stepped: moved,
@@ -455,10 +404,9 @@ impl VoxelithMcp {
         let views = requested_views(args.views);
         let document = self.document.lock();
 
-        // One text block then one image per view, rather than a summary
-        // followed by a pile of pictures: the caption has to sit next to
-        // the image it describes, or six views come back as six images
-        // an agent has to count to identify.
+        // One text block then one image per view: the caption has to sit
+        // next to the image it describes, or six views come back as six
+        // pictures an agent has to count to identify.
         let mut blocks = Vec::with_capacity(views.len() * 2);
         for kind in views {
             let view = match view::render(&document.session.world, kind, size) {
@@ -512,9 +460,8 @@ impl VoxelithMcp {
 impl ServerHandler for VoxelithMcp {
     fn get_info(&self) -> ServerInfo {
         // Spelled out rather than `Implementation::from_build_env()`,
-        // which reads the *rmcp* crate's build environment and so
-        // announces every server built on it as "rmcp" — this is the
-        // name clients show the user.
+        // which reads rmcp's own build environment and would announce
+        // this server as "rmcp" — the name clients show the user.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
@@ -587,13 +534,9 @@ struct Applied {
     checkpoint: Option<CheckpointReport>,
 }
 
-/// What the automatic write-back did. Absent from the answer entirely
-/// unless the server runs with checkpoints on, so an agent driving a
-/// plain server never sees a field it has to reason about.
-///
-/// `saved: false` is not a failed call — the edit is in the session
-/// either way. It says the file on disk is no longer the session, which
-/// matters to the agent only because a human may be reading that file.
+/// What the automatic write-back did; absent unless the server runs
+/// with checkpoints. `saved: false` is not a failed call — it says the
+/// file on disk is no longer the session.
 #[derive(Serialize)]
 struct CheckpointReport {
     saved: bool,
@@ -649,10 +592,9 @@ struct Rendered<'a> {
     framing: &'a view::Framing,
     /// The document held no voxels — the image is all background.
     empty: bool,
-    /// Rays ran out of steps before crossing the scene, so some of this
-    /// image is background because the walk gave up. Serialized only
-    /// when it happened: a flag that is false on every ordinary render
-    /// teaches an agent to ignore it.
+    /// Rays ran out of steps before crossing the scene, so some of the
+    /// background is the walk giving up. Serialized only when it
+    /// happened — a flag that is always false teaches agents to skip it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
 }
@@ -669,16 +611,9 @@ pub async fn serve_stdio(root: Root, checkpoint: Checkpoint) -> anyhow::Result<(
     Ok(())
 }
 
-/// Serve Streamable HTTP at `/mcp` on `address`, behind `token`.
-///
-/// The handler factory hands out clones of one server, so every request
-/// works on the same document — a fresh one per request would give each
-/// call its own empty world and silently lose every edit.
-///
-/// Every request goes through [`guard`] first: no browser origins, and
-/// a bearer token even on loopback. The token is caller-supplied so the
-/// two servers (this one and the editor's bridge) mint it the same way
-/// and each decides for itself what to print and where.
+/// Serve Streamable HTTP at `/mcp` on `address`, behind `token`. The
+/// factory hands out clones of one server, so every request works on the
+/// same document; every request goes through [`guard`] first.
 #[cfg(feature = "mcp-http")]
 pub async fn serve_http(
     root: Root,
@@ -702,12 +637,9 @@ pub async fn serve_http(
     );
     let listener = tokio::net::TcpListener::bind(address).await?;
     let url = format!("http://{address}/mcp");
-    // A routable bind is still worth saying out loud. The token covers
-    // *who* may call, but not what the traffic crosses: there is no TLS
-    // here, so on anything but loopback the token and every voxel it
-    // moves are in clear text, and a rate limit doesn't exist either.
-    // Honor the address — a firewalled LAN box behind a TLS proxy is a
-    // legitimate deployment — but never silently.
+    // The token covers who may call, not what the traffic crosses:
+    // there is no TLS here, so off loopback the token and every voxel
+    // are in clear text. Honor the address, but never silently.
     if !address.ip().is_loopback() {
         log::warn!(
             "MCP HTTP is bound to {address}, which is not a loopback address. \
@@ -717,11 +649,9 @@ pub async fn serve_http(
         );
     }
     log::info!("MCP Streamable HTTP listening on {url}");
-    // The token is useless to a client that never sees it, so it goes
-    // out as the line the user can paste, not as a value they have to
-    // assemble a header from. stderr, like every other log here —
-    // stdout belongs to the protocol on the other transport, and the
-    // rule not varying by transport is the point.
+    // The token goes out as a line the user can paste rather than a
+    // value they assemble a header from. stderr like every other log —
+    // stdout belongs to the protocol, and the rule doesn't vary.
     log::info!("Client setup: {}", guard::client_command(&url, &token));
     axum::serve(listener, router).await?;
     Ok(())
@@ -803,10 +733,9 @@ mod tests {
 
     #[test]
     fn a_dry_run_describes_the_world_it_would_produce() {
-        // Over MCP there is no way to ask for a preview and a
-        // description together *except* in one call, so apply_ops has to
-        // answer with both from the same world. Describing the session
-        // instead would report zero voxels beside a report of hundreds.
+        // Over MCP a preview and a description can only be asked for in
+        // one call, so `apply_ops` answers with both from the same
+        // world. The session would report zero voxels beside hundreds.
         let dir = scratch("dry_run");
         let server = server(&dir);
         let dry = HUT.replace(r#""ops""#, r#""options":{"dry_run":true},"ops""#);
@@ -940,10 +869,9 @@ mod tests {
 
     #[test]
     fn check_pointing_follows_the_session_edit_by_edit() {
-        // The point of the feature: a human keeps the project open in
-        // the editor and the file keeps up with the agent, without the
-        // agent having to remember to save. Undo counts as an edit —
-        // the file must go back with the session, not stay ahead of it.
+        // The point of the feature: the file keeps up with the agent
+        // without the agent remembering to save. Undo counts as an edit,
+        // so the file goes back with the session rather than ahead.
         let dir = scratch("checkpoint");
         let project = dir.join("scene.vxlt");
         io::save_world_with_state(

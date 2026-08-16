@@ -1,27 +1,6 @@
-//! Gizmo rendering for named sockets (attachment points).
-//!
-//! Each socket draws as a **directional pin** through the shared
-//! `LinePipeline` (same depth-test-on / write-off rules as the grid /
-//! axes / selection wireframe):
-//!
-//! - a bright **shaft** along the socket's outward normal — its local
-//!   **+Y**, the axis the glTF export aligns to the normal,
-//! - a **pyramid arrowhead** at the shaft tip, so the facing direction
-//!   reads at a glance (not just "a dot"), and
-//! - a small **base cross** in the surface plane (local +X / +Z) marking
-//!   the exact spot the socket sits on.
-//!
-//! Colors live in a magenta family so the gizmo never reads as the
-//! world axes (origin RGB), the grid (gray), or the selection markers
-//! (yellow / cyan / orange). Like `SelectionMesh` it rebuilds whenever
-//! the socket set changes; a scene carries a handful of sockets, so the
-//! cost is negligible.
-//!
-//! Sizes are fixed world-space lengths (tuned for the ~256³-ish default
-//! scenes). If sockets ever need to stay legible across extreme zoom,
-//! the alternative is screen-constant scaling — a per-frame rebuild
-//! keyed on camera distance, which would defeat the change-only cache;
-//! left out deliberately for now.
+//! Socket gizmos: a magenta directional pin — shaft along the outward
+//! normal, pyramid arrowhead, base cross — through the shared
+//! `LinePipeline`. Rebuilt whenever the socket set changes.
 
 use bytemuck::cast_slice;
 use glam::{Quat, Vec3};
@@ -49,14 +28,9 @@ pub struct SocketMesh {
 }
 
 impl SocketMesh {
-    /// Build the gizmo mesh for all sockets, or `None` when there are
-    /// none (the caller then clears its slot).
-    ///
-    /// `sockets` is `(position, normal)` per socket — the renderer
-    /// doesn't depend on `editor::Socket`; `App` extracts the pair. The
-    /// rotation here matches `Socket::rotation` exactly (shortest arc
-    /// from +Y to the normal) so the drawn pin and the exported node
-    /// orientation can't drift apart.
+    /// Build the gizmo mesh, or `None` when there are no sockets. Takes
+    /// `(position, normal)` pairs so the renderer needs no `editor`
+    /// dependency; the rotation matches `Socket::rotation` exactly.
     pub fn new(device: &wgpu::Device, sockets: &[([f32; 3], [f32; 3])]) -> Option<Self> {
         if sockets.is_empty() {
             return None;
@@ -85,10 +59,9 @@ impl SocketMesh {
             let tip = p + ly * SHAFT_LEN;
             seg(p, tip, SHAFT_COLOR);
 
-            // Pyramid arrowhead: four apex→corner edges plus a diamond
-            // ring connecting the corners, so it reads as a solid
-            // pointed head from any angle. Corners are ordered around
-            // the ring (+X, +Z, -X, -Z) so consecutive ones are adjacent.
+            // Pyramid arrowhead: four apex-to-corner edges plus a ring,
+            // so it reads as a pointed head from any angle. Corners are
+            // ordered around the ring so consecutive ones are adjacent.
             let back = tip - ly * HEAD_LEN;
             let corners = [
                 back + lx * HEAD_W,

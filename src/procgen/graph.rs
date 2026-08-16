@@ -1,17 +1,6 @@
-//! Pipeline graph: compose multiple generators + transforms into a DAG.
-//!
-//! Each `GraphNode` either produces a `VoxelPatch` from no inputs
-//! (source generators), transforms one input patch (`Translate`,
-//! `Filter`), or combines two (`Mask`, `Combine`). An `Output` node
-//! marks the final patch the pipeline emits. Evaluation is a DFS
-//! topological sort starting from the output: visit inputs before
-//! consumers, memoize each node's patch, hand it to its readers, and
-//! drop it once the last of them has run.
-//!
-//! The graph deliberately stays small (no n-ary combine, no scripted
-//! nodes). The data model and evaluator are written so extensions only
-//! require new `NodeKind` variants — the surrounding plumbing (the
-//! panel, the `.vxlt`, undo) doesn't care what nodes do internally.
+//! Pipeline graph: compose generators and transforms into a DAG. An
+//! `Output` node marks the final patch; evaluation is a DFS from it,
+//! memoizing each patch and dropping it once its last reader has run.
 
 use std::collections::HashMap;
 
@@ -28,22 +17,9 @@ use super::{
 /// removal — the next add gets `next_id`).
 pub type NodeId = u32;
 
-/// One graph node: id + payload describing what it does + UI position.
-///
-/// On the wire and on disk the payload is *flattened* into the node, so
-/// a node reads `{"id": 1, "kind": "translate", "input": 0, "dx": 4}`
-/// rather than nesting the payload under a second key. One object per
-/// node, one `kind` field naming what it is — the same shape an ops
-/// batch uses (`{"op": "box", …}`), because an agent that has learned
-/// one should not have to learn the other.
-///
-/// `position` is panel-space coordinates rendered by the visual graph
-/// editor. It's part of the persisted state so node layout survives
-/// restarts. `#[serde(default)]` keeps files without it loadable —
-/// they deserialize as `[0.0, 0.0]` and the hydrate path detects that
-/// case to re-layout. It is also what lets an agent leave layout alone
-/// entirely: a graph it writes has no positions, and the editor lays it
-/// out on the way in.
+/// One graph node: id, flattened payload, panel position. The payload
+/// flattens on the wire, so a node reads `{"id": 1, "kind": "translate",
+/// …}` — the same shape an ops batch uses. `position` may be absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: NodeId,
@@ -59,22 +35,9 @@ const NODE_LAYOUT_DY: f32 = 130.0;
 const NODE_LAYOUT_COLS: usize = 4;
 const NODE_LAYOUT_ORIGIN: [f32; 2] = [60.0, 40.0];
 
-/// What a node does and what it consumes. Source variants take no
-/// inputs and embed their generator's parameters directly. Transform
-/// variants reference other nodes by id — `None` means "input not
-/// connected yet" and `evaluate` will report it as a `MissingInput`.
-///
-/// The serialized name of each source variant **is its generator id in
-/// the agent-ops registry** (`builtin.perlin_terrain`, …), not a second
-/// spelling of the same thing. A generator an agent can name in a
-/// `generate` op is named identically as a graph node, so the two ways
-/// of reaching one generator don't need two vocabularies.
-///
-/// Every field carries `#[serde(default)]` for the same reason the
-/// registry merges partial params over a generator's defaults: a node
-/// should only have to spell out what it wants to differ. It is also
-/// the forward-compat discipline `.vxlt` follows — a graph written by
-/// an older build stays loadable when a node grows a field.
+/// What a node does and what it consumes. Each source variant's
+/// serialized name *is* its generator id in the agent-ops registry, so
+/// one generator has one name. `None` input means "not connected yet".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum NodeKind {
@@ -96,9 +59,7 @@ pub enum NodeKind {
         #[serde(default)]
         dz: i32,
     },
-    /// Per-voxel filter: keep only those satisfying `predicate`. Intended
-    /// for compositions like "keep tree voxels above ground level" or
-    /// "keep only the grass-colored layer of a stratified terrain". For
+    /// Per-voxel filter: keep only voxels satisfying `predicate`. For
     /// position-set operations against another patch, use Combine.
     #[serde(rename = "filter")]
     Filter {
@@ -107,12 +68,9 @@ pub enum NodeKind {
         #[serde(default)]
         predicate: FilterPredicate,
     },
-    /// Two-input column mask: keep voxels of `subject` based on what's
-    /// in the same `(x, z)` column of `mask`. Differs from Combine in
-    /// that the test is column-projected, not exact position match —
-    /// enabling workflows like "keep tree voxels in any column where
-    /// terrain has any voxel below" (`AboveColumn`), which Combine and
-    /// Filter alone can't express.
+    /// Two-input column mask: keep `subject` voxels by what sits in the
+    /// same `(x, z)` column of `mask`. Column-projected rather than
+    /// exact-position, which is what separates it from Combine.
     #[serde(rename = "mask")]
     Mask {
         #[serde(default)]
@@ -140,12 +98,9 @@ pub enum NodeKind {
     },
 }
 
-/// What `Filter` keeps from its input patch. Each variant defines a
-/// per-voxel predicate; voxels that satisfy it are kept, the rest are
-/// dropped. Bounds in `YAbove`/`YBelow`/`InsideBox` are inclusive.
-///
-/// Color match uses raw RGBA bytes so the filter can be persisted in
-/// prefs without coupling to `Voxel`'s serde shape.
+/// What `Filter` keeps. Bounds in `YAbove` / `YBelow` / `InsideBox` are
+/// inclusive. Color match uses raw RGBA bytes so the filter persists
+/// without coupling to `Voxel`'s serde shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterPredicate {
@@ -185,10 +140,9 @@ impl Default for FilterPredicate {
     }
 }
 
-/// Column-projected modes for the `Mask` node. Both modes look up
-/// the mask's voxel set per `(x, z)` column rather than testing exact
-/// `(x, y, z)` matches — that's what distinguishes Mask from
-/// Combine's set ops.
+/// Column-projected modes for `Mask`. Both look up the mask's voxel set
+/// per `(x, z)` column rather than testing exact positions — the
+/// distinction from Combine's set ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -311,42 +265,21 @@ impl From<GraphError> for GenError {
     }
 }
 
-/// Nodes one graph may hold.
-///
-/// Not a taste judgment: [`PipelineGraph::visit`] is a recursive
-/// descent, so a long enough chain overflows the stack — and a stack
-/// overflow aborts the process rather than raising the error an agent
-/// could act on. A hand-built pipeline is a handful of nodes; this is
-/// two orders of magnitude above that and still far below the depth
-/// that hurts.
+/// Nodes one graph may hold. [`PipelineGraph::visit`] is a recursive
+/// descent, so a long enough chain overflows the stack — an abort,
+/// rather than an error an agent could act on.
 pub const MAX_GRAPH_NODES: usize = 64;
 
-/// A pipeline of generator / transform / combine nodes.
-///
-/// Struct-level `#[serde(default)]`, not just the field-level ones
-/// below: this is document data embedded in the `.vxlt`, so the next
-/// field added here without its own default would make every project
-/// file already on disk fail to load — not a workspace setting the user
-/// can rebuild, but the model they made. The same reason `prefs.ron` and
-/// `EditorState` carry it.
-///
-/// It costs one refusal an agent used to get: a `graph` op sending `{}`
-/// now reads as the empty graph instead of "missing field `nodes`".
-/// That input was already legal spelled `{"nodes": []}`, a misspelled
-/// `nodes` is still caught by `agent_ops`' unknown-key check, and
-/// evaluating an empty graph still fails cleanly with `NoOutput`.
+/// A pipeline of generator, transform and combine nodes. Struct-level
+/// `#[serde(default)]` because this is document data in the `.vxlt` — a
+/// new field without one would fail every project already on disk.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineGraph {
     pub nodes: Vec<GraphNode>,
-    /// Next id to hand out. Monotonic per graph instance — ids are
-    /// never reused so dropdowns can rely on stable references.
-    ///
-    /// Internal bookkeeping, hence `#[serde(default)]`: a graph an agent
-    /// wrote has no reason to carry one, and [`Self::normalize`] derives
-    /// a safe value from the nodes themselves. A file that *does* carry
-    /// one keeps it if it's larger, so ids stay unique across a
-    /// save / load / add cycle.
+    /// Next id to hand out, monotonic per graph so ids never repeat.
+    /// `#[serde(default)]` — a graph an agent wrote carries none, and
+    /// [`Self::normalize`] derives a safe value from the nodes.
     #[serde(default)]
     pub next_id: NodeId,
     /// Cached id of the (sole) Output node. Invalidated if you remove
@@ -371,13 +304,9 @@ impl PipelineGraph {
         id
     }
 
-    /// Cascade slot for a node, keyed on its id.
-    ///
-    /// On the id, NOT on `nodes.len()`: len shrinks when a node is
-    /// deleted, so the next add would land exactly on top of an
-    /// existing node. Ids never repeat, so slots never collide (Auto
-    /// Layout re-compacts on demand). Also what a node added by an
-    /// agent gets, since an agent sends no layout.
+    /// Cascade slot for a node, keyed on its id rather than
+    /// `nodes.len()`: len shrinks on delete, so the next add would land
+    /// on top of an existing node. Also what an agent's node gets.
     pub fn place(id: NodeId) -> [f32; 2] {
         let n = id as usize;
         [
@@ -386,13 +315,9 @@ impl PipelineGraph {
         ]
     }
 
-    /// Make a graph that came from outside safe to use: `next_id` past
-    /// every id present, `output_node` pointing at a real Output.
-    ///
-    /// Every path that takes a graph from a file or from an agent runs
-    /// this — the two fields are bookkeeping neither of those writers
-    /// owns, and a `next_id` that trails the nodes hands the next
-    /// [`add`](Self::add) an id that is already taken.
+    /// Make a graph from outside safe to use: `next_id` past every id
+    /// present, `output_node` pointing at a real Output. Every path
+    /// taking a graph from a file or an agent runs this.
     pub fn normalize(&mut self) {
         let highest = self.nodes.iter().map(|n| n.id).max();
         if let Some(highest) = highest {
@@ -405,17 +330,9 @@ impl PipelineGraph {
             .map(|n| n.id);
     }
 
-    /// Everything that has to hold before a graph is worth evaluating,
-    /// checked in one pass so a caller hears about *all* of it before
-    /// anything runs rather than discovering the third problem after
-    /// the first two evaluations.
-    ///
-    /// [`evaluate`](Self::evaluate) catches cycles and dangling refs on
-    /// its own, but only along the path it walks from the Output — a
-    /// duplicate id or a broken wire on an unreachable branch stays
-    /// silent there, and silence is the one answer an agent can't act
-    /// on. `get` resolving a duplicate id by taking the first match is
-    /// exactly the kind of quiet wrong answer this exists to prevent.
+    /// Everything that must hold before a graph is worth evaluating,
+    /// checked in one pass. [`evaluate`](Self::evaluate) sees cycles and
+    /// dangling refs only along its path; this covers every branch.
     pub fn validate(&self) -> Result<(), GraphError> {
         if self.nodes.len() > MAX_GRAPH_NODES {
             return Err(GraphError::TooManyNodes {
@@ -504,15 +421,9 @@ impl PipelineGraph {
         !matches!(kind, NodeKind::Output { .. })
     }
 
-    /// Read the current value of input slot `slot` on `target`.
-    ///
-    /// A slot the node doesn't have is an error, including *every* slot
-    /// on a source node — those have no inputs at all. Reporting it
-    /// mattered the moment something other than the panel could ask:
-    /// the UI only ever names slots it drew, but an agent naming slot 1
-    /// on a `translate` (or any slot on a terrain) has made a mistake,
-    /// and answering "not connected" would leave it believing a wire it
-    /// asked for exists.
+    /// Read input slot `slot` on `target`. A slot the node doesn't have
+    /// is an error, including every slot on a source node — answering
+    /// "not connected" would imply a wire that cannot exist.
     pub fn get_input(&self, target: NodeId, slot: usize) -> Result<Option<NodeId>, GraphError> {
         let node = self
             .get(target)
@@ -536,14 +447,12 @@ impl PipelineGraph {
         })
     }
 
-    /// Connect or disconnect an input slot. When connecting (i.e.
-    /// `new_input` is `Some`), reachability from `target` is checked
-    /// before committing — if the proposed wire would form a cycle,
-    /// the change is reverted and `GraphError::Cycle` is returned.
-    /// `target` must exist (a missing node is `Err(DanglingReference)`)
-    /// and must have the slot (a source node has none, so any slot on
-    /// one is `Err(InvalidSlot)`) — both surfaced by the `get_input`
-    /// call below.
+    /// Connect or disconnect an input slot. A connection that would
+    /// close a cycle is reverted before it commits.
+    ///
+    /// # Errors
+    /// `Cycle` for a wire that closes one, `DanglingReference` for a
+    /// missing node, `InvalidSlot` for a slot the node doesn't have.
     pub fn set_input(
         &mut self,
         target: NodeId,
@@ -594,19 +503,9 @@ impl PipelineGraph {
         }
     }
 
-    /// Run the pipeline and return the patch produced by the Output
-    /// node (or an error describing what's wrong with the graph).
-    ///
-    /// A node's patch is dropped as soon as the last node that reads it
-    /// has run, so what is resident at any moment is the working front,
-    /// not the whole graph. That is what the source-count ceiling is
-    /// written against ("peak memory is the sum of the sources"): a
-    /// cache that only ever grew made a chain of transforms hold one
-    /// full copy *per node*, which a 64-node graph over a legal source
-    /// turns into gigabytes — all of it allocated before the first cell
-    /// reaches the batch cell budget that was supposed to bound it.
-    /// Transform nodes cost nothing per node now; the sources still
-    /// cost what they cover.
+    /// Run the pipeline and return the Output node's patch. A node's
+    /// patch is dropped once its last reader has run, so what stays
+    /// resident is the working front rather than the whole graph.
     pub fn evaluate(&self) -> GenResult<VoxelPatch> {
         let output_id = self.find_output_immut()?;
         let order = self.topo_sort_to(output_id)?;
@@ -644,11 +543,9 @@ impl PipelineGraph {
     }
 
     fn find_output_immut(&self) -> Result<NodeId, GraphError> {
-        // Always scan — don't trust the `output_node` cache. A stale or
-        // duplicate cache entry must not mask a second Output node, or a
-        // graph with two Outputs would silently evaluate one instead of
-        // reporting `MultipleOutputs` (#33). The graph is tiny, so a full
-        // scan every evaluate is negligible.
+        // Always scan rather than trust the `output_node` cache: a stale
+        // entry would mask a second Output and evaluate one silently
+        // instead of reporting `MultipleOutputs`.
         let mut found: Option<NodeId> = None;
         for n in &self.nodes {
             if matches!(n.kind, NodeKind::Output { .. }) {
@@ -759,18 +656,9 @@ impl PipelineGraph {
     }
 }
 
-/// Set or clear a specific input slot, dispatching by node kind. Slot
-/// 0/1 distinguishes `Combine`'s and `Mask`'s two inputs.
-///
-/// **This does not validate `slot`, and it isn't the place to.** Both
-/// call sites are inside [`PipelineGraph::set_input`], which rejects an
-/// out-of-range slot through `get_input` before reaching here (and the
-/// second call is the revert, re-using a slot already accepted). So the
-/// arms below that appear to shrug at a bad slot — the single-input
-/// kinds ignoring it, the `_ => {}` on the two-input kinds — are
-/// unreachable, *not* the graph quietly accepting "slot 7 means slot 0".
-/// That was the old behavior; `out_of_range_slot_reports_invalid_slot_
-/// not_a_missing_node` pins the current one.
+/// Set or clear one input slot, dispatching by node kind. Slot validity
+/// is already established by [`PipelineGraph::set_input`], so the arms
+/// that appear to shrug at a bad slot are unreachable, not permissive.
 fn apply_input_slot(kind: &mut NodeKind, slot: usize, new_input: Option<NodeId>) {
     match kind {
         NodeKind::Translate { input, .. }
@@ -823,15 +711,9 @@ fn clear_input_if(kind: &mut NodeKind, id: NodeId) {
     }
 }
 
-/// Shift every voxel, saturating rather than wrapping.
-///
-/// Same reasoning as the `translate` op, which reaches this decision
-/// from the other side: a source generator handed an extreme origin can
-/// emit a position anywhere in `i32`, and the offset itself arrives from
-/// a wire that checks its *shape* and not its magnitude. The sum has to
-/// land somewhere the write door will refuse — `i32::MAX` does, a
-/// wrapped-around small number does not, and a bare `+` here took the
-/// whole process out on a debug build instead.
+/// Shift every voxel, saturating rather than wrapping. The sum has to
+/// land somewhere the write door refuses — `i32::MAX` does, a
+/// wrapped-around small number does not.
 fn translate_patch(patch: VoxelPatch, dx: i32, dy: i32, dz: i32) -> VoxelPatch {
     let mut result = VoxelPatch::new();
     result.voxels = patch
@@ -877,12 +759,9 @@ fn filter_patch(patch: VoxelPatch, predicate: &FilterPredicate) -> VoxelPatch {
     result
 }
 
-/// Column-projected mask: keep `subject` voxels based on the mask's
-/// column profile at the subject's `(x, z)`. We index the mask once
-/// into a `(x, z) -> Vec<y>` map; per-subject lookup is then O(column
-/// height), which for typical heightmap-style masks is `O(1)` (one y
-/// per column). Subject voxels in columns the mask never touches are
-/// dropped — the column has nothing to project against.
+/// Column-projected mask: keep `subject` voxels by the mask's column
+/// profile at their `(x, z)`. Subject voxels in columns the mask never
+/// touches are dropped — there is nothing to project against.
 fn mask_patch(subject: VoxelPatch, mask: VoxelPatch, mode: MaskMode) -> VoxelPatch {
     let mut mask_columns: HashMap<(i32, i32), Vec<i32>> = HashMap::new();
     for ((x, y, z), _) in &mask.voxels {
@@ -932,22 +811,13 @@ fn combine_patches(a: VoxelPatch, b: VoxelPatch, op: CombineOp) -> VoxelPatch {
 
     let mut result = VoxelPatch::new();
     result.voxels = combined.into_iter().collect();
-    // Restore a deterministic order. `HashMap` iteration is randomized
-    // per instance, so without this the same graph evaluated twice
-    // produced the same voxels in a different order — quietly breaking
-    // the "same seed → byte-identical patch" property every source
-    // generator has a test for.
-    //
-    // Only safe here because the map guarantees unique positions.
-    // Source patches may legitimately hold the same position twice
-    // (`VoxelPatch::dedup_last_write` relies on the later write
-    // winning, e.g. leaves over trunk), so don't "unify" this by
-    // sorting those.
+    // Restore a deterministic order: `HashMap` iteration is randomized
+    // per instance, which would break "same seed, same bytes". Safe only
+    // because the map guarantees unique positions — source patches don't.
     result.voxels.sort_unstable_by_key(|&(pos, _)| pos);
-    // Preserve diagnostics from both branches so the user sees them,
-    // but only once each: in a diamond (one source feeding two paths
-    // that meet again) both sides carry the same note, and the status
-    // bar showed it twice.
+    // Keep diagnostics from both branches, but once each: in a diamond
+    // both sides carry the same note, and the status bar showed it
+    // twice.
     result.notes = a.notes;
     extend_notes_deduped(&mut result.notes, b.notes);
     result
@@ -993,8 +863,7 @@ mod tests {
 
     /// Freeing a patch when its last reader has run means counting the
     /// readers right. A diamond is where getting it wrong shows: one
-    /// source feeds two branches, and dropping it after the first would
-    /// leave the second with a dangling input instead of a patch.
+    /// source, two branches, and the second left with a dangling input.
     #[test]
     fn a_patch_read_twice_survives_until_its_second_reader() {
         let mut g = PipelineGraph::default();
@@ -1048,10 +917,8 @@ mod tests {
     #[test]
     fn combine_output_order_is_deterministic() {
         // Combine routes both inputs through a HashMap, whose iteration
-        // order is randomized per instance — so the same graph
-        // evaluated twice used to emit the same voxels in a different
-        // order, quietly breaking the "same seed, same bytes" property
-        // every source generator tests for.
+        // order is randomized per instance — without the sort the same
+        // graph emits the same voxels in a different order.
         let g = combine_graph();
         let first = g.evaluate().expect("evaluates");
         let second = g.evaluate().expect("evaluates");
@@ -1065,9 +932,8 @@ mod tests {
     // -------- the wire / on-disk shape --------
 
     /// One flat object per node, `kind` naming what it is — the same
-    /// shape an ops batch uses. A source node's `kind` is its generator
-    /// id in the registry, so `generate` and a graph node name one
-    /// generator one way.
+    /// shape an ops batch uses. A source node's `kind` is its registry
+    /// generator id.
     #[test]
     fn a_node_serializes_as_one_flat_object_tagged_by_kind() {
         let mut g = PipelineGraph::default();
@@ -1145,9 +1011,8 @@ mod tests {
     #[test]
     fn a_graph_missing_every_field_still_parses() {
         // The struct-level `#[serde(default)]` this pins is what keeps a
-        // future added field from making every `.vxlt` already on disk
-        // unopenable. Deleting the attribute fails here, not months later
-        // on a user's project.
+        // future field from making every `.vxlt` on disk unopenable.
+        // Deleting the attribute fails here, not on a user's project.
         let g: PipelineGraph = serde_json::from_str("{}").expect("an empty object is a graph");
         assert_eq!(g, PipelineGraph::default());
         assert!(matches!(g.evaluate(), Err(e) if e.to_string().contains("Output")));
@@ -1263,11 +1128,9 @@ mod tests {
         Voxel::from_rgb(r, 0, 0)
     }
 
-    /// Build a node that emits a fixed set of voxels. Test-only — uses
-    /// a hardcoded `Terrain` of trivial size and replaces its output
-    /// post-hoc isn't easy, so instead we test transform/combine logic
-    /// directly on `VoxelPatch` and only hit the real source generators
-    /// in a single integration-style test.
+    /// Build a node emitting a fixed set of voxels. Test-only: source
+    /// generators are hard to stub, so transform and combine logic is
+    /// tested directly on `VoxelPatch`.
     fn manual_patch(voxels: Vec<((i32, i32, i32), Voxel)>) -> VoxelPatch {
         let mut p = VoxelPatch::new();
         p.voxels = voxels;
@@ -1374,11 +1237,9 @@ mod tests {
 
     #[test]
     fn test_mask_above_column_keeps_above_drops_below() {
-        // subject has voxels at y = 0..5 in column (0, 0).
-        // mask has a single voxel at y = 2 in the same column.
-        // AboveColumn keeps subject voxels with some mask y < y → keeps
-        // y in 3..5 (where mask y=2 is below); drops y in 0..2 (no mask
-        // below) and y=2 itself (mask is *at* not below).
+        // Subject has voxels at y = 0..5 in one column, mask a single
+        // voxel at y = 2. AboveColumn keeps y in 3..5 and drops y = 2
+        // itself, since the mask is at it rather than below.
         let subject = manual_patch((0..5).map(|y| ((0, y, 0), solid(1))).collect());
         let mask = manual_patch(vec![((0, 2, 0), solid(2))]);
         let r = mask_patch(subject, mask, MaskMode::AboveColumn);
@@ -1548,11 +1409,9 @@ mod tests {
 
     #[test]
     fn test_two_outputs_report_multiple_outputs() {
-        // Two Output nodes must be reported as MultipleOutputs, never
-        // silently resolved to whichever the `output_node` cache points
-        // at. `find_output` scans directly; `find_output_immut` (used by
-        // evaluate) now always scans too, so the cache can't mask the
-        // second Output (#33).
+        // Two Output nodes must report MultipleOutputs rather than
+        // resolve silently to whichever the cache points at. Both
+        // finders scan, so the cache can't mask the second.
         let mut g = PipelineGraph::default();
         let src = g.add(NodeKind::Terrain(PerlinTerrain {
             width: 4,
@@ -1605,10 +1464,8 @@ mod tests {
 
     #[test]
     fn test_cycle_detected() {
-        // Translate -> Translate -> ... feeding back into self.
-        // We have to manually wire: A.input = B; B.input = A. Since
-        // `add` returns ids in order, we add A first with no input,
-        // add B with input=A, then patch A.input = B.
+        // A -> B -> A. `add` returns ids in order, so add A without an
+        // input, add B pointing at A, then patch A.input = B.
         let mut g = PipelineGraph::default();
         let a = g.add(NodeKind::Translate {
             input: None,

@@ -4,16 +4,9 @@ use super::{Camera, CameraUniform};
 use crate::mesh::Vertex;
 use wgpu::util::DeviceExt;
 
-/// Main render pipeline for voxel rendering.
-///
-/// Three voxel pipelines share the same shader, vertex layout, and
-/// camera bind group:
-/// - `render_pipeline`: opaque, depth-write enabled, back-face culled.
-/// - `wireframe_pipeline`: same as opaque but `PolygonMode::Line`,
-///   only present when the GPU exposes `POLYGON_MODE_LINE`.
-/// - `transparent_pipeline`: alpha-blended with depth-write disabled,
-///   used for the procgen preview overlay so opaque geometry behind
-///   it remains visible.
+/// The voxel pipelines, sharing one shader, vertex layout and camera
+/// bind group: opaque, wireframe (only where the GPU exposes
+/// `POLYGON_MODE_LINE`), and alpha-blended for the overlays.
 pub struct RenderPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
     pub wireframe_pipeline: Option<wgpu::RenderPipeline>,
@@ -23,15 +16,9 @@ pub struct RenderPipeline {
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
 }
 
-/// Everything that differs between the three voxel pipelines.
-///
-/// Shader, vertex layout, camera bind group, depth format, stencil and
-/// multisample state are identical across all three; spelling out a
-/// full `RenderPipelineDescriptor` per pipeline meant those shared
-/// parts existed in triplicate, and the fields that genuinely differ
-/// were buried among them. `depth_compare` and `bias` are parameters
-/// rather than constants because the transparent variant needs both to
-/// be different — see its construction below.
+/// Everything that differs between the three voxel pipelines — the rest
+/// is identical, and spelling out a full descriptor each time buried
+/// the real differences among triplicated boilerplate.
 struct PipelineVariant {
     label: &'static str,
     blend: wgpu::BlendState,
@@ -179,33 +166,22 @@ impl RenderPipeline {
                 })
             });
 
-        // Transparent: alpha blending, depth-write disabled so the
-        // preview doesn't occlude later transparent geometry. Drawn
-        // after opaque chunks so the already-written opaque depth
-        // still gates it correctly.
+        // Transparent: alpha blending with depth-write off, so a preview
+        // doesn't occlude later transparent geometry. Drawn after opaque
+        // chunks, whose depth still gates it.
         let transparent_pipeline = build(PipelineVariant {
             label: "Voxel Transparent Pipeline",
             blend: wgpu::BlendState::ALPHA_BLENDING,
             cull_mode: Some(wgpu::Face::Back),
             polygon_mode: wgpu::PolygonMode::Fill,
             depth_write_enabled: false,
-            // `LessEqual`, not `Less`: every overlay drawn through this
-            // pipeline (brush hover, procgen preview, move ghost) is
-            // emitted by the *same* quad helpers as the world mesh,
-            // with no outward offset. On an isolated voxel the
-            // overlay's vertices are bit-identical to the ones already
-            // in the depth buffer, so `Less` rejected it for every
-            // single pixel — Remove / Paint / Fill simply had no
-            // visible hover highlight.
+            // `LessEqual`, not `Less`: overlays come from the same quad
+            // helpers as the world mesh with no outward offset, so their
+            // vertices tie exactly and `Less` rejects every pixel.
             depth_compare: wgpu::CompareFunction::LessEqual,
-            // `LessEqual` alone only fixes exact ties. Where greedy
-            // meshing merged a large quad, the world face and the
-            // per-voxel overlay interpolate depth differently and land
-            // a ULP apart, which showed as speckled z-fighting. A small
-            // negative bias pulls the overlay toward the camera by a
-            // couple of depth units — enough to win consistently, far
-            // too little to poke through geometry genuinely in front of
-            // it. Safe because this pipeline never writes depth.
+            // `LessEqual` only fixes exact ties; across a merged greedy
+            // quad the two interpolate a ULP apart and speckle. A small
+            // negative bias wins consistently and never pokes through.
             bias: wgpu::DepthBiasState {
                 constant: -2,
                 slope_scale: -2.0,

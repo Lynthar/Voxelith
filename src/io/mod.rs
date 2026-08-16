@@ -1,16 +1,6 @@
-//! File I/O: project save/load, import/export.
-//!
-//! Supported formats:
-//! - Native project format (.vxlt) - compressed binary with metadata
-//! - MagicaVoxel (.vox) - import/export
-//! - Wavefront OBJ (.obj) - export (geometry + vertex colors)
-//! - glTF Binary (.glb) - export (single-file, native vertex colors),
-//!   and import by voxelizing the mesh ([`voxelize_glb`])
-//!
-//! The two glTF halves are deliberately separate modules: `gltf` writes
-//! the format by hand and needs nothing from the `gltf` crate, while
-//! `voxelize` parses an arbitrary incoming file and does need it. They
-//! share a container and nothing else.
+//! File I/O: the native `.vxlt` project format, `.vox` import/export,
+//! and `.obj` / `.glb` export. The two glTF halves stay separate —
+//! `gltf` writes by hand, `voxelize` parses with the `gltf` crate.
 
 mod gltf;
 mod obj;
@@ -33,18 +23,12 @@ pub use voxelize::voxelize_glb;
 use std::io::{self, Read};
 use std::path::Path;
 
-/// Read exactly `len` bytes from `reader` without trusting `len` enough
-/// to pre-allocate it.
+/// Read exactly `len` bytes without trusting `len` enough to
+/// pre-allocate it: the buffer grows to the bytes actually present, so
+/// peak allocation tracks real data rather than a declared length.
 ///
-/// The voxel importers read length / count fields straight out of files
-/// that may be corrupt or hostile. `vec![0u8; len]` would eagerly
-/// reserve whatever the file claims — up to ~4 GiB from one bogus `u32`
-/// — and the process aborts on that allocation before ever discovering
-/// the stream is short. `Read::take(len).read_to_end` instead grows the
-/// buffer only to the bytes actually present, so peak allocation tracks
-/// real data, not the declared length. We still require the full `len`
-/// bytes (matching `read_exact`) and report a short stream as
-/// `UnexpectedEof`.
+/// # Errors
+/// `UnexpectedEof` when the stream holds fewer than `len` bytes.
 pub(super) fn read_exact_vec<R: Read>(reader: &mut R, len: usize) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     let read = reader.take(len as u64).read_to_end(&mut buf)?;
@@ -57,10 +41,9 @@ pub(super) fn read_exact_vec<R: Read>(reader: &mut R, len: usize) -> io::Result<
     Ok(buf)
 }
 
-/// Skip exactly `n` bytes of `reader` by streaming them to a sink, so a
-/// huge declared length can't trigger a huge allocation (unlike
-/// `vec![0u8; n]` + `read_exact`). Errors as `UnexpectedEof` if the
-/// stream ends early.
+/// Skip exactly `n` bytes by streaming them to a sink, so a huge
+/// declared length can't trigger a huge allocation. `UnexpectedEof` if
+/// the stream ends early.
 pub(super) fn skip_bytes<R: Read>(reader: &mut R, n: u64) -> io::Result<()> {
     let copied = io::copy(&mut reader.take(n), &mut io::sink())?;
     if copied != n {

@@ -1,36 +1,6 @@
-//! Who is allowed to talk to the HTTP transports.
-//!
-//! Both HTTP servers — the headless `voxelith mcp --http` and the
-//! in-editor bridge — put every request through [`check`] before it
-//! reaches a tool. Two rules, and they answer different attackers.
-//!
-//! **The `Origin` header ends the request.** The Streamable HTTP spec
-//! makes this a MUST: a server validates `Origin` on every connection
-//! and answers 403 when it is invalid, because otherwise a page in the
-//! user's own browser can reach a server on their own machine. Normal
-//! cross-origin rules would stop it — a JSON POST is preflighted, and
-//! nothing here answers a preflight — but DNS rebinding exists to make
-//! the browser believe the request is same-origin, and then the
-//! preflight never happens. Binding loopback is not a defense against
-//! this; the browser *is* on loopback. For this server every origin is
-//! invalid: no legitimate client is a web page, and an agent, a CLI or
-//! a smoke script sends no `Origin` at all. So the rule is simply: if
-//! the header is there, the caller is a browser, and the answer is 403.
-//!
-//! **A bearer token is required, loopback included.** Loopback means
-//! "a process on this machine", which is not the same as "the person
-//! sitting here": a sandboxed script, a dependency's install hook, or
-//! another user on a shared box all reach 127.0.0.1 too, and what they
-//! reach is a tool set that edits and saves the human's project. The
-//! spec only says SHOULD here, and OAuth 2.1 — its answer for public
-//! remote servers — needs an authorization server this desktop tool
-//! has no business hosting. A per-run secret the editor prints and the
-//! client echoes is the proportionate version of the same idea.
-//!
-//! TLS is deliberately absent: on loopback it protects nothing, and a
-//! genuinely remote deployment is better served by a reverse proxy
-//! that already knows about certificate rotation than by this process
-//! growing an opinion about it.
+//! Who may talk to the HTTP transports: a request carrying an `Origin`
+//! is refused as a browser, and every request needs a bearer token —
+//! loopback included, since that means a process, not a person.
 
 use axum::{
     extract::{Request, State},
@@ -39,22 +9,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-/// The shared secret for one run of one server.
-///
-/// Generated fresh per start unless a caller supplies one (`--token`,
-/// or the environment, for a client whose config has to be written
-/// down ahead of time). Never logged whole by accident — the `Debug`
-/// impl is redacted, since the whole point is that it appears in
-/// exactly the two places that hand it to a human.
+/// The shared secret for one run of one server. Generated fresh per
+/// start unless a caller supplies one; the `Debug` impl is redacted so
+/// it appears only where it is handed to a human.
 #[derive(Clone)]
 pub struct AccessToken(String);
 
 impl AccessToken {
-    /// 24 bytes from the OS CSPRNG, base64url so it survives a shell,
-    /// a JSON config file and a header value without quoting.
-    ///
-    /// `OsRng` rather than the thread RNG: both are cryptographic in
-    /// `rand` 0.8, but a secret should read as one at the call site.
+    /// 24 bytes from the OS CSPRNG, base64url so it survives a shell, a
+    /// JSON config file and a header value unquoted. `OsRng` rather than
+    /// the thread RNG, so a secret reads as one at the call site.
     pub fn generate() -> Self {
         use base64::Engine;
         use rand::RngCore;
@@ -141,10 +105,9 @@ impl Denial {
 
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
-        // A JSON-RPC error object with no `id`, which is what the
-        // transport spec allows for a request refused before it was
-        // parsed. A client that only reads the status still gets the
-        // right one; a client that reads the body gets the fix.
+        // A JSON-RPC error with no `id`, which the transport spec allows
+        // for a request refused before parsing. A client reading only
+        // the status still gets the right one.
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "error": { "code": -32001, "message": self.message() },
@@ -201,10 +164,9 @@ async fn enforce(State(token): State<AccessToken>, request: Request, next: Next)
     }
 }
 
-/// The line a human needs to point a client at a guarded server.
-///
-/// Built here rather than in the panel and the CLI separately: the two
-/// places that print it are the two places that would drift.
+/// The line a human needs to point a client at a guarded server. Built
+/// here rather than in the panel and the CLI separately — those are the
+/// two places that would drift.
 pub fn client_command(url: &str, token: &AccessToken) -> String {
     format!(
         "claude mcp add --transport http voxelith {url} --header \"Authorization: Bearer {}\"",

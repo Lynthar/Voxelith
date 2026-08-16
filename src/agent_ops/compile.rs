@@ -1,17 +1,6 @@
-//! The executor: ops in, one change list out.
-//!
-//! Ops run against a deep copy of the session world so that each op
-//! sees the ones before it (rotating a wall you built two ops ago has
-//! to mean something) while the real world stays untouched until the
-//! whole batch succeeds.
-//!
-//! There is no diff pass at the end. Every write goes through
-//! [`Scratch::write`], which records `(original, latest)` per cell as
-//! it goes — the first touch of a cell reads its pre-batch value
-//! straight out of the scratch world, because a cell nobody has
-//! touched still holds exactly that. Cost is proportional to what the
-//! batch wrote, not to how big the document is, and there's one place
-//! where limits, the write mask, and undo bookkeeping all live.
+//! The executor: ops in, one change list out. Ops run against a deep
+//! copy so each sees the ones before it. There is no diff pass — every
+//! write goes through [`Scratch::write`], which records as it goes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -43,17 +32,8 @@ pub(super) const FACE_NEIGHBORS: [(i32, i32, i32); 6] = [
 ];
 
 /// Step one cell from `pos`, or `None` when the step would leave `i32`.
-///
-/// The ops path never sees `None`: its coordinates came through
-/// [`check_coord`] and sit within ±[`MAX_COORD`], nowhere near the edge.
-/// The *measurement* path is the reason this exists — `describe` reads
-/// whatever a `.vxlt` happens to hold, and a cell parked at `i32::MAX`
-/// used to walk its own neighbor arithmetic straight into an overflow
-/// panic (in the editor, on the frame loop's thread).
-///
-/// A neighbor that can't be represented is a neighbor that can't hold a
-/// voxel, so reading `None` as "nothing there" is the honest answer, not
-/// a fallback that papers over a failure.
+/// The measurement path is why this exists: `describe` reads whatever a
+/// `.vxlt` holds, including a cell parked at `i32::MAX`.
 pub(super) fn face_neighbor(
     pos: (i32, i32, i32),
     delta: (i32, i32, i32),
@@ -94,9 +74,8 @@ pub(super) struct Outcome {
     /// one.
     pub graph: Option<PipelineGraph>,
     /// The scratch world with every op applied. A real run drops it and
-    /// commits `changes` instead; a preview hands it back as the world
-    /// the batch *would* have produced, so the caller can describe or
-    /// slice a result it hasn't accepted yet.
+    /// commits `changes`; a preview hands it back so the caller can
+    /// describe or slice a result it hasn't accepted.
     pub world: World,
 }
 
@@ -125,10 +104,9 @@ impl Scratch {
                 new_voxel,
             })
             .collect();
-        // `HashMap` iteration order is unspecified and re-seeded every
-        // process. Sorting keeps a batch's command — and so its report
-        // and any golden test built on it — identical run to run; x
-        // varies fastest to match the chunk array's layout.
+        // `HashMap` iteration order is re-seeded every process, so
+        // sorting keeps a batch's command identical run to run. x varies
+        // fastest, matching the chunk array's layout.
         changes.sort_unstable_by_key(|c| (c.pos.2, c.pos.1, c.pos.0));
 
         Outcome {
@@ -383,9 +361,8 @@ impl Scratch {
     fn hollow(&mut self, region: Selection) -> Result<(), OpsError> {
         self.charge(region.cell_count() as u64)?;
         // Classify against the pre-op state, then clear. Clearing as we
-        // scan would expose the next cell's neighbor and stop it from
-        // qualifying, eroding one layer instead of removing the
-        // interior.
+        // scan would expose the next cell's neighbor and erode one
+        // layer instead of removing the interior.
         let interior: Vec<(i32, i32, i32)> = region
             .iter_cells()
             .filter(|&pos| is_enclosed(&self.world, pos))
@@ -422,10 +399,9 @@ impl Scratch {
         // a generator legitimately overwrites its own cell (trunk, then
         // leaf), and only the last value is the intended one.
         for (pos, voxel) in patch.dedup_last_write() {
-            // Saturating, not wrapping: a generator handed an extreme
-            // origin parameter can emit a position anywhere in `i32`,
-            // and the sum must land somewhere `write` will reject
-            // rather than wrap around into the middle of the scene.
+            // Saturating, not wrapping: the sum must land somewhere
+            // `write` will reject rather than wrap around into the
+            // middle of the scene.
             let pos = (
                 pos.0.saturating_add(translate[0]),
                 pos.1.saturating_add(translate[1]),
@@ -436,22 +412,9 @@ impl Scratch {
         Ok(())
     }
 
-    /// Store a pipeline graph on the document, and — unless `apply` is
-    /// off — evaluate it and write what it produces.
-    ///
-    /// The write half is deliberately identical to [`Self::generate`]:
-    /// a graph is a generator with a shape, so its patch goes through
-    /// the same dedup and the same [`Self::write`] door, and inherits
-    /// the same budget, coordinate ceiling and `write_mode`.
-    ///
-    /// Everything before that is the part a graph needs and a single
-    /// generator doesn't. The graph arrives as raw JSON rather than a
-    /// typed field for two reasons that happen to want the same thing:
-    /// the generated tool schema stays a bare object instead of nine
-    /// more definitions an agent carries in context every turn, and the
-    /// unknown-key check below can name the field that was misspelled —
-    /// which `#[serde(deny_unknown_fields)]` cannot do here, because
-    /// these same types have to stay lenient for `.vxlt`.
+    /// Store a pipeline graph on the document and, unless `apply` is
+    /// off, write what it produces. The write half is identical to
+    /// [`Self::generate`], so a graph inherits every ceiling it has.
     fn run_graph(
         &mut self,
         index: usize,
@@ -469,13 +432,9 @@ impl Scratch {
         self.commit_graph(index, graph, apply, translate, mode)
     }
 
-    /// Change the graph the document already has.
-    ///
-    /// Edits run against a copy and are only kept if every one of them
-    /// lands — the same atomicity the batch itself has, one level down.
-    /// A `connect` that would close a cycle is refused by the graph's
-    /// own check, which is the point of editing through its methods
-    /// rather than reaching into `nodes`.
+    /// Change the graph the document already has. Edits run against a
+    /// copy and are kept only if every one lands — the same atomicity
+    /// the batch has, one level down.
     fn edit_graph(
         &mut self,
         index: usize,
@@ -512,17 +471,8 @@ impl Scratch {
     }
 
     /// Validate a graph, optionally evaluate it into the world, and keep
-    /// it on the document.
-    ///
-    /// Shared by `graph` and `graph_edit` so a graph that arrived whole
-    /// and one that was edited into place are checked and written by the
-    /// same code — the same reason `apply_ops` and `preview_ops` share
-    /// [`run_batch`](super::run_batch).
-    ///
-    /// The write half is deliberately identical to [`Self::generate`]:
-    /// a graph is a generator with a shape, so its patch goes through
-    /// the same dedup and the same [`Self::write`] door, and inherits
-    /// the budget, the coordinate ceiling and `write_mode` from it.
+    /// it on the document. Shared by `graph` and `graph_edit`, so a
+    /// whole graph and an edited one are checked by the same code.
     fn commit_graph(
         &mut self,
         index: usize,
@@ -604,8 +554,7 @@ impl Scratch {
 
     /// An op's region: the explicit one if given, else the session
     /// selection. The flag says which, because ops that move their
-    /// contents follow the selection only when they *are* the
-    /// selection.
+    /// contents follow the selection only when they are it.
     fn resolve_region(&self, region: &Option<Aabb>) -> Result<(Selection, bool), OpsError> {
         let (region, from_selection) = match region {
             Some(aabb) => (aabb.to_selection(), false),
@@ -627,12 +576,9 @@ impl Scratch {
     }
 }
 
-/// Apply one edit to a graph, in the graph's own terms.
-///
-/// Every arm goes through a `PipelineGraph` method rather than touching
-/// `nodes` directly, so an agent's `connect` gets the same cycle check
-/// and the same rollback a human dragging a wire in the panel does, and
-/// `remove` clears the wires that pointed at the node for both of them.
+/// Apply one edit in the graph's own terms. Every arm goes through a
+/// `PipelineGraph` method rather than touching `nodes`, so an agent hits
+/// the same cycle check and rollback a human dragging a wire does.
 fn apply_graph_edit(graph: &mut PipelineGraph, edit: &GraphEdit) -> Result<(), OpsError> {
     match edit {
         GraphEdit::AddNode { node } => {
@@ -648,9 +594,8 @@ fn apply_graph_edit(graph: &mut PipelineGraph, edit: &GraphEdit) -> Result<(), O
                 ));
             }
             // An agent sends no layout, and every node at [0, 0] is a
-            // pile the human can't read. The whole-graph path re-lays
-            // out on arrival; a single node joining a laid-out graph
-            // takes its own cascade slot instead.
+            // pile. The whole-graph path re-lays out on arrival; a
+            // single node takes its own cascade slot instead.
             if parsed.position == [0.0, 0.0] {
                 parsed.position = PipelineGraph::place(parsed.id);
             }
@@ -693,14 +638,9 @@ fn require_node(graph: &PipelineGraph, id: crate::procgen::NodeId) -> Result<(),
     Ok(())
 }
 
-/// Merge `params` into a node's payload, keeping everything it doesn't
-/// name.
-///
-/// Round-tripping the payload through JSON rather than matching on every
-/// `NodeKind` variant: one implementation covers generator parameters
-/// and transform fields alike, and it can't fall behind a variant added
-/// later. Same merge-over-current semantics the registry gives a
-/// `generate` op, and the same refusal of a name nothing reads.
+/// Merge `params` into a node's payload, keeping what it doesn't name.
+/// Round-tripped through JSON rather than matched per `NodeKind`, so one
+/// implementation covers every variant and can't fall behind a new one.
 fn set_node_params(
     graph: &mut PipelineGraph,
     id: crate::procgen::NodeId,
@@ -750,9 +690,7 @@ fn set_node_params(
 
 /// A graph problem in this protocol's terms. The split is the one an
 /// agent acts on: a malformed graph gets edited, an oversized one gets
-/// split.
-/// Shape then size — see [`super::check_graph`], which is this under a
-/// name the editor can reach.
+/// split. Shape then size — [`super::check_graph`] is the public name.
 pub(super) fn check_graph(graph: &PipelineGraph) -> Result<(), OpsError> {
     graph.validate().map_err(graph_error)?;
     registry::check_graph_sources(graph)
@@ -767,20 +705,9 @@ fn graph_error(error: crate::procgen::GraphError) -> OpsError {
     OpsError::new(code, error.to_string())
 }
 
-/// Refuse keys the graph types didn't understand, by comparing what was
-/// sent against what survived a round trip through them.
-///
-/// The alternative — `#[serde(deny_unknown_fields)]` — isn't available:
-/// the same types are the `.vxlt` storage format, which must ignore
-/// fields a newer build wrote, and a node's payload is flattened, which
-/// serde won't combine with the deny attribute anyway. Round-tripping
-/// gets the strictness without a hand-written key list that would start
-/// drifting from the structs the day it was written.
-///
-/// Serialization emits every field (nothing here is `skip_serializing`),
-/// so a key present in the request and absent from the round trip is a
-/// key nothing read. Arrays line up index for index — `nodes` comes back
-/// in the order it went in.
+/// Refuse keys the graph types didn't understand, by diffing what was
+/// sent against what survived a round trip. `deny_unknown_fields` is
+/// unavailable: these types stay lenient for `.vxlt` and are flattened.
 fn reject_unknown_graph_keys(sent: &Value, understood: &Value, path: &str) -> Result<(), OpsError> {
     match (sent, understood) {
         (Value::Object(sent), Value::Object(understood)) => {
@@ -831,12 +758,9 @@ fn component(p: (i32, i32, i32), index: usize) -> i32 {
     }
 }
 
-/// Reflect a cell across the seam at `plane`.
-///
-/// A voxel is the cell `[p, p+1)`, not the point `p`, so its mirror
-/// image across the seam `x = plane` is `2·plane − 1 − p`. Using the
-/// point formula (`2·plane − p`) shifts the copy one cell into the
-/// original.
+/// Reflect a cell across the seam at `plane`. A voxel is the cell
+/// `[p, p+1)`, so the mirror is `2·plane − 1 − p`; the point formula
+/// shifts the copy one cell into the original.
 fn reflect(pos: (i32, i32, i32), index: usize, plane: i32) -> (i32, i32, i32) {
     let mirrored = 2 * plane - 1 - component(pos, index);
     match index {
@@ -860,12 +784,9 @@ fn cylinder_box(base: [i32; 3], radius: i32, height: i32, axis: AxisSpec) -> ([i
     (min, max)
 }
 
-/// The 1-cell outer layer of a cell set: every cell with at least one
-/// face neighbor outside it.
-///
-/// Shared by every shape's `filled: false`, so a hollow sphere is the
-/// shell of exactly the sphere the filled version would have written —
-/// no second rasterizer to disagree with the first.
+/// The 1-cell outer layer of a cell set: every cell with a face
+/// neighbor outside it. Shared by every shape's `filled: false`, so
+/// there is no second rasterizer to disagree with the first.
 fn shell_of(cells: Vec<(i32, i32, i32)>) -> Vec<(i32, i32, i32)> {
     let inside: HashSet<(i32, i32, i32)> = cells.iter().copied().collect();
     cells
@@ -895,14 +816,9 @@ fn check_coord(pos: (i32, i32, i32)) -> Result<(), OpsError> {
     Ok(())
 }
 
-/// Bound a line by the cells it visits, which is not the volume of its
-/// bounding box.
-///
-/// `line_voxels` is a Bresenham walk: one cell per step along the
-/// dominant axis. The diagonal from `[0,0,0]` to `[500,500,500]` is 501
-/// writes, while its bounding box is 125 million cells — measuring it
-/// the way a box is measured refused a long diagonal beam that costs
-/// almost nothing, and said "region 501×501×501" while doing it.
+/// Bound a line by the cells it visits, not the volume of its bounding
+/// box: a Bresenham walk from `[0,0,0]` to `[500,500,500]` is 501
+/// writes inside a box of 125 million cells.
 fn check_line_length(a: (i32, i32, i32), b: (i32, i32, i32)) -> Result<(), OpsError> {
     // In i64 so the subtraction can't overflow on its own terms, rather
     // than only because `check_coord` happens to run first.
@@ -1144,10 +1060,8 @@ mod tests {
 
     #[test]
     fn a_long_diagonal_line_costs_its_steps_not_its_bounding_box() {
-        // A 501-cell beam used to come back refused as a "501×501×501
-        // region" of 125 million cells. A Bresenham line visits one cell
-        // per step along the dominant axis; the box it happens to span
-        // is not what it costs.
+        // A Bresenham line visits one cell per step along the dominant
+        // axis; the box it happens to span is not what it costs.
         let mut session = AgentSession::new();
         let report = apply(
             &mut session,
@@ -1161,10 +1075,9 @@ mod tests {
 
     #[test]
     fn a_line_longer_than_the_per_op_cap_is_still_refused() {
-        // The cap moved to the step count, so only a line spanning
-        // essentially the whole coordinate range reaches it — but it is
-        // still an explicit error rather than an allocation nobody
-        // bounded.
+        // The cap is on the step count, so only a line spanning nearly
+        // the whole coordinate range reaches it — still an explicit
+        // error rather than an unbounded allocation.
         let mut session = AgentSession::new();
         let json = format!(
             r#"{{"version":1,"ops":[
@@ -1180,10 +1093,9 @@ mod tests {
 
     #[test]
     fn hollow_removes_the_whole_interior_at_once() {
-        // The load-bearing detail: cells are classified against the
-        // pre-op state. Clearing while scanning would expose the next
-        // cell's neighbor and stop it from qualifying, so only a
-        // fraction of the 27 interior cells would go.
+        // Cells are classified against the pre-op state. Clearing while
+        // scanning would expose the next cell's neighbor, so only a
+        // fraction of the interior would go.
         let mut session = AgentSession::new();
         apply(
             &mut session,
@@ -1413,9 +1325,8 @@ mod tests {
 
     #[test]
     fn a_generated_tree_mirrors_to_exactly_twice_itself() {
-        // Golden-shaped check without magic numbers: a disjoint mirror
-        // copy doubles both the voxel count and the width. An
-        // off-by-one in the reflection makes the halves overlap, and
+        // A disjoint mirror copy doubles both the voxel count and the
+        // width. An off-by-one in the reflection overlaps the halves and
         // the count comes in low.
         let mut session = AgentSession::new();
         let grown = apply(
@@ -1537,12 +1448,9 @@ mod tests {
 
     #[test]
     fn a_misspelled_nodes_key_is_still_refused() {
-        // `PipelineGraph` carries a struct-level `#[serde(default)]` so
-        // that a field added to it later can't lock users out of the
-        // `.vxlt` files they already have. The price is that serde no
-        // longer refuses a graph object with no `nodes` at all, which
-        // used to be what caught this typo ("missing field `nodes`").
-        // The protocol's own unknown-key check has to cover it instead.
+        // `PipelineGraph`'s struct-level `#[serde(default)]` means serde
+        // no longer refuses a graph object with no `nodes`, so the
+        // protocol's own unknown-key check has to catch this typo.
         let mut session = AgentSession::new();
         let error = refuse(
             &mut session,
@@ -1600,13 +1508,9 @@ mod tests {
         );
     }
 
-    /// The editor loads a graph out of a `.vxlt` and evaluates it on
-    /// the thread that draws, so the two ceilings have to be reachable
-    /// from outside this module — and they have to fire *before* the
-    /// evaluator recurses or the generator allocates. Both of these
-    /// were measured taking the process: a chain this long overflowed
-    /// the stack, and the terrain node's own `max - min` overflowed
-    /// `i32` while sizing its buffer.
+    /// The editor evaluates graphs from a `.vxlt` on the thread that
+    /// draws, so both ceilings must be reachable from outside this
+    /// module and must fire before the recursion or the allocation.
     #[test]
     fn check_graph_refuses_what_the_evaluator_cannot_survive() {
         let mut nodes: Vec<String> = (0..60_000)
@@ -1631,14 +1535,9 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 
-    /// A generator's origin is a coordinate, and every other coordinate
-    /// in this protocol is bounded before anything runs. These two were
-    /// not: the generator stamped `origin + offset` while building its
-    /// patch, which overflows on a build with overflow checks — the
-    /// abort takes the process, and with it whatever an editor had
-    /// unsaved. Release wrapped and the write door refused the result,
-    /// so the code an agent sees is the same one; it just arrives before
-    /// the work now, naming the field it wrote.
+    /// A generator's origin is a coordinate, so it is bounded before
+    /// anything runs: the generator stamps `origin + offset` while
+    /// building its patch, which overflows on a checked build.
     #[test]
     fn a_generator_origin_past_the_coordinate_ceiling_is_refused() {
         for generator in ["builtin.wfc", "builtin.lsystem_tree"] {
@@ -1663,11 +1562,9 @@ mod tests {
         }
     }
 
-    /// A Translate node's offset is checked for shape, not magnitude —
-    /// the schema takes any `i32`, `validate` looks at wires, and the
-    /// source ceiling looks at sizes. So the sum lands at the write
-    /// door, and it has to *arrive* there: a bare `+` in the node's
-    /// shift used to abort the process on a debug build instead.
+    /// A Translate offset is checked for shape, not magnitude, so the
+    /// sum lands at the write door — and it has to *arrive* there
+    /// rather than abort on a checked build.
     #[test]
     fn a_translate_node_offset_saturates_into_a_refusal() {
         let mut session = AgentSession::new();
@@ -2167,10 +2064,9 @@ mod tests {
 
     #[test]
     fn a_preview_hands_back_the_world_the_batch_would_leave() {
-        // What a dry run is *for*: describing or slicing a result before
-        // accepting it. Without the preview, a dry run reported the
-        // world after the batch while a description taken alongside it
-        // showed the world before — two answers in one envelope.
+        // What a dry run is for: describing or slicing a result before
+        // accepting it. Without the preview the report describes the
+        // world after and the description the world before.
         let batch = parse(
             r#"{"version":1,"ops":[
                 {"op":"box","min":[0,0,0],"max":[4,4,4],"voxel":{"rgb":[1,2,3]}},

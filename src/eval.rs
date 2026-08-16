@@ -1,24 +1,6 @@
-//! The eval set: what "good enough" means, written as assertions a
-//! machine can check.
-//!
-//! An eval case is a task handed to an agent plus the properties the
-//! result has to have. The properties are the same ones `describe`
-//! already measures — connected components, floating parts, enclosed
-//! interior, symmetry, size — which is the point: the numbers an agent
-//! reads while it works are the numbers it is graded on, so "check your
-//! own work" and "did it pass" cannot drift apart.
-//!
-//! Grading is deliberately **code-based, not model-based**. A judge
-//! that is itself a language model would bring the failure mode this
-//! whole layer exists to remove: an opinion where a measurement will
-//! do. Whether two halves of a sword are actually joined is not a
-//! matter of taste, and no rendered view answers it reliably.
-//!
-//! What this does *not* do is run the agent. Driving a model, sampling
-//! it k times, pinning its temperature — all of that belongs to whoever
-//! is doing the measuring, and it changes with the model. This module
-//! takes a finished `.vxlt` and says whether it meets the bar, which is
-//! the part that should stay the same across every model and every year.
+//! The eval set: a task plus the properties its result must have,
+//! graded against what `describe` measures. Code-based, never
+//! model-based; it does not run the agent.
 
 use std::path::{Path, PathBuf};
 
@@ -48,9 +30,8 @@ pub struct EvalCase {
 }
 
 /// The properties a result must have. Every field is optional: a case
-/// asserts what its task actually asked for and stays quiet about the
-/// rest. Asserting more than the task demanded grades the model on
-/// guessing rather than on building.
+/// asserts what its task asked for and stays quiet about the rest, or
+/// it grades the model on guessing rather than on building.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
@@ -294,10 +275,9 @@ fn load_cases(path: &Path) -> Result<Vec<EvalCase>, EvalError> {
             )
         })?;
         for entry in entries {
-            // A directory entry that can't be read is not "no case
-            // here": suite mode reports a missing result as a failed
-            // case, so a case that silently vanished from the *set*
-            // would shrink the bar instead of failing anything.
+            // An unreadable directory entry is not "no case here": a
+            // case that vanished from the set would shrink the bar
+            // instead of failing anything.
             let entry = entry
                 .map_err(|e| {
                     EvalError::new(
@@ -390,11 +370,9 @@ pub fn grade(case: &EvalCase, description: &Description) -> CaseReport {
                     checks.push(check(axis, *bound, *actual as f64));
                 }
             }
-            // An empty document has no extent to measure, and treating
-            // that as `[0, 0, 0]` passes any bound written as a ceiling
-            // alone — "at most 10 cells across" is true of nothing at
-            // all. Same rule as the structural pass below: a bar that
-            // was never measured doesn't get to report a pass.
+            // An empty document has no extent, and reading that as
+            // `[0, 0, 0]` passes any ceiling-only bound. A bar that was
+            // never measured doesn't get to report a pass.
             None => checks.push(Check {
                 name: "size".to_string(),
                 expected: "measurable".to_string(),
@@ -404,10 +382,9 @@ pub fn grade(case: &EvalCase, description: &Description) -> CaseReport {
         }
     }
 
-    // Everything below needs the structural pass. It is skipped on
-    // documents too big to measure, and a case that asks about
-    // structure can't be graded without it — say so rather than
-    // reporting a pass nobody checked.
+    // Everything below needs the structural pass, which is skipped on
+    // documents too big to measure. Say so rather than report a pass
+    // nobody checked.
     let structure = description.structure.as_ref();
     let wants_structure = expect.components.is_some()
         || expect.floating_components.is_some()
@@ -496,11 +473,8 @@ pub fn grade(case: &EvalCase, description: &Description) -> CaseReport {
 
 fn check(name: &str, bound: Bound, actual: f64) -> Check {
     // A bound that can't be met, or can't be missed, is an authoring
-    // mistake rather than a judgment about the model — and the failure
-    // mode of the empty one is the dangerous direction: `{}` reads as a
-    // bar in the case file and grades every result as a pass. Failing
-    // it here names the case and the field; the alternative, refusing
-    // to load the whole suite, punishes the eleven cases that are fine.
+    // mistake. The empty one is the dangerous direction: `{}` reads as a
+    // bar and grades every result as a pass.
     let unusable = match (bound.min, bound.max) {
         (None, None) => Some("names neither min nor max, so it asserts nothing".to_string()),
         (Some(min), Some(max)) if min > max => Some(format!(
@@ -672,11 +646,9 @@ mod tests {
         assert_eq!(report.checks[0].name, "structure");
     }
 
-    /// The cases in the repository are data, so nothing but this
-    /// notices when one is malformed — and the id has to match the file
-    /// name, because suite mode looks a result up as `<id>.vxlt`. A
-    /// mismatch there reports "the agent never attempted this case"
-    /// when the truth is that the case is misfiled.
+    /// The shipped cases are data nothing else validates. The id has to
+    /// match the file name, since suite mode looks a result up as
+    /// `<id>.vxlt` — a mismatch reads as an unattempted case.
     #[test]
     fn every_case_in_the_repository_loads_and_is_named_after_its_id() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));

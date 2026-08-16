@@ -1,24 +1,6 @@
-//! Low-interference viewport HUD: a small, click-through, translucent
-//! block in the bottom-left corner of the viewport that mirrors the
-//! editor state a user needs *while the cursor is in the scene* —
-//! active tool, in-flight gesture phase with live numbers, locked
-//! plane, symmetry, selection size, and (during modal gestures) key
-//! hints.
-//!
-//! Placement and style follow the cross-editor conventions researched
-//! for this feature (vengi's `BrushHud` is the closest prior art):
-//! bottom-left block, semi-transparent dark backplate (never bare
-//! alpha-blended text), display-only. The `Area` is
-//! `interactable(false)` so it never consumes a press — a click
-//! "through" the HUD must still paint / select (`egui_consumed` in
-//! `handler.rs` would otherwise gate the editor out of it) — and
-//! `Order::Background` keeps every floating egui window above it.
-//!
-//! The App layer owns all gesture state, so it builds the
-//! display-ready [`HudState`] each frame (`App::build_hud_state`);
-//! this module only formats and lays it out. The formatting helpers
-//! are free functions here (rather than in the App) so they're
-//! unit-testable without a window.
+//! The viewport HUD: a click-through translucent block mirroring the
+//! editor state a user needs while the cursor is in the scene. The App
+//! layer builds its [`HudState`]; this only formats and lays it out.
 
 use egui::{Align2, Color32, Context, Id, Order, RichText};
 
@@ -79,10 +61,8 @@ pub(super) fn show_hud_overlay(ctx: &Context, hud: &HudState) {
                     Some(p) => format!("{} — {}", hud.tool, p),
                     None => hud.tool.to_string(),
                 };
-                // Colors mirror the status bar's coding (tool =
-                // light blue, symmetry = light yellow, selection
-                // = yellow) so the two readouts visibly refer to
-                // the same state.
+                // Colors mirror the status bar's coding, so the two
+                // readouts visibly refer to the same state.
                 ui.label(RichText::new(title).strong().color(Color32::LIGHT_BLUE));
                 if let Some(d) = &hud.detail {
                     ui.label(RichText::new(d).color(Color32::from_gray(220)));
@@ -100,11 +80,9 @@ pub(super) fn show_hud_overlay(ctx: &Context, hud: &HudState) {
         });
 }
 
-/// Render the performance readout in the bottom-right corner — the
-/// always-glanceable subset of the Statistics window (which stays
-/// the detailed view). Same click-through contract as the tool HUD.
-/// Bottom-right per cross-editor convention; top-right stays
-/// reserved for a future orientation gizmo / view cube.
+/// The performance readout in the bottom-right corner — the glanceable
+/// subset of the Statistics window, under the same click-through
+/// contract as the tool HUD.
 pub(super) fn show_perf_overlay(ctx: &Context, stats: &RenderStats) {
     let pos = ctx.available_rect().right_bottom() + egui::vec2(-12.0, -12.0);
     egui::Area::new(Id::new("viewport_perf_hud"))

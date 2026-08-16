@@ -1,42 +1,6 @@
-//! Greedy meshing: merge adjacent same-color same-AO same-direction
-//! faces into larger quads, dramatically reducing triangle count.
-//!
-//! The algorithm follows Mikola Lysenko's classic greedy mesher
-//! ([0fps.net 2012-06-30]) generalized to per-voxel RGBA via Eddie
-//! Abbondanz's vertex-color extension, plus per-vertex AO via the
-//! 0fps AO + greedy combination ([0fps.net 2013-07-03]).
-//!
-//! For each of the 6 face directions, we sweep slice by slice through
-//! the chunk, build a 2D mask of packed keys (or `0` for "no visible
-//! face" — see "Mask key" below for the layout), and run a 2D greedy
-//! rectangle cover on the mask to emit one quad per maximal run of
-//! cells agreeing on color, tint zone and all four AO corners.
-//!
-//! Cross-chunk handling matches `NaiveMesher`: rectangles stop at
-//! the chunk boundary (no merging across chunks) but face culling
-//! and AO sampling consult the 26 neighbor chunks via read-locks.
-//!
-//! ### Mask key
-//!
-//! Each mask cell stores `(tint_zone << 40) | (packed_rgba << 8) | packed_ao`
-//! as `u64`:
-//! - `tint_zone` (bits 40+): the voxel's faction tint zone (0-3), so
-//!   voxels of different zones never merge — the zone must survive
-//!   per-vertex to GLB export, where it can't be averaged across a quad
-//! - `packed_rgba` (bits 8-39): the shaded RGBA color via `pack_rgba`
-//! - `packed_ao` (bottom 8 bits): 4 corner AO values, 2 bits each,
-//!   packed via `mesh::ao::pack_ao`
-//!
-//! `0` is reserved as the "no visible face" sentinel — safe because
-//! every voxel that reaches the world has α = 255, so a non-air visible
-//! face always packs to a non-zero `packed_rgba`. That holds for the
-//! editor's own brushes by construction, and for imports because
-//! `io::vox` normalizes palette alpha on the way in (a transparent
-//! palette entry otherwise produced a solid voxel that packed to
-//! exactly zero). Two cells merge only
-//! when the entire `u64` matches — color, all 4 corner AO values, and
-//! tint zone — without which the merged quad's bilinear-interpolated AO
-//! would disagree with per-cell AO, or a quad would span two zones.
+//! Greedy meshing: sweep each face direction slice by slice, build a
+//! mask of packed keys, and cover it with maximal rectangles. Merges
+//! stop at the chunk boundary; culling and AO read the 26 neighbors.
 
 use super::ao::pack_ao;
 use super::neighbors::{
@@ -78,15 +42,9 @@ impl Mesher for GreedyMesher {
         let arcs: NeighborArcs = neighbor_arcs(world, chunk_pos);
         let neighbors: NeighborGuards = lock_neighbors(&arcs);
 
-        // Capacity hint sized to the worst case — one visible quad per
-        // solid voxel — to buy the absence of re-allocation on jagged
-        // scenes. Greedy normally emits far fewer, so most of the
-        // reservation goes unused, and that is a real cost rather than
-        // a free one: a fully solid chunk asks for 32768 × 4 vertices ×
-        // 48 B ≈ 6 MiB, plus 0.75 MiB of `u32` indices. `App::
-        // rebuild_all_meshes` meshes dirty chunks on the rayon pool, so
-        // the momentary commit is that figure times the number of
-        // workers, not per chunk in sequence.
+        // Worst case — one visible quad per solid voxel — to keep
+        // jagged scenes from re-allocating. A full chunk reserves about
+        // 6 MiB of vertices and 0.75 MiB of indices, per rayon worker.
         let estimated_faces = chunk.solid_count() as usize;
         let mut mesh =
             ChunkMesh::with_capacity(chunk_pos, estimated_faces * 4, estimated_faces * 6);
@@ -99,15 +57,9 @@ impl Mesher for GreedyMesher {
     }
 }
 
-/// Mesh a chunk into one `ChunkMesh` per material group present (0 =
-/// plain, 1 = emissive, 2 = metallic, 3 = both — the low two
-/// `Voxel::flags` bits), for material-aware GLB export. Face culling and
-/// AO are computed against all solid voxels (a plain voxel still
-/// occludes an emissive neighbor), but each returned mesh emits only the
-/// visible faces of voxels *in that group*, so greedy merging never
-/// spans a material boundary. Returns `(group_id, mesh)` for non-empty
-/// groups only; the 26 neighbors are locked once and shared across the
-/// four passes.
+/// One `(group_id, mesh)` per non-empty material group — the low two
+/// `Voxel::flags` bits. Culling and AO see every solid voxel, but each
+/// mesh emits only its own group's faces, so merges never span groups.
 pub fn mesh_chunk_by_material(world: &World, chunk_pos: ChunkPos) -> Vec<(u8, ChunkMesh)> {
     let Some(chunk_arc) = world.get_chunk(chunk_pos) else {
         return Vec::new();
@@ -140,17 +92,9 @@ pub fn mesh_chunk_by_material(world: &World, chunk_pos: ChunkPos) -> Vec<(u8, Ch
     out
 }
 
-/// Mesh one face direction across all CHUNK_SIZE slices, emitting
-/// merged quads to `mesh`. Stack-allocates a 1024-entry `u64` mask
-/// which is rebuilt for each slice; allocator traffic stays at zero
-/// on the hot path.
-///
-/// `group_filter`: when `Some(g)`, only voxels whose material group
-/// (`flags & 0x03`) equals `g` emit faces — used by
-/// `mesh_chunk_by_material` to split geometry per material. Face
-/// visibility and AO still consult all solid voxels regardless, so
-/// culling and shading are unchanged. `None` meshes every voxel (the
-/// render / default path).
+/// Mesh one face direction across every slice, emitting merged quads.
+/// `group_filter` restricts which voxels *emit* faces; culling and AO
+/// still consult every solid voxel. `None` meshes all of them.
 fn mesh_face_direction(
     chunk: &Chunk,
     neighbors: &NeighborGuards,
@@ -173,10 +117,8 @@ fn mesh_face_direction(
                     mask[v_idx * SIZE + u_idx] = 0;
                     continue;
                 }
-                // Material-split export: skip voxels outside the target
-                // group. They still occlude / shade (the checks above use
-                // all solid voxels) — only their own face emission is
-                // suppressed for this group's mesh.
+                // Outside the target group: still occludes and shades,
+                // only its own face emission is suppressed here.
                 if let Some(g) = group_filter {
                     if voxel.flags & 0x03 != g {
                         mask[v_idx * SIZE + u_idx] = 0;
@@ -248,11 +190,9 @@ fn mesh_face_direction(
     }
 }
 
-/// Compute the 4 vertices of a `(w × h)` quad at slice `d`, mask
-/// origin `(u, v)`, world-origin offset `world_origin`, and emit
-/// to `mesh`. The mask key contains both color and 4 corner AO —
-/// they apply uniformly across the merged rectangle (cells with
-/// different AO can't merge).
+/// Emit the four vertices of a `w × h` quad at slice `d`. Color and
+/// the four AO corners both come from the mask key, which applies
+/// uniformly across the rectangle — differing AO prevents merging.
 #[allow(clippy::too_many_arguments)] // flat quad geometry — a struct would just move nine names one level down
 fn emit_merged_quad(
     face: Face,
@@ -372,10 +312,8 @@ mod tests {
 
     #[test]
     fn test_two_x_adjacent_merge() {
-        // Two voxels along +X. Top, bottom, +Z, -Z faces span 2×1
-        // and merge into one quad each (their AO is uniform — both
-        // cells have all-air neighbors so all corners = 3). ±X
-        // faces stay 1×1 each. Total 6 quads = 12 tris.
+        // Two voxels along +X: top, bottom and ±Z merge into one 2×1
+        // quad each (uniform AO), ±X stay 1×1. Six quads, twelve tris.
         let mut world = World::new();
         world.set_voxel(1, 1, 1, Voxel::from_rgb(100, 100, 100));
         world.set_voxel(2, 1, 1, Voxel::from_rgb(100, 100, 100));
@@ -429,14 +367,9 @@ mod tests {
 
     #[test]
     fn test_full_chunk_layer_merges_to_single_quad_per_visible_face() {
-        // 32×32×1 plane. Top: AO uniform → 1 merged quad. Bottom:
-        // AO uniform → 1 merged quad. Sides: each side is 32×1 but
-        // the corner cells' AO differs from interior cells along
-        // that side (they have neighbors along the run direction
-        // that interior cells don't), so AO segmentation breaks
-        // each side into a small number of quads. Triangle count
-        // is **higher than the pre-AO version** as a result — that's
-        // the cost of correct AO.
+        // A 32×32×1 plane. Top and bottom merge to one quad each; the
+        // sides segment because corner cells' AO differs from interior
+        // ones, putting the count above the pre-AO version.
         let mut world = World::new();
         let c = Voxel::from_rgb(200, 50, 50);
         for x in 0..CHUNK_SIZE_I32 {
@@ -445,11 +378,8 @@ mod tests {
             }
         }
         let mesh = GreedyMesher::new().generate(&world, ChunkPos::ZERO);
-        // Top + bottom are single quads each (AO uniform: all air
-        // above/below). Sides may segment due to AO at the corners
-        // — verify we're at least better than naive (which would
-        // emit 32 quads per side × 4 sides = 128 quads + 2 = 130
-        // quads for top/bottom = 132 quads = 264 tris).
+        // Top and bottom are one quad each; sides segment on AO. The
+        // bar is naive's output — 128 side quads plus 2 = 130.
         let tri_count = mesh.triangle_count();
         assert!(tri_count >= 12, "expected at least 12 tris (top+bottom)");
         assert!(
@@ -520,10 +450,8 @@ mod tests {
     #[test]
     fn cell_for_puts_d_on_the_normal_and_u_v_on_the_face_axes() {
         // `cell_for` and `ao::face_axes` describe the same per-face
-        // frame from two sides, and nothing makes them agree except
-        // that both were written to. A permutation in either — the kind
-        // that shows up as AO sampled from the wrong neighbor, not as a
-        // crash — is what this catches.
+        // frame from two sides and nothing makes them agree. A
+        // permutation shows up as AO from the wrong neighbor, not a crash.
         let axis_of = |v: [i32; 3]| v.iter().position(|c| *c != 0).expect("an axis");
         for face in Face::ALL {
             let (n, u, v) = crate::mesh::ao::face_axes(face);
@@ -537,12 +465,9 @@ mod tests {
 
     #[test]
     fn per_material_split_still_culls_against_the_other_group() {
-        // Two neighbors in *different* material groups. Culling is
-        // computed against all solid voxels, so the face they share is
-        // hidden in both meshes — a plain voxel occludes an emissive
-        // one. Split the culling per group instead and each cube emits
-        // its full six faces, leaving a wall of invisible geometry
-        // inside every export that mixes materials.
+        // Culling runs against every solid voxel, so the face two
+        // groups share is hidden in both meshes. Culling per group
+        // instead leaves invisible geometry inside mixed exports.
         let mut world = World::new();
         let plain = Voxel::from_rgb(200, 200, 200);
         let mut emissive = Voxel::from_rgb(200, 100, 0);

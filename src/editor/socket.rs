@@ -1,48 +1,27 @@
-//! Named socket / attachment points for game-asset export.
-//!
-//! A socket marks a named anchor in the voxel scene — a world-space
-//! position plus an outward orientation (the face normal it was placed
-//! on). Sockets carry no geometry; they export to glTF as **empty
-//! nodes** (`name` + `translation` + `rotation`, no `mesh`), the
-//! standard way to ship attachment points — weapon mounts, banner /
-//! emblem slots, FX anchors — that downstream engines hang separate
-//! parts onto.
-//!
-//! Sockets are *document* data: they persist in `.vxlt` (embedded in
-//! `io::EditorState`) and round-trip through autosave. Like the box
-//! selection, though, they are **not** part of the undo history —
-//! placement / rename / delete are managed directly (the `Socket` tool
-//! drops one per click; the Inspector renames and deletes them).
+//! Named attachment points: a world position plus an outward normal,
+//! carrying no geometry and exported to glTF as empty nodes. Document
+//! data that persists in `.vxlt`, but not on the undo stack.
 
 use glam::{Quat, Vec3};
 
-/// A named attachment point: a world-space position plus an outward
-/// orientation (unit normal).
-///
-/// Both fields are the source of truth; the glTF export derives the
-/// node rotation from `normal` at write time (see [`Socket::rotation`]),
-/// so the on-disk orientation convention can evolve without migrating
-/// saved files.
+/// A named attachment point: a world position plus an outward unit
+/// normal. The glTF export derives its node rotation from `normal` at
+/// write time, so the convention can change without migrating files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Socket {
-    /// Display + export name. Unique within a scene (see
-    /// [`next_socket_name`]) because glTF nodes are keyed by name
-    /// downstream.
+    /// Display and export name, unique within a scene because glTF
+    /// nodes are keyed by name downstream.
     ///
-    /// Uniqueness is enforced at the two doors that write one:
-    /// placement takes the first free `Socket_N`, and the Inspector's
-    /// rename field resolves what was typed when the field is
-    /// committed. Nothing downstream re-checks — a third door (an
-    /// agent-facing socket op, an importer) has to carry the rule
-    /// itself, or it ships duplicates straight into the `.glb`.
+    /// # Safety
+    /// Uniqueness is enforced only at the two doors that write one; a
+    /// third door has to carry the rule itself.
     pub name: String,
     /// World-space position — the center of the face the socket was
     /// dropped on, so it carries sub-cell `.5` offsets.
     pub position: [f32; 3],
-    /// Outward unit normal of the face the socket sits on. One of the
-    /// six axis directions for face / ground placement, but stored as a
-    /// general vector so a future free-orientation editor needs no
-    /// format change.
+    /// Outward unit normal of the face the socket sits on — one of six
+    /// axis directions in practice, stored as a general vector so free
+    /// orientation would need no format change.
     pub normal: [f32; 3],
 }
 
@@ -55,21 +34,9 @@ impl Socket {
         }
     }
 
-    /// glTF node rotation as a unit quaternion `[x, y, z, w]` (the glTF
-    /// component order, with `w` the scalar — see the glTF 2.0 spec
-    /// §3.5.2).
-    ///
-    /// It's the shortest-arc rotation taking local **+Y** onto the
-    /// socket's outward `normal`, so the attached prop's "up" axis
-    /// points out of the surface. A ground socket (normal `+Y`) is the
-    /// identity rotation. `glam::Quat::from_rotation_arc` chooses a
-    /// stable orthogonal axis for the antiparallel (`normal = -Y`)
-    /// case, so a downward-facing socket still gets a valid 180°
-    /// rotation rather than NaNs.
-    ///
-    /// (This is the producer half. The consumer side is the mirror
-    /// image: parent the prop to the socket node and let its local +Y
-    /// be the direction it grows out of the surface.)
+    /// glTF node rotation as a unit quaternion `[x, y, z, w]`: the
+    /// shortest arc taking local +Y onto `normal`, so an attached prop
+    /// grows out of the surface. `+Y` is the identity.
     pub fn rotation(&self) -> [f32; 4] {
         let n = Vec3::from(self.normal);
         let n = if n.length_squared() > 1e-12 {
@@ -82,14 +49,9 @@ impl Socket {
     }
 }
 
-/// Pick the smallest `Socket_N` (N ≥ 1) name not already present in
-/// `existing`.
-///
-/// A monotonic counter would leave gaps after deletes and a plain
-/// `len() + 1` could collide with a survivor, so we scan for the first
-/// free slot instead. Names must stay unique because they become glTF
-/// node names downstream. `existing` is tiny (a handful of sockets), so
-/// the linear scan is irrelevant cost.
+/// The smallest `Socket_N` name not already in `existing`. A counter
+/// would leave gaps after deletes and `len() + 1` could collide with a
+/// survivor, so this scans for the first free slot.
 pub fn next_socket_name(existing: &[Socket]) -> String {
     let mut n = 1usize;
     loop {

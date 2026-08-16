@@ -1,20 +1,6 @@
-//! MagicaVoxel VOX format import/export.
-//!
-//! VOX is the native format for MagicaVoxel, a popular voxel editor.
-//! Supports reading both **v150** (MagicaVoxel 0.97/0.98) and
-//! **v200** (0.99.7+) files. Writing always produces **v150** —
-//! every MagicaVoxel version reads it, and our `World` data model
-//! has no use for v200's scene graph / materials / layers.
-//!
-//! v200 reading flattens multi-model scene-graph files into the
-//! `World`'s single voxel grid: each `nSHP` model is placed at the
-//! position determined by the cumulative `nTRN` transform along
-//! its scene-tree path. Material / layer / camera / render-object
-//! chunks are read and discarded.
-//!
-//! Format spec:
-//! - v150 (basic): <https://github.com/ephtracy/voxel-model/blob/master/MagicaVoxel-file-format-vox.txt>
-//! - v200 extension: <https://github.com/ephtracy/voxel-model/blob/master/MagicaVoxel-file-format-vox-extension.txt>
+//! MagicaVoxel VOX import (v150 and v200) and export (always v150 —
+//! every version reads it). v200 reading flattens the scene graph into
+//! one grid; material, layer, camera and render chunks are discarded.
 
 use crate::core::{Voxel, World};
 use std::collections::HashMap;
@@ -23,12 +9,9 @@ use thiserror::Error;
 
 /// VOX file magic number: "VOX "
 const VOX_MAGIC: [u8; 4] = *b"VOX ";
-/// Caps for `Vec`/`HashMap` capacity *hints* taken from file-declared
-/// counts. Those counts come from untrusted files; the hint is only a
-/// preallocation optimization, so capping it prevents a bogus count
-/// from requesting a multi-gigabyte eager allocation. The read loops
-/// still consume the full declared count and fail cleanly via
-/// `read_exact` on a short stream. Real models / dicts are far smaller.
+/// Caps for capacity hints taken from file-declared counts. The read
+/// loops still consume the full declared count and fail cleanly via
+/// `read_exact` on a short stream.
 const MAX_VOXEL_HINT: usize = 1 << 20;
 const MAX_DICT_HINT: usize = 256;
 /// Version we write for export. v150 is the universal reader format.
@@ -60,10 +43,9 @@ pub enum VoxError {
     InvalidChunkSize([u8; 4]),
 }
 
-/// Validate a file-declared chunk length. Sizes are `i32` on disk;
-/// anything negative means the header is corrupt, and we refuse rather
-/// than clamping — a clamped length silently desynchronises every
-/// chunk that follows.
+/// Validate a file-declared chunk length. Sizes are `i32` on disk, so a
+/// negative one is corruption — refused rather than clamped, since a
+/// clamped length desynchronises every chunk that follows.
 fn chunk_len(id: &[u8; 4], size: i32) -> Result<u64, VoxError> {
     u64::try_from(size).map_err(|_| VoxError::InvalidChunkSize(*id))
 }
@@ -78,16 +60,8 @@ fn insert_node(nodes: &mut HashMap<i32, SceneNode>, node: Option<(i32, SceneNode
 }
 
 /// MagicaVoxel's default palette, used when a file omits its `RGBA`
-/// chunk (the spec says such a file is colored by this table, and
-/// MagicaVoxel writes files that rely on it).
-///
-/// Transcribed from `default_palette[256]` in the format spec, whose
-/// entries are `0xAABBGGRR`. Index order matches ours directly:
-/// entry 0 is the reserved empty/transparent slot and 1..=255 are the
-/// palette indices a voxel's `color_idx` refers to.
-///
-/// This used to be a home-grown hash of the index, which meant every
-/// `.vox` without an `RGBA` chunk imported in entirely invented colors.
+/// chunk. Transcribed from the format spec; entry 0 is the reserved
+/// empty slot and 1..=255 are the indices `color_idx` refers to.
 #[rustfmt::skip]
 const DEFAULT_PALETTE: [[u8; 4]; 256] = [
     [0,0,0,0], [255,255,255,255], [255,255,204,255], [255,255,153,255],
@@ -161,17 +135,9 @@ pub fn default_palette() -> [[u8; 4]; 256] {
     DEFAULT_PALETTE
 }
 
-/// Build the editor voxel for a palette entry.
-///
-/// Alpha is forced opaque. MagicaVoxel palettes can carry `a = 0`
-/// entries, and passing those through produced a *solid* voxel whose
-/// `color()` is `[0,0,0,0]` — identical to air. That broke the flood
-/// fill's region test, violated the "every voxel in the world has
-/// α = 255" assumption the greedy mesher's zero-key sentinel is built
-/// on, and shipped an invisible-in-engine `COLOR_0.a` into every glTF
-/// export. Nothing downstream reads voxel alpha, so no information is
-/// lost; MagicaVoxel expresses real transparency through `MATL`
-/// chunks, which we don't read anyway.
+/// Build the editor voxel for a palette entry. Alpha is forced opaque:
+/// a palette can carry `a = 0`, which would produce a solid voxel
+/// indistinguishable from air. Nothing downstream reads voxel alpha.
 #[inline]
 fn voxel_from_palette(color: [u8; 4]) -> Voxel {
     Voxel::from_rgba(color[0], color[1], color[2], 255)
@@ -206,28 +172,9 @@ fn read_vox_dict<R: Read>(reader: &mut R) -> io::Result<HashMap<String, String>>
     Ok(out)
 }
 
-/// Decode the v200 rotation byte into a 3×3 integer rotation matrix.
-///
-/// Bit layout (per vox-extension spec):
-/// - bits 0-1: column index of the non-zero entry in row 1 (0-2)
-/// - bits 2-3: column index of the non-zero entry in row 2
-/// - bit 4: row 1 sign (0 = +, 1 = -)
-/// - bit 5: row 2 sign
-/// - bit 6: row 3 sign
-///
-/// Row 3's column is whichever of {0, 1, 2} isn't claimed by rows
-/// 1 and 2 (rotation matrix has exactly one ±1 per row and column).
-///
-/// `0x04 = 0b00000100` is the identity (row1=col0, row2=col1,
-/// row3=col2, all positive).
-///
-/// Returns `None` for a byte that doesn't describe a rotation — the
-/// two column indices must both be in 0..=2 and must differ. Those
-/// bytes exist in the wild only through corruption, but they can't be
-/// papered over: `3 - row1 - row2` underflows whenever the columns
-/// differ yet one of them is the illegal value 3 (64 of the 256 bytes),
-/// which panicked outright in a debug build and produced a degenerate
-/// matrix in a release one.
+/// Decode the v200 rotation byte into a 3×3 integer rotation matrix,
+/// per the vox-extension spec. `None` for a byte that describes no
+/// rotation — the two column indices must be in 0..=2 and differ.
 fn decode_rotation_byte(rot: u8) -> Option<[[i32; 3]; 3]> {
     let row1_col = (rot & 0b11) as usize;
     let row2_col = ((rot >> 2) & 0b11) as usize;
@@ -276,11 +223,9 @@ fn rotation_compose(a: [[i32; 3]; 3], b: [[i32; 3]; 3]) -> [[i32; 3]; 3] {
 /// Identity rotation matrix.
 const ROT_IDENTITY: [[i32; 3]; 3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 
-/// One node in the v200 scene graph. nTRN (Transform) carries a
-/// translation + rotation and a single child id. nGRP groups N
-/// child nodes. nSHP references one or more model ids. The graph
-/// is a DAG with a single root nTRN at id 0 (per MagicaVoxel
-/// convention).
+/// One node in the v200 scene graph: nTRN carries a translation,
+/// rotation and one child; nGRP groups N children; nSHP references
+/// model ids. The graph is a DAG rooted at an nTRN with id 0.
 #[derive(Debug, Clone)]
 enum SceneNode {
     Transform {
@@ -340,15 +285,9 @@ struct VoxModelData {
     voxels: Vec<(u8, u8, u8, u8)>,
 }
 
-/// A whole VOX file's contents: multiple models + palette + scene
-/// graph. v150 files produce a `VoxScene` with a single model and
-/// no scene graph; v200 files may have many models composed by
-/// `nTRN`/`nGRP`/`nSHP` nodes.
-///
-/// `to_world` flattens the scene graph: each `nSHP`'s models are
-/// placed in the world according to the cumulative `nTRN`
-/// transform along the path from the root, with each model
-/// rotated around its own center.
+/// A whole VOX file: models, palette and scene graph. v150 files have
+/// one model and no graph. `to_world` flattens the graph, placing each
+/// `nSHP`'s models under the cumulative transform from the root.
 struct VoxScene {
     models: Vec<VoxModelData>,
     palette: [[u8; 4]; 256],
@@ -356,10 +295,9 @@ struct VoxScene {
 }
 
 impl VoxScene {
-    /// Read a v150 or v200 VOX file. Multi-model + scene graph
-    /// are preserved; ignored chunks (`MATL`, `LAYR`, `IMAP`,
-    /// `rOBJ`, `rCAM`, `NOTE`, `INFO`, `PACK`, `MATT`) are skipped
-    /// by their declared content size.
+    /// Read a v150 or v200 file. Multi-model scenes and the scene graph
+    /// are preserved; unhandled chunks are skipped by their declared
+    /// content size.
     pub fn read<R: Read>(reader: &mut R) -> Result<Self, VoxError> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
@@ -392,9 +330,8 @@ impl VoxScene {
         let mut pending_size: Option<(u32, u32, u32)> = None;
 
         // Chunk sizes are file-declared `i32`s: negatives are corrupt,
-        // and the running total has to be `u64` + checked so a header
-        // near `i32::MAX` can't overflow the accumulator (a debug-build
-        // panic, a wrapped byte count in release).
+        // and the running total is a checked `u64` so a header near
+        // `i32::MAX` can't overflow the accumulator.
         let total_children = chunk_len(&main_header.id, main_header.children_size)?;
         let mut bytes_read: u64 = 0;
         while bytes_read < total_children {
@@ -406,15 +343,9 @@ impl VoxScene {
                 .and_then(|n| n.checked_add(children_size))
                 .ok_or(VoxError::InvalidChunkSize(chunk_header.id))?;
 
-            // Hand each parser a reader limited to its own body. Two
-            // things fall out of that. A parser that reads less than
-            // the chunk declares — any chunk carrying fields added by a
-            // newer MagicaVoxel — leaves the remainder to be drained
-            // below instead of desynchronising the stream and turning
-            // the next header into garbage. A parser that tries to read
-            // *more* (a self-inconsistent length, e.g. an `XYZI` voxel
-            // count that overruns its own chunk) hits EOF inside the
-            // `Take` and fails cleanly rather than eating the file.
+            // Each parser gets a reader limited to its own body, so a
+            // chunk carrying newer fields leaves a remainder to drain
+            // and a self-inconsistent length hits EOF inside the `Take`.
             {
                 let mut body = reader.by_ref().take(content_size);
                 match &chunk_header.id {
@@ -453,9 +384,8 @@ impl VoxScene {
                             Some(s) => s,
                             None => {
                                 // No preceding SIZE. Assume 1³ so the
-                                // read still completes, but say so —
-                                // the wrong size shifts this model's
-                                // rotation pivot.
+                                // read completes, but say so — a wrong
+                                // size shifts this model's pivot.
                                 log::warn!(
                                     "VOX: XYZI chunk with no preceding SIZE; \
                                      assuming 1×1×1"
@@ -469,10 +399,9 @@ impl VoxScene {
                         for i in 0..256 {
                             let mut color = [0u8; 4];
                             body.read_exact(&mut color)?;
-                            // VOX file index 0..254 maps to palette
-                            // 1..255. File index 255 is unused, and
-                            // palette[0] is our reserved empty slot —
-                            // don't let the file overwrite it.
+                            // File index 0..254 maps to palette 1..255.
+                            // Index 255 is unused and palette[0] is the
+                            // reserved empty slot.
                             if i < 255 {
                                 palette[i + 1] = color;
                             }
@@ -516,12 +445,9 @@ impl VoxScene {
         })
     }
 
-    /// Flatten the scene graph into a `World`, then (when `convert_axes`)
-    /// rotate the whole model from MagicaVoxel's Z-up convention into
-    /// Voxelith's Y-up one. Flattening runs in MagicaVoxel's native space
-    /// so the per-node `nTRN` rotations compose correctly; the up-axis
-    /// swap is a single global rotation over the finished grid (see
-    /// [`mv_to_voxelith`]).
+    /// Flatten the scene graph into a `World`, then rotate Z-up to Y-up
+    /// when `convert_axes`. Flattening runs in MagicaVoxel's own space
+    /// so the per-node rotations compose correctly.
     pub fn to_world(&self, convert_axes: bool) -> World {
         let native = self.to_world_native();
         if convert_axes {
@@ -531,16 +457,9 @@ impl VoxScene {
         }
     }
 
-    /// Flatten the scene graph into a `World` in MagicaVoxel's native
-    /// (Z-up) coordinates. Walks the tree from the root `nTRN`
-    /// (MagicaVoxel convention: id 0), accumulates translation and
-    /// rotation, and at each `nSHP` places the referenced model's voxels
-    /// rotated around the model's center.
-    ///
-    /// If the scene has no `nTRN` nodes (v150 single-model files
-    /// or v200 files we read before the scene graph existed), every
-    /// model is placed at the origin — same behavior as the old
-    /// single-model reader.
+    /// Flatten the scene graph in MagicaVoxel's native Z-up space,
+    /// accumulating transforms from the root and rotating each model
+    /// around its own center. No `nTRN` nodes → everything at the origin.
     fn to_world_native(&self) -> World {
         let mut world = World::new();
         if !self.nodes.is_empty() && !self.nodes.contains_key(&0) {
@@ -550,13 +469,9 @@ impl VoxScene {
             );
         }
         if self.nodes.is_empty() || !self.nodes.contains_key(&0) {
-            // No scene graph: write model voxels directly into
-            // world coords (no center pivot). This matches v150
-            // semantics (model voxel `(x, y, z)` → world `(x, y,
-            // z)`) so a v150 export → v150 import round-trip is
-            // identity. Multi-model v200 files without a scene
-            // graph (rare, malformed) get every model overlapped
-            // at the origin; users would notice and fix the source.
+            // No scene graph: write model voxels straight into world
+            // coords, matching v150 semantics so a v150 round trip is
+            // the identity.
             for model in &self.models {
                 for &(x, y, z, color_idx) in &model.voxels {
                     if color_idx == 0 {
@@ -607,11 +522,9 @@ impl VoxScene {
             limits.stop("scene graph is nested too deeply");
             return;
         }
-        // Cycle guard, scoped to the CURRENT path. A global
-        // visited-once set would also swallow the second and later
-        // arrivals at a shared subtree — and a shared subtree is
-        // exactly how a DAG says "this part appears in several places",
-        // so those files silently lost geometry.
+        // Cycle guard scoped to the current path. A global visited-once
+        // set would also swallow later arrivals at a shared subtree,
+        // which is how a DAG says "this part appears in several places".
         if !path.insert(node_id) {
             log::warn!("VOX: scene graph cycle through node {node_id}; pruning");
             return;
@@ -702,11 +615,9 @@ impl FlattenLimits {
     }
 }
 
-/// MagicaVoxel stores models Z-up; Voxelith is Y-up. Rotate a MagicaVoxel
-/// coordinate into Voxelith space with a right-handed -90° turn about X:
-/// `(x, y, z) -> (x, z, -y)`. A rotation (determinant +1), not a mirror,
-/// so chirality is preserved — asymmetric models and text don't come out
-/// flipped. [`voxelith_to_mv`] is its exact inverse.
+/// Rotate a MagicaVoxel (Z-up) coordinate into Voxelith's Y-up space: a
+/// right-handed -90° turn about X, `(x, y, z) -> (x, z, -y)`. A
+/// rotation, not a mirror, so chirality survives.
 #[inline]
 fn mv_to_voxelith(p: (i32, i32, i32)) -> (i32, i32, i32) {
     (p.0, p.2, -p.1)
@@ -719,10 +630,9 @@ fn voxelith_to_mv(p: (i32, i32, i32)) -> (i32, i32, i32) {
     (p.0, -p.2, p.1)
 }
 
-/// Rotate every solid voxel of `src` from MagicaVoxel's Z-up space into
-/// Voxelith's Y-up space (see [`mv_to_voxelith`]), returning a fresh
-/// world. Applied once on import after the scene graph is flattened, so a
-/// model that stands upright in MagicaVoxel stands upright here.
+/// Rotate every solid voxel of `src` from Z-up into Y-up space,
+/// returning a fresh world. Applied once on import, after the scene
+/// graph is flattened.
 fn rotate_world_z_up_to_y_up(src: &World) -> World {
     let mut out = World::new();
     for chunk_pos in src.sorted_chunk_positions() {
@@ -745,22 +655,8 @@ fn rotate_world_z_up_to_y_up(src: &World) -> World {
 }
 
 /// Map a model-space cell index through a signed-permutation rotation.
-///
-/// The subtlety is the sign. A rotation matrix applied to a *point* is
-/// just `R · p`, but a voxel is a *cell* spanning `[p, p+1)`, and
-/// reflecting that interval about the model's middle sends it to
-/// `[size-1-p, size-p)` — so a mirrored axis contributes `size-1-p`,
-/// not `-p`. Getting that wrong shifts the whole model one cell along
-/// every mirrored axis whenever that axis has an even size (for odd
-/// sizes the two formulas coincide, which is why every existing
-/// 1×1×1 test passed). Every 90°/180° rotation MagicaVoxel's UI
-/// produces has at least one negative row, and its default 40³
-/// workspace is even, so real files hit this constantly.
-///
-/// The pivot (`size / 2`, matching MagicaVoxel's `floor(size/2)`) is
-/// subtracted per output axis afterwards; the reflection above already
-/// keeps the model inside its own box, so the placement stays
-/// box-preserving for both parities.
+/// A voxel is a cell, so a mirrored axis contributes `size-1-p`, not
+/// `-p` — the point formula shifts even-sized models one cell.
 fn rotate_cell(rotation: [[i32; 3]; 3], p: [i32; 3], size: [i32; 3]) -> (i32, i32, i32) {
     let mut out = [0i32; 3];
     for (row, out_axis) in out.iter_mut().enumerate() {
@@ -823,18 +719,9 @@ fn parse_translation(s: &str) -> Option<(i32, i32, i32)> {
     Some((x, y, z))
 }
 
-/// Read an `nTRN` chunk's body. Returns `Some((id, node))` on
-/// success; `None` on malformed input (caller treats as no-op).
-///
-/// Layout (per vox-extension spec):
-/// - `i32` node id
-/// - DICT node attributes (we don't use them)
-/// - `i32` child node id
-/// - `i32` reserved (== -1)
-/// - `i32` layer id
-/// - `i32` num frames (≥ 1; we use frame 0)
-/// - per frame: DICT with optional `_r` (rotation byte string),
-///   `_t` (translation "x y z"), `_f` (frame index)
+/// Read an `nTRN` chunk's body, or `None` on malformed input, which the
+/// caller treats as a no-op. Only frame 0 is read; the layout is in the
+/// vox-extension spec.
 fn read_ntrn_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
@@ -857,11 +744,9 @@ fn read_ntrn_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, 
         let dict = read_vox_dict(reader)?;
         if f == 0 {
             if let Some(t_str) = dict.get("_t") {
-                // "_t" value format: "x y z" — three space-separated
-                // ints, taken all-or-nothing. Defaulting a single bad
-                // component to 0 would silently drag the subtree part
-                // of the way to the origin, which is harder to notice
-                // than it landing at the origin outright.
+                // The three components are taken all-or-nothing:
+                // defaulting one bad component to 0 drags the subtree
+                // part of the way to the origin, which is harder to spot.
                 match parse_translation(t_str) {
                     Some(t) => translation = t,
                     None => log::warn!(
@@ -912,13 +797,9 @@ fn read_ngrp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, 
     Ok(Some((node_id, SceneNode::Group { children })))
 }
 
-/// Read an `nSHP` chunk. Layout: `i32` node id + DICT + `i32` num
-/// models + N × {`i32` model id, DICT model-attrs}.
-///
-/// Several model ids means an animation (0.99.7+ keyframes), not
-/// several parts. Only the first is kept — placing all of them stacked
-/// every frame of an animated `.vox` into one blob, which is not what
-/// the file says. Same "first frame wins" rule as `read_ntrn_chunk`.
+/// Read an `nSHP` chunk. Several model ids mean an animation, not
+/// several parts, so only the first is kept — the same "first frame
+/// wins" rule `read_ntrn_chunk` follows.
 fn read_nshp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
@@ -955,10 +836,9 @@ pub struct VoxModel {
     pub voxels: Vec<(u8, u8, u8, u8)>, // x, y, z, color_index
     /// Color palette (256 colors, RGBA)
     pub palette: [[u8; 4]; 256],
-    /// Number of distinct world colors that didn't fit in the
-    /// 254-slot palette and were quantized to the nearest existing
-    /// entry. Caller can surface this in the UI so the user knows
-    /// the export was lossy. Always 0 for `read`-loaded models.
+    /// Distinct world colors that didn't fit the 254-slot palette and
+    /// were quantized, so the caller can report a lossy export. Always
+    /// 0 for a model that was read rather than written.
     pub palette_overflow: u32,
 }
 
@@ -1072,16 +952,12 @@ impl VoxModel {
                     idx
                 } else {
                     // Palette full — quantize to the nearest existing
-                    // entry. Track *distinct* lossy colors so the UI
-                    // can report something meaningful (multiple voxels
-                    // sharing the same lost color count as one).
+                    // entry. Distinct lossy colors are tracked, so many
+                    // voxels sharing one lost color count once.
                     overflow_colors.insert(color);
-                    // Only slots we actually filled are candidates.
-                    // Searching the whole 255 could snap a voxel to a
-                    // leftover default-palette color that appears
-                    // nowhere in this model — and slot 255 in
-                    // particular never gets written (`next_index < 255`)
-                    // yet still ships in the file.
+                    // Only slots we filled are candidates. Searching all
+                    // 255 could snap a voxel to a leftover default color
+                    // that appears nowhere in this model.
                     find_closest_color(&palette, color, next_index)
                 };
 
@@ -1201,14 +1077,9 @@ fn find_closest_color(palette: &[[u8; 4]; 256], color: [u8; 3], end: u8) -> u8 {
     best_index
 }
 
-/// Export world to VOX file. Returns the number of distinct world
-/// colors that didn't fit in the 254-slot palette and were quantized
-/// to the nearest existing entry — 0 means a lossless export.
-///
-/// When `convert_axes` is set the world is rotated from Voxelith's Y-up
-/// convention into MagicaVoxel's Z-up one (the inverse of the import
-/// conversion) so the exported model opens upright in MagicaVoxel; pass
-/// `false` to write voxel coordinates through verbatim.
+/// Export world to VOX. Returns how many distinct colors didn't fit the
+/// 254-slot palette and were quantized — 0 means lossless.
+/// `convert_axes` rotates Y-up into MagicaVoxel's Z-up.
 pub fn export_vox<W: Write>(
     world: &World,
     writer: &mut W,
@@ -1219,17 +1090,9 @@ pub fn export_vox<W: Write>(
     Ok(model.palette_overflow)
 }
 
-/// Import world from VOX file. Supports both v150 (single-model)
-/// and v200 (multi-model + scene graph) — v200 files are flattened
-/// into the unified `World` voxel grid, with each `nSHP`'s models
-/// placed at their cumulative `nTRN` transform along the path
-/// from the scene root.
-///
-/// When `convert_axes` is set (the interactive default) the flattened
-/// model is rotated from MagicaVoxel's Z-up convention into Voxelith's
-/// Y-up one, so a model that stands upright in MagicaVoxel stands upright
-/// here. Pass `false` to read coordinates through verbatim (e.g. for a
-/// file already authored Y-up).
+/// Import world from VOX (v150 or v200; v200 scenes are flattened).
+/// `convert_axes` rotates MagicaVoxel's Z-up into Y-up — pass `false`
+/// for a file already authored Y-up.
 pub fn import_vox<R: Read>(reader: &mut R, convert_axes: bool) -> Result<World, VoxError> {
     let scene = VoxScene::read(reader)?;
     Ok(scene.to_world(convert_axes))
@@ -1272,10 +1135,9 @@ mod tests {
 
     #[test]
     fn vox_axis_conversion_roundtrips_and_preserves_up() {
-        // A vertical pair (one voxel two cells above another) exercises
-        // orientation: exported with conversion it stands along MagicaVoxel's
-        // Z axis, and re-importing with conversion must bring the "up" voxel
-        // back *above* the base, not beside it.
+        // A vertical pair exercises orientation: exported with
+        // conversion it stands along MagicaVoxel's Z, and re-importing
+        // must put the upper voxel back above the base, not beside it.
         let mut world = World::new();
         let base = Voxel::from_rgb(200, 50, 50);
         let up = Voxel::from_rgb(50, 200, 50);
@@ -1455,13 +1317,9 @@ mod tests {
 
     #[test]
     fn rotation_keeps_a_model_inside_its_own_box() {
-        // The invariant that pins the cell-vs-point distinction: a
-        // rotation permutes the model's box onto itself, so a filled
-        // box must come out as the same filled box with axes permuted
-        // — never shifted. Treating a voxel as a point instead of a
-        // cell slid every mirrored *even*-length axis by one, which
-        // this catches for size 2 and 4 while leaving the odd sizes
-        // (where both formulas agree) as a control.
+        // A rotation permutes the box onto itself, so a filled box must
+        // come back the same with axes permuted, never shifted. Even
+        // sizes catch the point-vs-cell slip; odd sizes are the control.
         for size in [[2, 3, 4], [1, 1, 1], [4, 4, 4], [3, 3, 3]] {
             for byte in 0u8..=255 {
                 let Some(m) = decode_rotation_byte(byte) else {
@@ -1557,9 +1415,8 @@ mod tests {
     #[test]
     fn v200_places_a_shared_subtree_once_per_parent() {
         // The scene graph is a DAG: one part referenced from two
-        // transforms means that part appears twice. A global
-        // visited-once set silently dropped every appearance after the
-        // first.
+        // transforms appears twice. A global visited-once set silently
+        // dropped every appearance after the first.
         let mut chunks = build_unit_model(1);
         chunks.extend_from_slice(&build_rgba_chunk([255, 0, 0, 255]));
         // root nTRN 0 → nGRP 1 → { nTRN 2, nTRN 3 } → both to nSHP 10.
@@ -1632,10 +1489,9 @@ mod tests {
 
     #[test]
     fn chunk_with_trailing_fields_does_not_desync_the_stream() {
-        // A newer MagicaVoxel may append fields to a chunk we already
-        // know. Reading by our own idea of the layout instead of the
-        // chunk's declared length left the stream mid-chunk, and every
-        // header after it was garbage.
+        // A newer MagicaVoxel may append fields to a chunk we know.
+        // Reading by our own idea of the layout rather than the declared
+        // length left the stream mid-chunk and garbled every header after.
         let mut chunks = build_unit_model(1);
         chunks.extend_from_slice(&build_rgba_chunk([255, 0, 0, 255]));
         let mut ntrn = build_ntrn_content(0, 1, (5, 0, 0), None);
@@ -1726,10 +1582,9 @@ mod tests {
 
     #[test]
     fn rotation_compose_double_swap_is_identity() {
-        // Two consecutive 90° X-axis rotations (or any rotation
-        // composed with itself twice) should bring identity back
-        // for the involutive ones. Simple sanity: identity composed
-        // with anything = that thing.
+        // Two consecutive 90° X rotations bring identity back for the
+        // involutive ones, and identity composed with anything is that
+        // thing.
         let r = decode_rotation_byte(0x24).unwrap();
         let composed = rotation_compose(ROT_IDENTITY, r);
         assert_eq!(composed, r);
@@ -1738,15 +1593,9 @@ mod tests {
     #[test]
     #[allow(clippy::needless_range_loop)] // the row/col indices are part of the failure messages
     fn rotation_byte_never_panics_and_rejects_junk() {
-        // Every byte must be decodable or cleanly rejected — this test
-        // sweeps all 256, so a debug build would panic on the bad ones
-        // rather than fail an assert.
-        //
-        // Bits 0-3 pick the two column indices; only 6 of those 16
-        // pairs are legal (3 choices × 2 remaining), so 10 pairs × 16
-        // sign/spare-bit combinations = 160 bytes are rejected. The 64
-        // that used to panic outright are the subset where the columns
-        // differ but sum above 3, underflowing `3 - row1 - row2`.
+        // Every byte must decode or be cleanly rejected — this sweeps
+        // all 256. Only 6 of the 16 column pairs are legal, so 160 bytes
+        // are refused; 64 of those used to underflow instead.
         let mut rejected = 0;
         let mut underflow_shaped = 0;
         for b in 0u8..=255 {
@@ -1811,12 +1660,9 @@ mod tests {
 
     #[test]
     fn v200_ntrn_translation_offsets_single_model() {
-        // Minimal v200 file:
-        //   model 0: 1×1×1 voxel at (0,0,0) color idx 1
-        //   nTRN id=0 (root) → child=1, translation (5, 0, 0)
-        //   nGRP id=1 → child=2
-        //   nSHP id=2 → model 0
-        // Expect: voxel placed at world (5, 0, 0).
+        // Minimal v200 file: one 1³ voxel in model 0, reached through a
+        // root nTRN translating (5, 0, 0) → nGRP → nSHP, so the voxel
+        // must land at world (5, 0, 0).
         let mut chunks = Vec::new();
 
         // SIZE
@@ -1914,17 +1760,8 @@ mod tests {
 
     #[test]
     fn v200_multi_model_with_separate_translations() {
-        // Two 1×1×1 models (red + blue), each in its own nSHP,
-        // both children of a single nGRP under a root nTRN. Each
-        // shape is wrapped in its own nTRN with a different
-        // translation.
-        //
-        //   nTRN id=0 (root, identity) → child=1
-        //   nGRP id=1 → children=[2, 4]
-        //   nTRN id=2 → child=3, translate (10, 0, 0)
-        //   nSHP id=3 → model 0 (red)
-        //   nTRN id=4 → child=5, translate (-10, 0, 0)
-        //   nSHP id=5 → model 1 (blue)
+        // Two 1³ models under one nGRP, each wrapped in its own nTRN
+        // translating +10 and -10 along X, so both placements appear.
         let mut chunks = Vec::new();
 
         // Two models

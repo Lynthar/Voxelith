@@ -1,11 +1,6 @@
-//! Wireframe AABB rendering for the box-select tool.
-//!
-//! Renders the 12 edges of an axis-aligned box as `LineList` primitives
-//! through the existing `LinePipeline` (so it shares the grid/axis
-//! depth + blend rules). Unlike `GridMesh` / `AxisMesh` which build
-//! once at startup, `SelectionMesh` rebuilds whenever the selection
-//! AABB changes — 24 vertices is small enough that the cost is
-//! negligible per frame.
+//! Wireframe AABB for the box-select tool: twelve edges through the
+//! shared `LinePipeline`, rebuilt whenever the selection changes — 24
+//! vertices is small enough for that to be free.
 
 use bytemuck::cast_slice;
 use wgpu::util::DeviceExt;
@@ -25,12 +20,9 @@ const CENTER_COLOR: [f32; 4] = [0.2, 0.95, 1.0, 1.0];
 /// `editor::transform`'s "min stays put" convention).
 const ANCHOR_COLOR: [f32; 4] = [1.0, 0.5, 0.1, 1.0];
 
-/// 12-edge wireframe mesh covering one closed-AABB selection.
-///
-/// The mesh extends from `min` to `max + 1` in world units so the
-/// rendered box envelops the *outer faces* of the corner cells.
-/// (A selection containing one cell at `(3, 3, 3)` spans the cube
-/// from `(3, 3, 3)` to `(4, 4, 4)` in world space.)
+/// Twelve-edge wireframe covering one closed-AABB selection. It extends
+/// from `min` to `max + 1`, so the box envelops the outer faces of the
+/// corner cells rather than cutting through them.
 pub struct SelectionMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub vertex_count: u32,
@@ -96,19 +88,9 @@ fn build_aabb_lines(min: (i32, i32, i32), max: (i32, i32, i32)) -> Vec<LineVerte
     ]
 }
 
-/// Center crosshair + min-corner anchor tripod for a selection AABB.
-///
-/// - **Center crosshair** (cyan): three axis-aligned segments through
-///   the box's geometric center — the mirror plane's center and where
-///   `Frame Sel.` aims. Arm length scales with the smallest box extent,
-///   clamped so it stays readable for both 1-cell and large selections.
-/// - **Anchor tripod** (orange): three short legs from the `sel.min`
-///   corner along +X/+Y/+Z — the corner a 90° rotation keeps fixed.
-///
-/// Returns 12 vertices (6 per marker), appended after the 24 box-edge
-/// vertices. Shares the box's `LinePipeline` (depth-test on / write
-/// off), so a marker tucked inside solid voxels is occluded like the
-/// box edges — visible whenever its cell isn't behind geometry.
+/// Two markers for a selection AABB: a cyan crosshair at the center the
+/// mirror and framing use, and an orange tripod at the `min` corner a
+/// rotation keeps fixed. Twelve vertices, after the box's own 24.
 fn build_markers(min: (i32, i32, i32), max: (i32, i32, i32)) -> Vec<LineVertex> {
     let x0 = min.0 as f32;
     let y0 = min.1 as f32;

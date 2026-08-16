@@ -1,10 +1,6 @@
-//! Feedback: what the document contains, and what one plane of it
-//! looks like.
-//!
-//! An agent editing blind needs a cheap way to check its own work. Two
-//! views, both text: [`describe`] is the summary (how much, how big,
-//! what colors), [`slice`] is one plane as ASCII art, which is what
-//! actually catches "the door is one cell too high".
+//! Feedback for an agent editing blind: [`describe`] summarizes the
+//! document, [`slice`] renders one plane as ASCII art — which is what
+//! catches "the door is one cell too high".
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -32,15 +28,9 @@ pub struct Description {
     pub voxel_count: u64,
     pub chunk_count: usize,
     pub world_aabb: Option<Aabb>,
-    /// `world_aabb` as extents, since "how big is it" is the question
-    /// the AABB is usually standing in for.
-    ///
-    /// `i64` because it is a *difference* of two coordinates: everything
-    /// this tool writes stays inside ±[`MAX_COORD`](super::MAX_COORD),
-    /// but a `.vxlt` is an external file, and a span wider than `i32`
-    /// used to overflow here rather than be reported. The extra width
-    /// costs nothing on the wire — every real document's extents fit in
-    /// three digits.
+    /// `world_aabb` as extents. `i64` because it is a difference of two
+    /// coordinates: a `.vxlt` is an external file, and a span wider than
+    /// `i32` used to overflow here rather than be reported.
     pub size: Option<[i64; 3]>,
     /// The most common colors, most first.
     pub colors: Vec<ColorCount>,
@@ -60,12 +50,9 @@ pub struct Description {
     /// document is too big to measure cheaply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structure: Option<Structure>,
-    /// The document's pipeline graph, whole, when it has one.
-    ///
-    /// Whole rather than summarized because it is small (a graph is
-    /// capped at 64 nodes) and because reading it back is what makes
-    /// editing one possible: an agent can take this, change a parameter
-    /// or a wire, and send it straight back as a `graph` op.
+    /// The document's pipeline graph, whole, when it has one. Whole
+    /// because it is small and because reading it back is what makes
+    /// editing one possible.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph: Option<PipelineGraph>,
 }
@@ -116,31 +103,19 @@ pub enum SliceMode {
 /// telling an agent anything the count didn't.
 const MAX_LOOSE_PARTS: usize = 8;
 
-/// Bounding-box cells above which the air sweep is skipped.
-///
-/// Unlike the solid passes, this one's cost tracks the *bounding box*,
-/// not the model: two voxels a thousand cells apart are a cheap model
-/// and a billion-cell box. Bounded separately for that reason.
+/// Bounding-box cells above which the air sweep is skipped. Unlike the
+/// solid passes, this one's cost tracks the bounding box rather than
+/// the model: two distant voxels are a billion-cell box.
 const MAX_AIR_CELLS: u64 = 8_000_000;
 
-/// Voxels above which the structural pass is skipped.
-///
-/// It is three linear passes with hash lookups per neighbor, which is
-/// nothing on a model and real work on a scene. `describe` is answered
-/// on the editor's main thread when an agent is driving the in-editor
-/// bridge, so a document big enough to stutter it reports `null` and
-/// says why rather than freezing the person watching.
+/// Voxels above which the structural pass is skipped. `describe` runs
+/// on the editor's main thread when the in-editor bridge is driving, so
+/// a document big enough to stutter it reports `null` and says why.
 const MAX_STRUCTURE_VOXELS: u64 = 2_000_000;
 
-/// Deterministic measurements of the shape itself — what an agent can't
-/// reliably read off a rendered view.
-///
-/// Every number here is a measurement, not a verdict. Three connected
-/// components is wrong for a sword and right for a forest; a floating
-/// part is a bug in a chair and the whole point of a tree canopy. The
-/// judgment belongs to whoever asked for the model. What this removes
-/// is the guessing: "are those two towers actually joined" has an exact
-/// answer, and no isometric render reliably gives it.
+/// Deterministic measurements of the shape itself. Every number is a
+/// measurement, never a verdict — three components is wrong for a sword
+/// and right for a forest. The judgment belongs to whoever asked.
 #[derive(Debug, Clone, Serialize)]
 pub struct Structure {
     /// Connected components under 6-connectivity (faces only — two
@@ -161,22 +136,13 @@ pub struct Structure {
     /// Mirror mismatch per axis, measured across the scene bounding
     /// box's own midplane.
     pub symmetry: [SymmetryCheck; 3],
-    /// Solid cells resting on the lowest layer of the scene — how much
-    /// of the model actually touches the ground.
-    ///
-    /// What tells an arch from a wall. Both can be one connected piece
-    /// with nothing floating and the same bounding box; the arch stands
-    /// on two piers and the wall stands on everything.
+    /// Solid cells resting on the lowest layer — what tells an arch
+    /// from a wall. Both can be one connected piece with the same
+    /// bounding box; the arch stands on two piers.
     pub footprint: u64,
-    /// Air the model completely encloses: sealed rooms, and bubbles
-    /// that would ship inside an exported mesh. `None` when the
-    /// bounding box is too large to sweep.
-    ///
-    /// Distinct from `enclosed`, which counts *solid* cells with no
-    /// exposed face. A hollow crate has no enclosed solids and one
-    /// cavity; a solid crate has enclosed solids and no cavity. And
-    /// distinct again from open space like the gap under an arch, which
-    /// reaches the outside and is therefore not a cavity at all.
+    /// Air the model completely encloses — sealed rooms and bubbles.
+    /// Distinct from `enclosed`, which counts solid cells, and from open
+    /// space like an arch's gap, which reaches the outside.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cavities: Option<Cavities>,
 }
@@ -194,13 +160,9 @@ pub struct LoosePart {
     pub aabb: Aabb,
 }
 
-/// How close the model is to symmetric about one axis.
-///
-/// Cell semantics, not point semantics: a voxel is the cell `[p, p+1)`,
-/// so the reflection of `p` across a box is `min + max - p`. Using the
-/// point formula would report every even-sized model as asymmetric by
-/// its whole width — the same off-by-one `io::vox::rotate_cell` exists
-/// to avoid.
+/// How close the model is to symmetric about one axis. Cell semantics:
+/// a voxel is `[p, p+1)`, so `p` reflects to `min + max - p`. The point
+/// formula reports every even-sized model as fully asymmetric.
 #[derive(Debug, Clone, Serialize)]
 pub struct SymmetryCheck {
     pub axis: &'static str,
@@ -238,10 +200,8 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
 
     let mut components = components_of(&solids);
     // Biggest first, then by position so equal-sized parts don't
-    // reorder between runs (the set iteration is a HashSet). Both
-    // corners, because two parts can share a `min` — an L and its
-    // mirror image do — and a key that ties is a key that lets the
-    // hash order through.
+    // reorder between runs. Both corners, because two parts can share a
+    // `min` — an L and its mirror do — and a tie lets hash order in.
     components.sort_unstable_by(|a, b| {
         b.voxels
             .cmp(&a.voxels)
@@ -271,12 +231,9 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
     let bounds = [(min.0, max.0), (min.1, max.1), (min.2, max.2)];
     let symmetry = axes.map(|(name, index)| {
         let (low, high) = bounds[index];
-        // `min + max - p` in i64. A `.vxlt` is an external file and can
-        // hold coordinates the ops path would have refused, and two of
-        // them added together overflowed i32 here — in the editor, on
-        // the thread that draws. A reflection that lands outside i32
-        // names no cell, so it counts as a mismatch, which is the same
-        // answer as landing on air.
+        // `min + max - p` in i64: a `.vxlt` can hold coordinates the ops
+        // path would refuse, and two of them overflowed i32 here. A
+        // reflection outside i32 names no cell, so it counts as a miss.
         let reflect = |p: i32| i32::try_from(low as i64 + high as i64 - p as i64).ok();
         let mismatched = solids
             .iter()
@@ -294,12 +251,9 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
         SymmetryCheck {
             axis: name,
             mismatched,
-            // Six places, not four: the structural pass runs on up to
-            // two million voxels, and at four a single mismatched cell
-            // in more than ten thousand rounds to `0.0` — a number an
-            // agent reads as "symmetric" when `mismatched` says
-            // otherwise two lines up. Six covers the whole range this
-            // pass will ever measure.
+            // Six places, not four: this pass runs on up to two million
+            // voxels, and at four a single mismatch in ten thousand
+            // rounds to `0.0` while `mismatched` says otherwise.
             ratio: ((mismatched as f64 / voxel_count as f64) * 1_000_000.0).round() / 1_000_000.0,
         }
     });
@@ -319,15 +273,9 @@ pub fn structure(world: &World, voxel_count: u64) -> Option<Structure> {
     })
 }
 
-/// Air inside the bounding box that never reaches its surface.
-///
-/// The sweep runs inside the box only, so "reaches the outside" is
-/// "reaches a face of the box" — the gap under an arch qualifies and is
-/// correctly not a cavity, while a sealed room does not and is.
-///
-/// `None` when the box is too big to walk: the cost here is the box,
-/// not the model, so a sparse scene spanning a thousand cells is
-/// expensive in a way its voxel count never shows.
+/// Air inside the bounding box that never reaches its surface — a
+/// sealed room counts, the gap under an arch doesn't. `None` when the
+/// box is too big to walk; the cost is the box, not the model.
 fn sealed_air(
     solids: &HashSet<(i32, i32, i32)>,
     min: (i32, i32, i32),
@@ -429,14 +377,8 @@ pub(super) fn solid_voxel_count(world: &World) -> u64 {
 }
 
 /// The parts of a document a description is built from, borrowed from
-/// whoever owns them.
-///
-/// [`AgentSession`](super::AgentSession) keeps all four together; the
-/// editor keeps them on three different structs, because a selection and
-/// an undo stack were its own long before an agent had any use for them.
-/// Describing takes a view rather than a session so neither host has to
-/// pretend to be the other — the same reason
-/// [`run_batch`](super::run_batch) takes a world instead of owning one.
+/// whoever owns them. A view rather than a session, so neither host has
+/// to pretend to be the other.
 pub struct DocumentView<'a> {
     pub world: &'a World,
     pub selection: Option<Selection>,
@@ -529,13 +471,9 @@ pub fn slice(world: &World, request: &SliceRequest) -> Result<String, OpsError> 
     let (left, right) = axis_range(region, across);
     let (near, far) = axis_range(region, down);
 
-    // i64, and only then compared: `region` is a bare `[i32; 3]` pair
-    // that reaches here without passing `check_coord` (the ops path's
-    // ceiling lives in `compile`, and a region defaulted from the scene
-    // comes out of the file), so a span of four billion cells used to
-    // overflow this subtraction *before* the limit below could refuse
-    // it — and in the editor's bridge that panic lands on the frame
-    // loop's own thread.
+    // i64 before the comparison: `region` reaches here without passing
+    // `check_coord`, so a span of four billion cells overflowed this
+    // subtraction before the limit below could refuse it.
     let width = right as i64 - left as i64 + 1;
     let height = far as i64 - near as i64 + 1;
     if width > MAX_SLICE_SIDE as i64 || height > MAX_SLICE_SIDE as i64 {
@@ -547,13 +485,9 @@ pub fn slice(world: &World, request: &SliceRequest) -> Result<String, OpsError> 
         ));
     }
 
-    // Vertical views read like an elevation drawing: the top row is the
-    // highest Y. A top-down view reads like a map: the first row is the
-    // lowest Z. Either way the header states the row order rather than
-    // leaving the agent to guess it.
-    // The vertical axis of the image is Y for an elevation and Z for a
-    // map. `down == 1` means the rows run along Y, which is the
-    // elevation case — the one that reads top-down, highest row first.
+    // Vertical views read like an elevation, highest row first;
+    // top-down views read like a map, lowest Z first. `down == 1` is the
+    // elevation case, and the header states the row order either way.
     let elevation = down == 1;
     let rows: Vec<i32> = if elevation {
         (near..=far).rev().collect()
@@ -725,9 +659,8 @@ mod tests {
     }
 
     /// `enclosed`, `cavities` and open space are three different things
-    /// that all get called "hollow", and a case that reaches for the
-    /// wrong one fails correct work. Stated as one test so the contrast
-    /// is in one place.
+    /// that all get called "hollow", and a case reaching for the wrong
+    /// one fails correct work. One test, so the contrast is in one place.
     #[test]
     fn enclosed_solids_sealed_air_and_open_space_are_three_different_readings() {
         let cube = |n: i32| {
@@ -958,9 +891,8 @@ mod tests {
     }
 
     /// The width is a difference of two `i32`s that never went through
-    /// `check_coord`, so a region four billion cells wide has to be
-    /// *refused* rather than wrap into a small positive number and be
-    /// waved through — the wrap used to panic on the subtraction first.
+    /// `check_coord`, so a four-billion-cell region must be refused
+    /// rather than wrap into a small positive number.
     #[test]
     fn a_slice_wider_than_i32_is_refused_rather_than_wrapping() {
         let session = wall();
@@ -974,11 +906,9 @@ mod tests {
 
     // -------- coordinates a `.vxlt` can hold and the ops path cannot --------
 
-    /// `MAX_COORD` bounds what an *op* may write; it says nothing about
-    /// what an opened file holds. Every measurement below reads the
-    /// world as it found it, and each used to do its arithmetic in i32
-    /// — which the editor's bridge runs on the frame loop's own thread,
-    /// so the panic took the editor and its unsaved work with it.
+    /// `MAX_COORD` bounds what an *op* may write, not what an opened
+    /// file holds. Every measurement reads the world as it found it, on
+    /// the frame loop's own thread when the bridge is driving.
     #[test]
     fn a_span_wider_than_i32_is_reported_rather_than_wrapped() {
         let mut session = AgentSession::new();
@@ -1015,10 +945,9 @@ mod tests {
         assert_eq!(x.mismatched, 0);
     }
 
-    /// A cell sitting on `i32::MAX` has no neighbor past it. Three
-    /// separate walks step to a neighbor here — the component flood, the
-    /// enclosure test and the sealed-air flood — and all three read "no
-    /// such cell" rather than overflowing to find out.
+    /// A cell on `i32::MAX` has no neighbor past it. Three walks step to
+    /// a neighbor here — component flood, enclosure test, sealed-air
+    /// flood — and all three read "no such cell" rather than overflow.
     #[test]
     fn a_cell_at_the_edge_of_i32_has_no_neighbour_past_it() {
         let mut session = AgentSession::new();

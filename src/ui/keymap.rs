@@ -1,21 +1,6 @@
-//! The single source for tool and chord descriptors.
-//!
-//! Four consumers used to carry their own copy of this information —
-//! the toolbar's buttons, the Tools panel's labels, the help window's
-//! table, and the keyboard dispatch — and they drifted: an audit found
-//! four live mismatches between what a surface said and what the code
-//! did. Each row here feeds all of its consumers, so a new tool or
-//! chord is one entry, and the help window can no longer promise a
-//! binding the dispatcher doesn't have.
-//!
-//! Deliberately NOT in these tables: the number keys (they mirror
-//! `Tool`'s declaration order and are printed from `Tool::shortcut`),
-//! and the stateful bindings — R / M / F / arrows / Esc / Delete —
-//! whose behavior depends on what is selected or in flight. A table
-//! row can say "key → action"; it can't say "unless a shape gesture is
-//! mid-Height", and pretending otherwise would move the truth back out
-//! of the table. Camera bindings live in `CameraController`. The
-//! README's key list remains hand-maintained prose.
+//! The single source for tool and chord descriptors: each row feeds the
+//! toolbar, the Inspector, the help window and the dispatch. Stateful
+//! bindings stay out — a row can't say "unless a gesture is in flight".
 
 use winit::keyboard::KeyCode;
 
@@ -23,17 +8,14 @@ use crate::editor::Tool;
 
 use super::panels::UiAction;
 
-/// One toolbar / inspector / help entry for a tool. Name and shortcut
-/// come from [`Tool`] itself, the icon from `icons::paint_tool_icon`
-/// (a match total over `Tool`, so a new tool can't reach the toolbar
-/// without one) — this row adds only what neither carries: the
-/// long-form usage note and the toolbar grouping.
+/// One toolbar, Inspector and help entry for a tool. Name and shortcut
+/// come from [`Tool`] and the icon from `icons`, so this row adds only
+/// the usage note and the toolbar grouping.
 pub struct ToolSpec {
     pub tool: Tool,
-    /// How the tool is used. The toolbar shows it on hover and the
-    /// Inspector prints it as the tool's hint line — one string for
-    /// both, so they can't disagree. Empty for tools whose name says
-    /// it all.
+    /// How the tool is used: the toolbar shows it on hover and the
+    /// Inspector as its hint line, one string for both. Empty for tools
+    /// whose name says it all.
     pub note: &'static str,
     /// Draw a group separator above this button (brush / shape /
     /// select / socket sections).
@@ -107,11 +89,9 @@ pub enum HelpSection {
     File,
 }
 
-/// One command chord: platform primary modifier + `key` (+ shift per
-/// `shift`), dispatching `make()` through the same `UiAction` queue
-/// the menus use. `chord_label` is written with "Ctrl" — the help
-/// window's macOS banner says "use ⌘ wherever Ctrl is shown" once,
-/// instead of every row saying it twice.
+/// One command chord: the platform modifier plus `key`, dispatched
+/// through the same `UiAction` queue the menus use. Labels say "Ctrl" —
+/// the help window's macOS banner translates it once for every row.
 pub struct ChordSpec {
     pub key: KeyCode,
     /// `Some(true)`: fires only with Shift held; `Some(false)`: only

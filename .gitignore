@@ -6,8 +6,9 @@
 .claude/*
 !.claude/skills/
 CLAUDE.md
-# Local design records, same standing decision as CLAUDE.md: a plan
-# document in the tracked tree silently drifts from the code.
+# Local design records, same standing decision as CLAUDE.md: a document
+# in the tracked tree silently drifts from the code it describes.
 ARCHITECTURE_CONVERGENCE.md
+/docs/design/
 # Eval run artifacts: the cases are the asset, a given run is not.
 /evals/runs

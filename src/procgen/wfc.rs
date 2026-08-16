@@ -1,20 +1,6 @@
-//! Wave Function Collapse generator for tile-based level layouts.
-//!
-//! 2D collapse on a tile grid (X-Z plane). Each grid cell occupies a
-//! `TILE_SIZE³` voxel block. Tiles connect at face boundaries via
-//! integer connector IDs. Two touching faces fit when one's connector is
-//! the *complement* of the other's: symmetric IDs are self-complement
-//! (like matches like), while the directional doorway pair (mouth `2` /
-//! floor socket `3`) complements only each other. The grid boundary
-//! counts as connector `0`, so nothing opens off the edge. Y is
-//! unconstrained: every tile fills the same Y range, so we don't collapse
-//! vertically.
-//!
-//! No backtracking. If propagation reduces a cell's domain to empty
-//! we substitute the fallback (`empty`) tile during output. Quality
-//! degrades gracefully for over-constrained tilesets but the generator
-//! always terminates — important so a UI preview can run it on every
-//! parameter change without risking a hang.
+//! Wave Function Collapse for tile layouts: 2D collapse on an X-Z grid
+//! of `TILE_SIZE³` blocks, tiles fitting by connector complement.
+//! Non-backtracking — an over-constrained cell falls back to `empty`.
 
 use std::time::Duration;
 
@@ -40,10 +26,8 @@ pub struct Tile {
     /// adjacent tiles match when one's outgoing-face connector equals
     /// the other's incoming-face connector.
     pub connectors: [u8; 4],
-    /// Voxel data for each cell, layout `x + y*S + z*S*S`.
-    /// `Voxel::AIR` means empty. Per-cell colors let a single tile
-    /// hold multiple materials (e.g. City's road_x has both asphalt
-    /// and sidewalk strips).
+    /// Voxel data for each cell, laid out `x + y*S + z*S*S`; `AIR` means
+    /// empty. Per-cell colors let one tile hold several materials.
     pub cells: [Voxel; TILE_VOLUME],
     /// Selection weight. Higher → appears more often.
     pub weight: f32,
@@ -55,10 +39,8 @@ pub struct Tileset {
     pub tiles: Vec<Tile>,
 }
 
-/// Tilesets the WFC generator can dispatch to. Each variant is a
-/// distinct visual / structural theme. New themes go here +
-/// [`Self::build`] + [`Self::label`]; UI dropdowns pick from
-/// [`Self::ALL`].
+/// Tilesets the generator can dispatch to. A new theme goes here plus
+/// [`Self::build`] and [`Self::label`]; dropdowns read [`Self::ALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum WfcTileset {
     /// Stone walls, floors, T-junctions, doorways. Single ground
@@ -90,21 +72,9 @@ impl WfcTileset {
     }
 }
 
-/// 19-tile dungeon tileset: empty / floor / 2 straight walls / 4 corners /
-/// 4 T-junctions / 1 cross / 2 walls-with-door / 4 floor-with-door-mouth.
-/// Connector IDs (matched by complement — see the module docs):
-/// - `0` = "open" (no wall on that face — fits any other `0`, including
-///   the grid boundary)
-/// - `1` = "wall" (wall continues across the face — only other walls fit)
-/// - `2` = "doorway mouth" (a wall's open door side; complemented only by
-///   `3`, so a mouth must seat against a door-socket floor and can
-///   never face another mouth or the grid edge)
-/// - `3` = "doorway socket" (the floor side that receives a door mouth;
-///   carried by the `floor_door_*` tiles)
-///
-/// Floor is weighted heaviest so output is mostly open ground;
-/// T-junctions, cross, and door tiles are progressively rarer to keep
-/// dense intersections and doorways from dominating.
+/// 19-tile dungeon tileset: empty, floor, two walls, four corners, four
+/// T-junctions, a cross, two walls with doors and four door-mouth
+/// floors. Connectors: 0 open, 1 wall, 2 door mouth, 3 door socket.
 fn dungeon_tileset() -> Tileset {
     let mut tiles = Vec::with_capacity(19);
     let stone = Voxel::from_rgb(140, 140, 140);
@@ -205,12 +175,9 @@ fn dungeon_tileset() -> Tileset {
         weight: 0.5,
     });
 
-    // Doorway tiles: same wall geometry as `wall_x` / `wall_z` but with
-    // a 2-wide × 2-tall portal carved through the middle so the player
-    // can pass through. The mouth-side faces use connector ID 2 instead
-    // of 0, which (via constraint propagation) requires the cells the
-    // door opens into to be `floor_door_*` variants — guaranteeing the
-    // door always leads onto floor and never into `empty`.
+    // Doorway tiles: `wall_x` / `wall_z` geometry with a 2×2 portal
+    // carved through. The mouth faces carry connector 2, which forces
+    // the cells they open into to be `floor_door_*` variants.
     tiles.push(Tile {
         name: "wall_x_with_door",
         connectors: [1, 1, 2, 2],
@@ -224,14 +191,9 @@ fn dungeon_tileset() -> Tileset {
         weight: 0.5,
     });
 
-    // Floor-with-door-socket: identical geometry to plain floor, but
-    // exposes the door-socket connector 3 on exactly one face — the
-    // complement of a wall's door mouth (2), so a door always seats
-    // against one of these and opens onto walkable floor. Four directional
-    // variants cover the four cardinal directions a door can open in.
-    // Weight is low — these tiles only need to be available when a door
-    // forces them; otherwise plain floor (weight 4.0) overwhelmingly wins
-    // the weighted sample.
+    // Floor with a door socket: plain floor geometry exposing connector
+    // 3 on one face, the complement of a wall's mouth. Low weight, so
+    // these appear only where a door forces them.
     for (name, connectors) in [
         ("floor_door_px", [3u8, 0, 0, 0]),
         ("floor_door_nx", [0, 3, 0, 0]),
@@ -252,10 +214,9 @@ fn dungeon_tileset() -> Tileset {
     }
 }
 
-/// `wall_x` geometry with a 2-wide × 2-tall portal carved out of the
-/// central pillar. The wall above (y∈{2,3}) and the door-jambs at
-/// x∈{0,3} stay solid so the surrounding wall reads as continuous —
-/// the carved opening is just at standing height.
+/// `wall_x` geometry with a 2×2 portal carved out of the central
+/// pillar. The wall above and the jambs at x∈{0,3} stay solid, so the
+/// opening reads as a door in a continuous wall.
 fn wall_with_door_pattern_x(color: Voxel) -> [Voxel; TILE_VOLUME] {
     let mut p = wall_pattern(true, true, false, false, color);
     for y in 0..2 {
@@ -283,14 +244,9 @@ fn wall_with_door_pattern_z(color: Voxel) -> [Voxel; TILE_VOLUME] {
     p
 }
 
-/// 13-tile city tileset: a grass plot, two straight roads, four L
-/// corners, four T-junctions, a 4-way intersection, and a small
-/// building. Connector IDs are simpler than Dungeon — `0` = grass-
-/// side (matches ground / building / road's non-road faces), `1` =
-/// road-side (asphalt strip continues out this face). Roads
-/// automatically network into grids; buildings only sit next to
-/// grass / road-sidewalk faces (no risk of one ending up in the
-/// middle of an intersection — connector mismatch).
+/// 13-tile city tileset: grass, two straight roads, four corners, four
+/// T-junctions, a crossing and a building. Connector 0 is a grass side
+/// and 1 a road side, so roads network into grids on their own.
 fn city_tileset() -> Tileset {
     let grass = Voxel::from_rgb(76, 153, 0);
     let asphalt = Voxel::from_rgb(50, 50, 50);
@@ -313,10 +269,9 @@ fn city_tileset() -> Tileset {
         weight: 6.0,
     });
 
-    // Roads: straight + 4 corners + 4 T + 1 cross. Each is built
-    // by `road_y0_pattern` from the four flags marking which faces
-    // the asphalt strip exits.
-    // (name, connectors, which faces the asphalt strip exits, weight).
+    // Roads: straight, four corners, four T and one cross, each built by
+    // `road_y0_pattern` from the flags marking which faces the asphalt
+    // exits. (name, connectors, exits, weight).
     type RoadSpec = (&'static str, [u8; 4], (bool, bool, bool, bool), f32);
     #[rustfmt::skip] // hand-aligned columns: the flag grid IS the road shape
     let road_specs: &[RoadSpec] = &[
@@ -341,10 +296,9 @@ fn city_tileset() -> Tileset {
         });
     }
 
-    // Building: grass plot at y=0, solid 2×2 brick cube rising the
-    // full tile height above. Looks like a small hut from afar; with
-    // building weight ~14% relative to grass at ~43%, layouts get a
-    // sparse scatter of buildings instead of a dense urban core.
+    // Building: grass at y=0 under a solid 2×2 brick cube. Its weight
+    // against grass keeps layouts a sparse scatter rather than a dense
+    // urban core.
     let mut building_cells = grass_only;
     for y in 1..TILE_SIZE {
         for z in 1..3 {
@@ -366,12 +320,9 @@ fn city_tileset() -> Tileset {
     }
 }
 
-/// Build the y=0 layer of a road / corner / T / cross / intersection
-/// tile. Asphalt fills a 2×2 central pad plus a 2-wide strip
-/// extending to each enabled face; the rest of the perimeter (cells
-/// with `x ∈ {0, 3}` or `z ∈ {0, 3}`) becomes sidewalk; everything
-/// else stays grass. With no flags set, the function returns pure
-/// grass — useful as the building tile's base layer.
+/// Build the y=0 layer of a road tile. Asphalt fills a 2×2 pad plus a
+/// strip to each enabled face, the remaining perimeter becomes
+/// sidewalk, and the rest stays grass. No flags gives pure grass.
 fn road_y0_pattern(
     px: bool,
     nx: bool,
@@ -424,10 +375,8 @@ fn road_y0_pattern(
         }
     }
 
-    // Sidewalk: any perimeter cell that didn't become asphalt. The
-    // perimeter cells are those at x ∈ {0, 3} or z ∈ {0, 3}; whatever
-    // grass cells remain in that ring become sidewalk so the road
-    // appears framed by walkway, even on faces with no road exit.
+    // Sidewalk: whatever perimeter cells didn't become asphalt, so the
+    // road stays framed by walkway even on faces with no exit.
     for x in 0..TILE_SIZE {
         for z in 0..TILE_SIZE {
             let on_perimeter = x == 0 || x == TILE_SIZE - 1 || z == 0 || z == TILE_SIZE - 1;
@@ -445,11 +394,9 @@ fn idx(x: usize, y: usize, z: usize) -> usize {
     x + y * TILE_SIZE + z * TILE_SIZE * TILE_SIZE
 }
 
-/// Wall pattern with optional 1-tile-thick extensions reaching to the
-/// `+X / -X / +Z / -Z` face. A central pillar (x∈{1,2}, z∈{1,2}) is
-/// always present so all extensions meet cleanly. Used for the 2
-/// straight walls and the 4 corners. Solid cells are filled with
-/// `color`; the rest stay `Voxel::AIR`.
+/// Wall pattern with optional extensions reaching each face. The
+/// central pillar is always present so extensions meet cleanly. Solid
+/// cells take `color`; the rest stay air.
 fn wall_pattern(px: bool, nx: bool, pz: bool, nz: bool, color: Voxel) -> [Voxel; TILE_VOLUME] {
     let mut p = [Voxel::AIR; TILE_VOLUME];
 
@@ -515,10 +462,9 @@ impl Cell {
 
 /// WFC parameters and the entry point implementing `VoxelGenerator`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-// Every field defaults, so a partial set of parameters is a legal
-// one: the agent-ops registry merges what a caller named over
-// these, a graph node spells out only what it wants to differ,
-// and a `.vxlt` written before a field existed still loads.
+// Every field defaults, so a partial set of parameters is legal: the
+// registry merges what a caller named over these, and a `.vxlt` written
+// before a field existed still loads.
 #[serde(default)]
 pub struct WfcGenerator {
     pub seed: u32,
@@ -567,12 +513,9 @@ impl VoxelGenerator for WfcGenerator {
                 "tileset must have 1..=64 tiles".into(),
             ));
         }
-        // Propagation packs the connectors a cell can expose into a
-        // `u32` bitset (`1u32 << connector`), so an id past 31 would
-        // shift out of range — a debug-build panic, or silently wrong
-        // adjacency in release. The built-in tilesets use 0..=3, but
-        // that's a fact about today's data, not something the code
-        // enforced anywhere.
+        // Propagation packs connectors into a `u32` bitset, so an id
+        // past 31 would shift out of range. The built-in tilesets use
+        // 0..=3, but nothing enforced that.
         if let Some(tile) = tileset
             .tiles
             .iter()
@@ -604,11 +547,9 @@ impl VoxelGenerator for WfcGenerator {
 
         let weights: Vec<f32> = tileset.tiles.iter().map(|t| t.weight).collect();
 
-        // Treat the grid boundary as connector 0: any face pointing off
-        // the grid must carry connector 0, so wall ends and door mouths
-        // can't open into the void past the edge (#32). Filter each border
-        // cell's domain up front, then propagate the fallout inward so the
-        // interior is arc-consistent before the first observation.
+        // Treat the grid boundary as connector 0, so wall ends and door
+        // mouths can't open into the void. Filter the border domains
+        // first, then propagate inward before the first observation.
         {
             let tiles = &tileset.tiles;
             let mut seeded: Vec<usize> = Vec::new();
@@ -662,11 +603,9 @@ impl VoxelGenerator for WfcGenerator {
         for cz in 0..d {
             for cx in 0..w {
                 let cell_i = cz * w + cx;
-                // Either the unique chosen tile or fallback to `empty`
-                // (index 0) when the domain ended up empty. Empty
-                // domains are an over-constrained outcome of the
-                // forward-only solver — we count them so the UI can
-                // surface a warning.
+                // The chosen tile, or `empty` when the domain ended up
+                // empty — an over-constrained outcome of the
+                // forward-only solver, counted so the UI can warn.
                 let tile_i = if cells[cell_i].count() == 1 {
                     cells[cell_i].iter_allowed().next().unwrap()
                 } else {
@@ -709,14 +648,9 @@ impl VoxelGenerator for WfcGenerator {
     }
 }
 
-/// Pick the uncollapsed cell with the smallest non-empty domain. Ties
-/// broken randomly so the output isn't biased toward a corner.
-///
-/// Scans the whole grid on every call, so a full generate is O(cells²).
-/// At the panel's 24×24 ceiling that's ~330k trivial iterations —
-/// under a millisecond, and the collapse itself dominates. Raising the
-/// grid limit means replacing this with a priority queue keyed on
-/// domain size.
+/// Pick the uncollapsed cell with the smallest non-empty domain, ties
+/// broken randomly. Scans the whole grid per call, so a full generate
+/// is O(cells²) — negligible at the 24×24 ceiling.
 fn lowest_entropy(cells: &[Cell], rng: &mut StdRng) -> Option<usize> {
     let mut best_count = u32::MAX;
     let mut best: Vec<usize> = Vec::new();
@@ -767,13 +701,9 @@ fn collapse(cell: &mut Cell, weights: &[f32], rng: &mut StdRng) {
     cell.collapsed = true;
 }
 
-/// Connector compatibility is defined by *complement*: two adjoining
-/// faces fit when one's connector equals the complement of the other's.
-/// Symmetric connectors are their own complement (grass/open `0`, wall
-/// `1` — they match like-for-like). The doorway pair is directional: a
-/// wall's door mouth (`2`) is complemented only by a floor's door socket
-/// (`3`), so a mouth can never seat against another mouth, and a door
-/// always opens onto walkable floor (#32).
+/// Connector compatibility is by *complement*: symmetric ids match
+/// themselves, while the doorway pair is directional — a wall's mouth
+/// (2) fits only a floor's socket (3), never another mouth.
 fn connector_complement(id: u8) -> u8 {
     match id {
         2 => 3,
@@ -782,20 +712,15 @@ fn connector_complement(id: u8) -> u8 {
     }
 }
 
-/// Constraint propagation. After a cell shrinks, its neighbors' domains
-/// may be reducible too (only tiles whose facing connector is matched
-/// by some tile still allowed in the source cell can survive). Whenever
-/// a domain shrinks we re-queue that cell, since *its* neighbors may
-/// now be over-constrained in turn.
+/// Constraint propagation. After a cell shrinks its neighbors may be
+/// reducible too, so every domain that shrinks re-queues its own cell.
 fn propagate(cells: &mut [Cell], w: usize, d: usize, start: usize, tiles: &[Tile]) {
     let mut stack = vec![start];
     while let Some(idx) = stack.pop() {
         let allowed = cells[idx].allowed;
-        // An empty domain is a dead end, not a constraint. Propagating
-        // from it would leave `my_conns` empty and force every neighbor's
-        // `new_allowed` to 0 — one over-constrained cell would cascade to
-        // fallback across the whole grid. The single failed cell is
-        // counted at emit time; it must not poison its neighbors (#23).
+        // An empty domain is a dead end, not a constraint: propagating
+        // from it would force every neighbor to zero and cascade
+        // fallback across the grid. The failed cell is counted at emit.
         if allowed == 0 {
             continue;
         }
@@ -813,10 +738,9 @@ fn propagate(cells: &mut [Cell], w: usize, d: usize, start: usize, tiles: &[Tile
                 continue;
             }
             let nidx = nz as usize * w + nx as usize;
-            // A collapsed cell is observed and final. With no backtracking
-            // we keep its chosen tile even if this neighbor turns out
-            // incompatible, rather than zeroing its domain into a failure
-            // and cascading (#23).
+            // A collapsed cell is final. With no backtracking we keep
+            // its tile even if this neighbor turns out incompatible,
+            // rather than zeroing the domain and cascading.
             if cells[nidx].collapsed {
                 continue;
             }
@@ -830,11 +754,9 @@ fn propagate(cells: &mut [Cell], w: usize, d: usize, start: usize, tiles: &[Tile
                 }
             }
 
-            // Filter the neighbor's domain to tiles whose facing connector
-            // is compatible with one of mine. Compatibility is by
-            // connector *complement* (symmetric IDs match themselves; the
-            // directional doorway pair 2/3 match only each other) so a
-            // door mouth can't seat against another mouth (#32).
+            // Filter the neighbor to tiles whose facing connector
+            // complements one of mine, so a door mouth can't seat
+            // against another mouth.
             let mut new_allowed: u64 = 0;
             for (j, tile) in tiles.iter().enumerate() {
                 if cells[nidx].allowed & (1u64 << j) == 0 {
@@ -1249,11 +1171,9 @@ mod tests {
 
     #[test]
     fn boundary_forbids_open_connectors_on_grid_edge() {
-        // #32: on a 1×1 grid every face is a boundary (connector 0), so
-        // only all-0 tiles (empty / floor) may appear — never a wall or
-        // door whose connectors open off the single-cell edge. Floor lives
-        // at y=0; walls/doors rise to y>=1, so any voxel above the floor
-        // would prove the boundary constraint leaked.
+        // On a 1×1 grid every face is a boundary, so only all-0 tiles may
+        // appear. Floor lives at y=0 and walls rise above it, so a voxel
+        // above the floor would prove the constraint leaked.
         for seed in 0..16 {
             let g = WfcGenerator {
                 width: 1,

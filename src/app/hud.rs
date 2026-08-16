@@ -1,20 +1,6 @@
-//! Per-frame snapshot builder for the viewport HUD.
-//!
-//! The HUD itself (layout, styling, formatting helpers) lives on the
-//! library side in `voxelith::ui::hud`; this module is the thin glue
-//! that reads the App's gesture state — which only exists in the
-//! binary crate — and condenses it into a display-ready
-//! [`HudState`]. Built once per frame in `render_frame`, right before
-//! `Ui::show`.
-//!
-//! The numbers shown must come from the *same* math the commit paths
-//! use, so the HUD can never disagree with what a click would
-//! produce: shape height goes through
-//! `EditInteraction::shape_extruded_end` (`commit_shape`'s source of
-//! truth), the footprint end cell is the
-//! plane-locked `hovered_voxel.adjacent_pos` (same as
-//! `update_brush_preview`), and the move delta mirrors
-//! `update_selection_visualization`.
+//! Per-frame snapshot builder for the viewport HUD, condensing the
+//! App's gesture state into a [`HudState`]. Every number comes from the
+//! same math the commit paths use, so the two can't disagree.
 
 use voxelith::editor::Tool;
 use voxelith::ui::hud::{
@@ -108,10 +94,9 @@ impl App {
             None
         };
 
-        // Select-tool-only — the status bar keeps the always-on copy
-        // for other tools. Hidden mid-marquee-drag: the live size is
-        // already in `detail`, and the stale pre-drag box would just
-        // contradict it.
+        // Select only — the status bar keeps the always-on copy. Hidden
+        // mid-drag, where the live size is already in `detail` and the
+        // stale box would contradict it.
         let selection = if tool == Tool::Select
             && !matches!(self.interaction, EditInteraction::SelectDrag { .. })
         {
@@ -134,10 +119,9 @@ impl App {
     }
 }
 
-/// Symmetry mirrors Place / Remove / Paint / Fill writes and shape
-/// commits; Eyedropper samples, Select reads, and Socket drops an
-/// un-mirrored anchor — a "Sym" line for those would imply an effect
-/// that won't happen.
+/// Symmetry mirrors the tools that write voxels. Eyedropper samples,
+/// Select reads and Socket drops an un-mirrored anchor, so a "Sym" line
+/// there would imply an effect that won't happen.
 fn tool_uses_symmetry(t: Tool) -> bool {
     !matches!(t, Tool::Eyedropper | Tool::Select | Tool::Socket)
 }

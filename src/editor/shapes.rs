@@ -1,21 +1,10 @@
-//! Voxel position generators for the click-and-drag shape tools.
-//!
-//! Each function takes two integer cell positions (anchor + drag-end)
-//! and returns the set of cells the shape covers. The functions are
-//! pure — no world access, no symmetry expansion. Symmetry mirroring
-//! is layered on top by the caller (input.rs's shape commit path).
-//!
-//! All shapes are inclusive on both endpoints: a Line from `a` to `b`
-//! contains `a` and `b`; a Box from `a` to `b` covers the closed AABB
-//! including both corners. This matches user intuition ("I dragged
-//! from here to here, I expect both ends to be voxels").
+//! Cell generators for the drag shape tools: two cell positions in, the
+//! covered set out. Pure — no world access and no symmetry expansion —
+//! and every shape is inclusive on both endpoints.
 
-/// 3D Bresenham line. Visits one cell per step along the dominant
-/// axis, with two error terms tracking when to step on the other
-/// two axes. Output is ordered along the line (`a` first, `b` last)
-/// — useful for animation / progressive reveal, but order doesn't
-/// matter for the eventual `Command::set_voxels` since the
-/// underlying world write is set-semantics.
+/// 3D Bresenham line: one cell per step along the dominant axis, with
+/// two error terms for the others. Output is ordered from `a` to `b`,
+/// though the eventual world write is set-semantics.
 pub fn line_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
     let (mut x, mut y, mut z) = a;
     let dx = (b.0 - a.0).abs();
@@ -89,10 +78,9 @@ pub fn line_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32
     out
 }
 
-/// Upper bound on the preallocation hint for a shape's cell buffer.
-/// Real drags stay far below this — the raycast reach cap bounds the
-/// span — but a pathological box must not eagerly reserve gigabytes for
-/// its capacity hint (the Vec still grows if genuinely needed).
+/// Upper bound on the preallocation hint for a shape's cell buffer, so
+/// a pathological box can't eagerly reserve gigabytes. The `Vec` still
+/// grows if the cells are genuinely there.
 const MAX_SHAPE_CELLS_HINT: i64 = 1 << 22; // ~4.2M cells
 
 /// Closed axis-aligned bounding box from `a` to `b` (any pair of
@@ -101,10 +89,8 @@ pub fn box_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)
     let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
     let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
     let (z0, z1) = (a.2.min(b.2), a.2.max(b.2));
-    // Volume in i64: the i32 product overflows for a pathologically large
-    // span (debug panic; release wraps negative → `as usize` sign-extends
-    // to a bogus huge capacity). Cast each extent to i64 BEFORE the
-    // subtraction so `x1 - x0` itself can't overflow either.
+    // Volume in i64: the i32 product overflows on a huge span. Cast each
+    // extent before the subtraction, so `x1 - x0` can't overflow either.
     let count =
         (x1 as i64 - x0 as i64 + 1) * (y1 as i64 - y0 as i64 + 1) * (z1 as i64 - z0 as i64 + 1);
     let mut out = Vec::with_capacity(count.clamp(0, MAX_SHAPE_CELLS_HINT) as usize);
@@ -149,16 +135,9 @@ pub fn sphere_voxels(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i
     out
 }
 
-/// Filled cylinder fitting in the closed AABB `[a, b]`. `axis_hint`
-/// selects the axis of revolution (`0 = X`, `1 = Y`, `2 = Z`): shape
-/// drags pass `Some(plane.axis)` so the cylinder stands along the locked
-/// footprint plane's normal — the direction the height phase extrudes —
-/// honoring the two-phase "footprint then height" gesture (a ground
-/// footprint pulled up gives a *vertical* pillar, not a tube lying along
-/// the bbox's longest side). `None` falls back to the bbox's longest
-/// dimension (ties Y, then X, then Z), used only by geometry-only paths
-/// with no plane. The cross-section perpendicular to the axis is an
-/// ellipse spanning the other two dimensions.
+/// Filled cylinder in the closed AABB `[a, b]`. `axis_hint` is the axis
+/// of revolution — shape drags pass the locked plane's normal, so a
+/// ground footprint pulled up is a pillar. `None` takes the longest side.
 pub fn cylinder_voxels(
     a: (i32, i32, i32),
     b: (i32, i32, i32),
@@ -185,13 +164,9 @@ pub fn cylinder_voxels(
     for z in z0..=z1 {
         for y in y0..=y1 {
             for x in x0..=x1 {
-                // No zero-divide guard on the radii, and none is needed:
-                // the AABB was normalized above, so every extent is at
-                // least 1 cell and every radius therefore at least 0.5.
-                // A `.max(0.5)` used to sit here reading as if that
-                // weren't guaranteed — it could never fire, and a dead
-                // guard is worse than none because it invites the next
-                // reader to widen it instead of checking the invariant.
+                // No zero-divide guard, and none is needed: the AABB was
+                // normalized above, so every extent is at least one cell
+                // and every radius at least 0.5.
                 let inside = match axis {
                     0 => {
                         let cy = (y0 as f32 + y1 as f32 + 1.0) * 0.5;
@@ -347,19 +322,17 @@ mod tests {
             assert!(v.contains(&(0, y, 0)), "missing y={}", y);
         }
 
-        // The extreme of the same case: a single cell, every extent 1.
-        // Normalizing the AABB is what keeps each radius at 0.5 here
-        // rather than 0 — the invariant that lets `cylinder_voxels`
-        // carry no zero-divide guard at all.
+        // A single cell, every extent 1. Normalizing the AABB is what
+        // keeps each radius at 0.5 rather than 0 — the invariant that
+        // lets `cylinder_voxels` carry no zero-divide guard.
         assert_eq!(cylinder_voxels((3, 3, 3), (3, 3, 3), None), vec![(3, 3, 3)]);
     }
 
     #[test]
     fn test_cylinder_axis_hint_overrides_longest_side() {
-        // A ground footprint 10 wide in X and Z pulled up only 4 in Y:
-        // the bbox's longest side is X/Z, so the longest-side heuristic
-        // would lay the tube down horizontally. An explicit Y hint (the
-        // locked footprint plane's normal) must keep it a vertical pillar.
+        // A footprint 10 wide pulled up only 4: the longest-side
+        // heuristic would lay the tube down, so the explicit Y hint has
+        // to keep it a vertical pillar.
         let a = (0, 0, 0);
         let b = (9, 3, 9); // 10 × 4 × 10 — longest side is X/Z, not Y
         let vertical: HashSet<_> = cylinder_voxels(a, b, Some(1)).into_iter().collect();

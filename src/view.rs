@@ -1,22 +1,6 @@
-//! Off-screen views of a world, rendered on the CPU.
-//!
-//! This is the agent's eye. `describe` gives it counts and a bounding
-//! box, `slice` gives it one plane as text — neither answers "does this
-//! look like a hut?". A picture does, and an agent that can see its own
-//! model can correct it.
-//!
-//! Distinct from [`crate::render`] in every way that matters: that one
-//! is the interactive viewport, needs a GPU and a window, and lives
-//! behind the `gui` feature. This one is pure CPU ray casting over the
-//! voxel grid, so it works in a container with no display — which is
-//! where an agent actually runs.
-//!
-//! Orthographic, not perspective. Six axis views plus an isometric one,
-//! all parallel projections, because the job is reading a model rather
-//! than admiring it: no foreshortening means a wall that looks straight
-//! *is* straight, and equal cells stay equal size wherever they sit.
-//! [`Framing`] then reports exactly what the image covers, so "the door
-//! is one cell too high" can be turned back into coordinates.
+//! CPU ray casting over the voxel grid: seven orthographic viewpoints,
+//! no GPU and no window. Not part of [`crate::render`], and not behind
+//! `gui` — an agent runs where there is neither.
 
 use glam::Vec3;
 use rayon::prelude::*;
@@ -33,20 +17,13 @@ pub const DEFAULT_SIZE: u32 = 256;
 pub const MAX_SIZE: u32 = 1024;
 
 /// Backstop on the walk. Rays stop when they leave the scene box, so
-/// this only fires on a bounding box already too big to draw — and it
-/// fires as a blank pixel rather than a hang. [`View::truncated`] then
-/// says it happened, because a blank pixel nobody explains reads as
-/// "the model is gone".
+/// this fires only on a box already too big to draw — as a blank pixel
+/// rather than a hang, with [`View::truncated`] saying so.
 const MAX_STEPS: u32 = 8192;
 
-/// Direction the scene is lit from. Off-axis on all three so no face of
-/// an axis-aligned box comes out unlit, and — the part that's easy to
-/// get wrong — **no two components equal**, or the two faces they light
-/// come out the same tone and the isometric view of a cube reads as a
-/// flat hexagon. A test pins that.
-///
-/// See [`key_light`]: this is the direction for a view that looks at the
-/// lit side, and it's mirrored for the views that don't.
+/// Direction the scene is lit from. Off-axis on all three so no face is
+/// unlit, and **no two components equal** — two equal components light
+/// their faces identically and a cube reads as a flat hexagon.
 const LIGHT: Vec3 = Vec3::new(0.34, 0.82, 0.55);
 
 /// Floor on the lambert term. Faces pointing away from the light stay
@@ -62,11 +39,9 @@ const AO_STRENGTH: f32 = 0.45;
 /// both stand out against it, which a white or black field can't manage.
 const BACKGROUND: [u8; 3] = [58, 58, 64];
 
-/// One of the seven canonical viewpoints.
-///
-/// Named for where the camera *is*, not where it looks: `Top` is the
-/// view from above. `Front` looks down −Z with +X to the right and +Y
-/// up, matching the editor's own starting camera.
+/// One of the seven canonical viewpoints, named for where the camera
+/// *is*: `Top` looks from above, and `Front` looks down −Z with +X
+/// right and +Y up, matching the editor's starting camera.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -113,22 +88,16 @@ impl ViewKind {
         }
     }
 
-    /// Look up a wire name. `None` for anything else — callers turn that
-    /// into an error naming the alternatives rather than guessing.
-    ///
-    /// Deliberately not `FromStr`: that trait's `from_str` returns a
-    /// `Result`, and the error type would exist only to be discarded by
-    /// [`ViewKind::parse_list`], which is the one caller that has
-    /// anything useful to say about a bad name.
+    /// Look up a wire name; `None` for anything else. Not `FromStr` —
+    /// that error type would exist only to be discarded by
+    /// [`ViewKind::parse_list`], the one caller with something to say.
     pub fn from_name(name: &str) -> Option<Self> {
         ViewKind::ALL.into_iter().find(|kind| kind.as_str() == name)
     }
 
-    /// Parse a comma-separated list, where `all` means every view.
-    ///
-    /// Lives here rather than in the CLI so the names an agent can type
-    /// come from one place — the same list [`ViewKind::ALL`] and the
-    /// serde representation are built from.
+    /// Parse a comma-separated list, where `all` means every view. Here
+    /// rather than in the CLI, so the names come from the same list
+    /// [`ViewKind::ALL`] and the serde representation are built from.
     pub fn parse_list(spec: &str) -> Result<Vec<ViewKind>, String> {
         let mut kinds = Vec::new();
         for name in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -202,13 +171,9 @@ impl std::error::Error for ViewError {}
 /// speaks in.
 pub type CellBounds = ((i32, i32, i32), (i32, i32, i32));
 
-/// What an image actually covers, so a pixel can be turned back into
-/// cells.
-///
-/// Without this a render is a pretty picture an agent can't act on: it
-/// can see the door is too high but has no way to say by how much. With
-/// it, `bounds` plus `cells_per_pixel` plus the axes is enough to do the
-/// arithmetic.
+/// What an image covers, so a pixel can be turned back into cells.
+/// `bounds` plus `cells_per_pixel` plus the axes is enough to measure
+/// an error rather than only see it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Framing {
     /// Cell bounds of the scene this view was fitted to. `None` for an
@@ -236,27 +201,15 @@ pub struct View {
     /// instead of handing over a rectangle of background and letting the
     /// agent conclude its model vanished.
     pub empty: bool,
-    /// Set when at least one ray spent its whole step budget without
-    /// reaching the scene or leaving it — so those pixels are
-    /// background because the walk gave up, not because nothing is
-    /// there.
-    ///
-    /// `empty` covers the same mistake from the other side, and covers
-    /// it only for a world with no voxels at all: a scene whose extent
-    /// along the view direction is past what the walk can cross draws
-    /// as a full rectangle of background while `empty` is false and the
-    /// bounds say there is plenty to see. An agent reading that
-    /// concludes its model vanished and rebuilds it.
+    /// Set when a ray spent its whole step budget without reaching or
+    /// leaving the scene, so those pixels are background because the
+    /// walk gave up. `empty` covers the no-voxels case instead.
     pub truncated: bool,
 }
 
-/// Render one view of `world`.
-///
-/// Cost is `size²` rays, each walking the grid; the rows are split
-/// across the rayon pool. Measured on a ~1100-voxel model in release:
-/// **11 ms** at 256², **480 ms** at 1024² — so a seven-view sweep at the
-/// default size costs about as much as one frame of anything else, and
-/// the largest size is a deliberate wait.
+/// Render one view of `world`. Cost is `size²` rays walking the grid,
+/// rows split across the rayon pool: about 11 ms at 256² and 480 ms at
+/// 1024² on a small model.
 pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewError> {
     if size == 0 || size > MAX_SIZE {
         return Err(ViewError::SizeOutOfRange(size));
@@ -293,10 +246,9 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
     let high = Vec3::new(max.0 as f32 + 1.0, max.1 as f32 + 1.0, max.2 as f32 + 1.0);
     let center = (low + high) * 0.5;
 
-    // Fit the projected scene to the frame. The extent along an axis of
-    // the image is the box's half-extent projected onto it, which for an
-    // axis view is just half a side and for the isometric view picks up
-    // the diagonal.
+    // Fit the projected scene to the frame: the extent along an image
+    // axis is the box's half-extent projected onto it — half a side for
+    // an axis view, the diagonal for the isometric one.
     let half = (high - low) * 0.5;
     let extent_right = half.x * right.x.abs() + half.y * right.y.abs() + half.z * right.z.abs();
     let extent_up = half.x * up.x.abs() + half.y * up.y.abs() + half.z * up.z.abs();
@@ -304,16 +256,9 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
     // small margin so the model doesn't touch the border.
     let cells_per_pixel = (extent_right.max(extent_up) * 2.05) / size as f32;
 
-    // Start every ray just outside the box, measured *along the view
-    // direction* rather than by the box's diagonal. Both put the origin
-    // outside the scene, which is all the walk needs — but the diagonal
-    // charges a wide scene for width the camera is not looking through,
-    // and the walk gives up after `MAX_STEPS`. A scene 100,000 cells
-    // wide and one cell thick used to start its front-view rays 50,000
-    // cells away from a wall one cell deep, run out of steps, and hand
-    // back a picture of the background. This is the box's support
-    // distance in `forward`: for an axis view, half the thickness the
-    // camera actually looks through.
+    // Start every ray just outside the box, measured along the view
+    // direction rather than by the diagonal: the diagonal charges a wide
+    // scene for width the camera never looks through.
     let depth =
         half.x * forward.x.abs() + half.y * forward.y.abs() + half.z * forward.z.abs() + 2.0;
     let origin = center - forward * depth;
@@ -361,29 +306,13 @@ pub fn render(world: &World, kind: ViewKind, size: u32) -> Result<View, ViewErro
 }
 
 /// Smallest share of the key light that must come from behind the
-/// camera. An axis view of a convex model sees exactly one face, so that
-/// face's brightness *is* the picture — leave it to the raw dot product
-/// and `left` comes back at barely above ambient while `top` is fully
-/// lit, for no reason the reader can see.
+/// camera. An axis view of a convex model sees one face, so that face's
+/// brightness *is* the picture.
 const MIN_FACING: f32 = 0.55;
 
-/// The key light for one view.
-///
-/// [`LIGHT`] as written, then bent twice: mirrored across the view plane
-/// if it would otherwise come from behind the model, and tilted toward
-/// the camera until [`MIN_FACING`] of it falls on what the camera can
-/// see. The final re-normalize then shortens that share a little — the
-/// dimmest view comes out around 0.50 rather than the 0.55 asked for,
-/// which is close enough for a diagram and cheaper than solving for
-/// the exact tilt.
-///
-/// Both exist because these are diagrams, not renders. A fixed
-/// world-space light makes `back`, `left` and `bottom` silhouettes in
-/// flat ambient — correct lighting, useless picture, and those are the
-/// views someone asks for precisely to inspect that side. The mirror is
-/// across the plane rather than a negation so the slant survives and a
-/// box's top stays the brightest face in every view: an agent reading
-/// six images shouldn't have to work out which way is up in each one.
+/// The key light for one view: [`LIGHT`] mirrored across the view plane
+/// when it would come from behind, then tilted until [`MIN_FACING`]
+/// falls on what the camera sees.
 fn key_light(forward: Vec3) -> Vec3 {
     let mut light = LIGHT.normalize();
     if light.dot(-forward) < 0.0 {
@@ -417,20 +346,9 @@ struct Hit {
     normal: (i32, i32, i32),
 }
 
-/// Walk the voxel grid along a ray until it hits something solid.
-///
-/// Amanatides–Woo: track, per axis, the distance to the next cell
-/// boundary and the distance between boundaries, then always step the
-/// axis that is closest. Every cell the ray touches is visited exactly
-/// once and in order, which is what makes the first solid cell the
-/// visible one.
-///
-/// `box_min` / `box_max` are the scene's inclusive cell bounds, and they
-/// are what makes this affordable: a ray that has passed the box, or
-/// that runs parallel to it and outside it, can never hit anything, so
-/// it stops there. Without that test every background pixel — four in
-/// ten of an isometric view — walked the full [`MAX_STEPS`]: measured,
-/// that was 183 ms for a 256² frame against 11 ms with it.
+/// Walk the grid along a ray to the first solid cell, Amanatides–Woo.
+/// The scene bounds are what make it affordable: a ray past the box, or
+/// parallel and outside it, stops rather than spending `MAX_STEPS`.
 fn cast(
     world: &World,
     from: Vec3,
@@ -444,10 +362,9 @@ fn cast(
         from.z.floor() as i32,
     );
     let step = (sign(direction.x), sign(direction.y), sign(direction.z));
-    // An axis the ray is parallel to never moves. If it already sits
-    // outside the box on that axis, no amount of stepping brings it
-    // back — which is most of the frame in an axis view, where two of
-    // the three axes are frozen.
+    // An axis the ray is parallel to never moves, so sitting outside the
+    // box on it is final — which is most of the frame in an axis view,
+    // where two of the three axes are frozen.
     if (step.0 == 0 && (cell.0 < box_min.0 || cell.0 > box_max.0))
         || (step.1 == 0 && (cell.1 < box_min.1 || cell.1 > box_max.1))
         || (step.2 == 0 && (cell.2 < box_min.2 || cell.2 > box_max.2))
@@ -521,12 +438,9 @@ fn cast(
     Trace::OutOfSteps
 }
 
-/// Light one hit: lambert against a fixed key light, floored at
-/// `AMBIENT`, darkened by how boxed-in the face is.
-///
-/// Emissive voxels skip the lighting entirely — they are the material
-/// that says "this glows", and shading one like ordinary paint hides
-/// the very flag the agent set.
+/// Light one hit: lambert against the key light, floored at `AMBIENT`,
+/// darkened by how boxed-in the face is. Emissive voxels skip lighting
+/// entirely, or shading would hide the flag the agent set.
 fn shade(world: &World, hit: &Hit, forward: Vec3, light_dir: Vec3) -> [u8; 3] {
     let base = [hit.voxel.r as f32, hit.voxel.g as f32, hit.voxel.b as f32];
     if hit.voxel.is_emissive() {
@@ -557,11 +471,8 @@ fn shade(world: &World, hit: &Hit, forward: Vec3, light_dir: Vec3) -> [u8; 3] {
 }
 
 /// Fraction of light reaching a face: 1.0 in the open, less as the eight
-/// cells ringing it on the outside fill in.
-///
-/// Sampled on the empty side of the face — the cells that would actually
-/// block light — which is what makes an inside corner darken and a flat
-/// wall stay even.
+/// cells ringing it fill in. Sampled on the empty side, which is what
+/// darkens an inside corner and leaves a flat wall even.
 fn ambient_occlusion(world: &World, hit: &Hit) -> f32 {
     let (nx, ny, nz) = hit.normal;
     // The two axes lying in the face's plane.
@@ -620,12 +531,9 @@ fn boundary(position: f32, direction: f32, cell: i32) -> f32 {
     }
 }
 
-/// Encode an RGB8 buffer as PNG.
-///
-/// Infallible in practice — the only writer is an in-memory `Vec` and
-/// the buffer length is ours — so a failure here is a bug, not a
-/// condition a caller could handle; it yields an empty image rather than
-/// taking the process down.
+/// Encode an RGB8 buffer as PNG. Infallible in practice — the writer is
+/// an in-memory `Vec` and the length is ours — so a failure yields an
+/// empty image rather than taking the process down.
 fn encode_png(pixels: &[u8], size: u32) -> Vec<u8> {
     let mut png = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut png);
@@ -686,12 +594,9 @@ mod tests {
         assert_eq!(count_non_background(&view), 0);
     }
 
-    /// A scene far wider than it is deep. The ray origin used to be set
-    /// by the box's *diagonal*, so a front view — looking through one
-    /// cell of depth — started 50,000 cells out, ran out of steps, and
-    /// came back as a rectangle of background with `empty: false` beside
-    /// bounds promising a model. Measuring the start along the view
-    /// direction is what the camera is actually looking through.
+    /// A scene far wider than it is deep. Sizing the ray origin by the
+    /// box's diagonal starts a front view 50,000 cells out and runs it
+    /// out of steps; the view direction is what the camera looks through.
     #[test]
     fn a_wide_thin_scene_is_still_drawn_from_the_front() {
         let mut world = World::new();
@@ -702,18 +607,14 @@ mod tests {
         let view = render(&world, ViewKind::Front, 64).unwrap();
         assert!(!view.empty);
         assert!(!view.truncated, "the walk had one cell of depth to cross");
-        // The picture can still be blank, and honestly so: `framing`
-        // says each pixel covers about 1600 cells, and a one-cell voxel
-        // sampled at pixel centers is smaller than that. Aliasing an
-        // agent can compute from the numbers it was given is a
-        // different thing from a walk that quietly stopped.
+        // The picture can still be blank, and honestly so: each pixel
+        // covers about 1600 cells here. Aliasing an agent can compute
+        // from `framing` is not the same as a walk that gave up.
     }
 
     /// The case the step budget genuinely can't cross: an isometric view
-    /// looks along the diagonal, so a scene this wide is past it whatever
-    /// the origin. The picture is still all background — the point is
-    /// that it now says why, instead of letting an agent read it as
-    /// "my model vanished" and build it again.
+    /// looks along the diagonal, so this scene is past it whatever the
+    /// origin. The picture is background, and `truncated` says why.
     #[test]
     fn a_scene_too_big_to_trace_says_the_walk_gave_up() {
         let mut world = World::new();
@@ -755,12 +656,9 @@ mod tests {
 
     #[test]
     fn the_six_axis_views_see_the_faces_their_names_promise() {
-        // Two voxels apart on +X, told apart by color rather than by
-        // position: the projection is always centred on the scene, so
-        // where the *pair* sits says nothing — which of the two lands on
-        // the right says everything. This is the test that catches a
-        // flipped basis vector, the kind of bug that silently mirrors
-        // every render an agent ever reads.
+        // Two voxels apart on +X, told apart by color: the projection is
+        // centred on the scene, so which of the two lands on the right
+        // is what catches a flipped basis vector.
         const ORIGIN: [u8; 3] = [220, 40, 40];
         const PLUS_X: [u8; 3] = [40, 80, 220];
         let mut world = World::new();
@@ -835,10 +733,9 @@ mod tests {
 
     #[test]
     fn every_view_lights_the_side_it_looks_at() {
-        // The bug this pins: with a light fixed in world space, `back`,
-        // `left` and `bottom` return a silhouette in flat ambient. Those
-        // are exactly the views someone asks for when they want to see
-        // that side, so "correctly lit and unreadable" is a failure.
+        // With a light fixed in world space, `back`, `left` and `bottom`
+        // return a silhouette in flat ambient — exactly the views
+        // someone asks for to see that side.
         let world = cube(3, Voxel::from_rgb(200, 200, 200));
         for kind in ViewKind::ALL {
             let view = render(&world, kind, 48).unwrap();

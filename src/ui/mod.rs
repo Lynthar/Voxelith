@@ -58,17 +58,9 @@ impl Default for ViewportSettings {
     }
 }
 
-/// Procgen-related workspace state. What's left of the retired
-/// single-generator panel (2026-08 convergence ④): generator
-/// *parameters* now live on graph nodes — document data, saved with
-/// the project — so the only thing prefs still carries is the graph
-/// preview toggle. An older prefs file's `selected` / `terrain` /
-/// `tree` / `wfc` / `preview_enabled` keys are simply ignored.
-/// Struct-level `#[serde(default)]`, not just field-level: this rides in
-/// `prefs.ron`, and without it the *next* field added here without its
-/// own default makes every existing prefs file fail to parse — which
-/// `Prefs::load` handles by logging a warning and silently discarding
-/// the user's whole workspace (window, palette, MRU).
+/// Procgen workspace state: just the graph preview toggle, since
+/// generator parameters live on graph nodes. Struct-level
+/// `#[serde(default)]`, or a new field breaks every `prefs.ron`.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ProcgenSettings {
@@ -86,10 +78,9 @@ pub struct Ui {
     /// the sidebar parameter editor. Cleared automatically when the
     /// node is removed.
     pub selected_node: Option<NodeId>,
-    /// Active wire-creation drag: source node whose output socket was
-    /// pressed. While set, the editor renders a live wire from that
-    /// socket to the cursor; on release a hit-test against input
-    /// sockets either snaps the wire to a target or discards it.
+    /// Active wire drag: the node whose output socket was pressed.
+    /// While set, a live wire follows the cursor; on release a hit-test
+    /// against input sockets snaps or discards it.
     pub dragging_wire: Option<NodeId>,
     /// Recent-files MRU mirrored from `prefs::Prefs::recent_files`.
     /// App syncs this whenever the prefs version changes (touch_recent
@@ -99,13 +90,9 @@ pub struct Ui {
     /// gray out the Paste button without `App::clipboard` leaking
     /// across the UI layer boundary. App syncs it before each frame.
     pub has_clipboard: bool,
-    /// Mirror of `Renderer::wireframe_supported` (the GPU exposes
-    /// `POLYGON_MODE_LINE`). Every wireframe control must gate on this:
-    /// the render path already falls back to solid when the pipeline is
-    /// missing, so without the gate the checkboxes stay tickable, the
-    /// status bar announces `[Wireframe]`, and nothing whatsoever
-    /// changes on screen — the UI lying about what the app is doing.
-    /// App syncs it before each frame.
+    /// Mirror of `Renderer::wireframe_supported`, synced each frame.
+    /// Every wireframe control gates on it, or the checkbox ticks and
+    /// the status bar announces a mode nothing on screen enters.
     pub wireframe_supported: bool,
 
     /// Voxelization resolution along the longest axis (32 / 64 / 128)
@@ -113,12 +100,9 @@ pub struct Ui {
     /// state lives next to its widget.
     pub import_resolution: u32,
 
-    /// Whether `.vox` import/export converts between MagicaVoxel's Z-up
-    /// convention and Voxelith's Y-up one (default on). Owned by the UI
-    /// (a File ▸ Import checkbox binds to it); `App::import_vox` /
-    /// `App::export_vox` read it at transfer time. A model authored in
-    /// MagicaVoxel stands upright when this is on; turn it off for a
-    /// `.vox` already authored Y-up.
+    /// Whether `.vox` transfers convert between MagicaVoxel's Z-up and
+    /// Voxelith's Y-up, default on. Owned by the UI and read by the
+    /// import and export paths at transfer time.
     pub convert_vox_axes: bool,
 
     /// Mirror of the in-editor MCP bridge's state, synced each frame the
@@ -126,20 +110,15 @@ pub struct Ui {
     pub agent: AgentView,
 }
 
-/// What the Agent panel and its approval strip draw from.
-///
-/// The bridge itself lives on `App` — a listening socket, a channel and
-/// possibly a batch parked mid-call — and none of that belongs on the UI
-/// side of the line. This is the display-ready summary App mirrors
-/// across each frame, the same shape `has_clipboard` takes.
+/// What the Agent panel and its approval strip draw from — the
+/// display-ready summary `App` mirrors across each frame, since the
+/// bridge itself belongs on the other side of the line.
 #[derive(Debug, Clone, Default)]
 pub struct AgentView {
     /// The URL to hand a client, while the bridge is listening.
     pub url: Option<String>,
-    /// The same URL with the bearer token a client has to send — the
-    /// URL alone stopped being enough when the bridge grew a token, and
-    /// a panel that showed only the URL would be handing out a setup
-    /// that answers 401.
+    /// The same URL plus the bearer token a client has to send. The URL
+    /// alone is a setup line that answers 401.
     pub client_command: Option<String>,
     pub approval: Approval,
     /// Batches committed since it came up — the panel's evidence that
@@ -187,10 +166,9 @@ impl Ui {
             self.show_disk_conflict_bar(ctx);
         }
 
-        // An agent's batch is waiting to be approved. Same placement and
-        // the same reasoning as the strip above: a state that lasts, and
-        // that the user has to be able to work around rather than be
-        // trapped by.
+        // An agent's batch awaits approval. Same placement and reasoning
+        // as the strip above: a lasting state the user has to work
+        // around rather than be trapped by.
         if self.agent.pending.is_some() {
             self.show_agent_review_bar(ctx);
         }
@@ -253,11 +231,9 @@ impl Ui {
             hud::show_perf_overlay(ctx, stats);
         }
 
-        // Crash-recovery prompt, rendered last so it sits on top. This
-        // is an in-app egui dialog, NOT a native `rfd::MessageDialog` —
-        // the latter exits the process on this winit + wgpu setup
-        // (regardless of whether it's shown during `resumed` or a later
-        // frame), so the recovery flow can't use it.
+        // The recovery prompt, rendered last so it sits on top. An egui
+        // dialog, never an `rfd::MessageDialog` — that exits the process
+        // on this setup whenever it is shown.
         if self.state.show_recovery_prompt {
             self.show_recovery_prompt(ctx);
         }
@@ -292,16 +268,9 @@ impl Ui {
         }
     }
 
-    /// Somebody else wrote the open project — an agent running with
-    /// `--checkpoint`, a `voxelith exec --out`, a `git checkout` — while
-    /// there were unsaved edits here. The editor keeps the user's copy
-    /// and says so here until they decide.
-    ///
-    /// A strip rather than a modal on purpose. The writer is typically an
-    /// agent working through a batch at a time, so a dialog would reopen
-    /// on every step and make the editor unusable; a strip states the
-    /// situation, offers both ways out, and lets the user keep working
-    /// in the meantime.
+    /// Somebody else wrote the open project while there were unsaved
+    /// edits here. A strip rather than a modal: the writer is typically
+    /// an agent, and a dialog would reopen on every batch.
     fn show_disk_conflict_bar(&mut self, ctx: &Context) {
         let Some(file) = self.state.disk_conflict.clone() else {
             return;
@@ -343,13 +312,9 @@ impl Ui {
         });
     }
 
-    /// An agent's batch is on screen as translucent geometry, waiting
-    /// for a yes or no.
-    ///
-    /// A strip and not a modal, and here the reason is sharper than it
-    /// was for the disk-conflict one: the question is about geometry the
-    /// user has to be able to orbit around and look at before answering.
-    /// A modal would cover the very thing it is asking about.
+    /// An agent's batch is on screen as translucent geometry, awaiting a
+    /// yes or no. A strip, not a modal — the question is about geometry
+    /// the user has to orbit around before answering.
     fn show_agent_review_bar(&mut self, ctx: &Context) {
         let Some(summary) = self.agent.pending.clone() else {
             return;
@@ -380,16 +345,14 @@ impl Ui {
     /// and decide whether its batches land as they arrive or wait for a
     /// yes.
     fn show_agent_panel(&mut self, ctx: &Context) {
-        // Deferred-action pattern (same as `show_graph_panel`): `.open(...)`
-        // borrows `self.state.panels.show_agent` and the closure borrows
-        // other `self.*` fields, so intents are collected into a local
-        // and dispatched after the closure releases the borrow.
+        // Deferred-action pattern: `.open(...)` borrows the panel flag
+        // while the closure borrows other fields, so intents collect
+        // into a local and dispatch once the borrow is released.
         let mut action: Option<UiAction> = None;
 
-        // An empty field would read as "no port" and leave Start dead
-        // with nothing saying why. Filling it here rather than in
-        // `UiState::default` keeps the default in one place — this panel
-        // is the only thing that has an opinion about it.
+        // An empty field reads as "no port" and leaves Start dead with
+        // nothing saying why. Filled here rather than in the default, so
+        // the one opinion about it lives in this panel.
         if self.state.agent_port_input.is_empty() {
             self.state.agent_port_input = DEFAULT_PORT.to_string();
         }
@@ -416,13 +379,9 @@ impl Ui {
                         });
                         ui.label("Point an MCP client at:");
                         ui.monospace(url);
-                        // The URL alone gets a 401: the bridge requires
-                        // a bearer token even on loopback, because
-                        // loopback means "a process on this machine",
-                        // not "the person sitting here". So what the
-                        // panel offers is the whole setup line — a
-                        // token nobody can copy is a token that only
-                        // locks out its owner.
+                        // The URL alone gets a 401, since the bridge
+                        // requires a token even on loopback — so the
+                        // panel offers the whole setup line.
                         if let Some(command) = &agent.client_command {
                             ui.horizontal(|ui| {
                                 if ui
@@ -593,11 +552,9 @@ impl Ui {
         }
     }
 
-    /// In-app export report: a centered, dismissable summary shown after
-    /// a successful export. Mirrors `show_error_dialog`'s structure (one
-    /// Close button clears the state). Rows for counts the format doesn't
-    /// carry are skipped — VOX has no triangle / vertex / chunk numbers,
-    /// so only its file size, colors, and quantization note show.
+    /// The post-export summary dialog, mirroring `show_error_dialog`'s
+    /// structure. Rows for counts the format doesn't carry are skipped
+    /// rather than shown empty.
     fn show_export_report(&mut self, ctx: &Context) {
         let Some(report) = self.state.export_report.clone() else {
             return;
@@ -673,13 +630,9 @@ impl Ui {
         }
     }
 
-    /// The Export… dialog (2026-08 convergence ⑤): one dialog instead
-    /// of seven menu entries. Format × surface, with the pairing that
-    /// doesn't exist grayed out rather than hidden — `ExportChoice`
-    /// keeps the surface selection alive across a trip through `.vox`.
-    /// Export hands the built `ExportKind` to the same
-    /// `UiAction::Export` funnel the menu entries used, so the save
-    /// picker, the io call and the report are untouched.
+    /// The Export… dialog: format × surface, with the pairing that
+    /// doesn't exist grayed out rather than hidden. The built
+    /// `ExportKind` goes through the same funnel as everything else.
     fn show_export_dialog(&mut self, ctx: &Context) {
         // Copied out and written back after the closure: the buttons
         // need `self.state` while `choice` is being edited.
@@ -959,8 +912,7 @@ impl Ui {
                     if ui.button("Clear All").clicked() {
                         // Everything else in this menu is undoable, and
                         // this sits one row from Deselect — a misclick
-                        // used to silently take the whole scene with no
-                        // way back (it clears the undo history too).
+                        // takes the scene and the undo history with it.
                         self.state.confirm = Some(ConfirmPrompt {
                             title: "Clear everything?".into(),
                             body: "This deletes every voxel and socket, \
@@ -974,10 +926,9 @@ impl Ui {
 
                 ui.menu_button("Selection", |ui| {
                     let has_sel = editor.selection.is_some();
-                    // Each Rotate submenu hosts CW / CCW / 180°.
-                    // Anchor is selection.min — the rotated AABB
-                    // extends from the same min, so a 4×1×2 region
-                    // becomes 2×1×4 spreading toward +Z.
+                    // Each Rotate submenu hosts CW / CCW / 180°. The
+                    // rotated AABB extends from the same `min`, so a
+                    // 4×1×2 region becomes 2×1×4 spreading toward +Z.
                     ui.menu_button("Rotate around X", |ui| {
                         if ui.add_enabled(has_sel, egui::Button::new("90°")).clicked() {
                             self.state.request(UiAction::RotateSelection {
@@ -1122,14 +1073,9 @@ impl Ui {
                         ui.close_menu();
                     }
                     ui.separator();
-                    // One-node presets (2026-08 convergence ④): each
-                    // drops a source node with default parameters into
-                    // the pipeline graph and opens the Graph panel —
-                    // the single-generator panel this menu used to open
-                    // retired in its favor. On a graph with no Output
-                    // sink an Output is added and wired to the new
-                    // source, so Run Pipeline and Preview work at once;
-                    // a graph that already has one is never rewired.
+                    // One-node presets: each drops a source node into the
+                    // graph and opens the panel. A graph with no Output
+                    // gets one wired up; an existing one is never rewired.
                     let presets: [GeneratorPreset; 3] = [
                         ("Perlin Terrain", || {
                             NodeKind::Terrain(PerlinTerrain::default())
@@ -1195,13 +1141,8 @@ impl Ui {
                     ui.add_space(8.0);
 
                     // Tool buttons. The tooltip's name and shortcut come
-                    // from `Tool` itself — spelling them out per button
-                    // meant eleven copies of the key map drifting away
-                    // from the one the keyboard handler actually uses.
-                    // `note` adds per-button detail where there is any.
-                    // The icon is painted (`icons::paint_tool_icon`) in
-                    // whatever text color the widget state calls for,
-                    // over the same frame a selectable Button would draw.
+                    // from `Tool` itself rather than eleven copies of
+                    // the key map, and the icon is painted per state.
                     let tool_button =
                         |ui: &mut egui::Ui, tool: Tool, current: Tool, note: &str| -> bool {
                             let mut tooltip = tool.name().to_string();
@@ -1319,25 +1260,18 @@ impl Ui {
             });
     }
 
-    /// The Inspector (2026-08 convergence ①): what the Tools float
-    /// used to be, minus the tool pickers — the toolbar is the one
-    /// place a tool is chosen now — and showing only what the active
-    /// tool actually consumes. `editor/tools.rs` is the authority on
-    /// that: brush size reaches Place / Remove / Paint only, symmetry
-    /// everything but Eyedropper / Select / Socket, and the brush
-    /// color every tool that writes voxels. Sections a tool doesn't
-    /// use aren't grayed out, they're absent — an Inspector's claim is
-    /// "this is what this tool has".
+    /// The Inspector: only the controls the active tool consumes, with
+    /// `editor/tools.rs` as the authority. Sections a tool doesn't use
+    /// are absent rather than grayed — the claim is "this is what it has".
     fn show_inspector_panel(
         &mut self,
         ctx: &Context,
         editor: &mut Editor,
         sockets: &mut Vec<Socket>,
     ) {
-        // The close button's flag rides a local: `.open()` would borrow
-        // `self.state.panels` for the whole window, while the closure
-        // needs `self.state` for `request(...)`. Written back once both
-        // borrows are released. Same shape in `show_viewport_panel`.
+        // The close flag rides a local: `.open()` would borrow the panel
+        // set for the whole window while the closure needs `self.state`.
+        // Written back once both borrows are released.
         let mut open = self.state.panels.show_inspector;
         let tool = editor.current_tool;
         // One fixed window title: per-tool titles would give every tool
@@ -1491,11 +1425,9 @@ impl Ui {
                 .on_hover_text("Esc / Ctrl+D — clear the active selection")
                 .clicked()
             {
-                // Goes through the action even though this panel
-                // holds `&mut Editor`: clearing a selection is
-                // more than `editor.selection = None` (drag/move
-                // anchors and the move ghost live on App). See
-                // `App::deselect`.
+                // Through the action even though this panel holds
+                // `&mut Editor`: the drag anchors and the move ghost
+                // live on `App`. See `App::deselect`.
                 self.state.request(UiAction::Deselect);
             }
         });
@@ -1508,14 +1440,9 @@ impl Ui {
         if sockets.is_empty() {
             ui.label(egui::RichText::new("No sockets yet.").small().weak());
         } else {
-            // Per-socket row: inline rename + delete + position
-            // readout. Names become glTF node names on export.
-            // Every mutation also raises `SocketsEdited`: this
-            // section edits the document's sockets in place
-            // (through the `&mut` App threads in), but sockets
-            // are document data no mesh rebuild notices, so
-            // without the action a rename or delete never marked
-            // the document modified — no save prompt, no autosave.
+            // Per-socket row: rename, delete, position. Every mutation
+            // also raises `SocketsEdited` — this edits document data in
+            // place, and no mesh rebuild would notice it.
             let mut to_delete: Option<usize> = None;
             let mut committed: Option<usize> = None;
             let mut edited = false;
@@ -1555,20 +1482,9 @@ impl Ui {
                         });
                     }
                 });
-            // A rename is checked when the field is *committed* (focus
-            // loss, which Enter also triggers), never per keystroke:
-            // typing "muzzle_left" passes through "muzzle", and
-            // rewriting the buffer mid-word would fight the typist.
-            // The `.changed()` arm above still fires per keystroke —
-            // that's the dirty-marking chain, and it stays.
-            //
-            // This needs the field to still be drawn on the frame it
-            // loses focus, which the panel order gives us: the toolbar
-            // and the menu bar are drawn *before* the Inspector, so a
-            // click that switches tools or closes the panel surrenders
-            // focus earlier in the same frame, and this section draws
-            // once more to see it. Moving the Inspector above them
-            // would silently drop the last rename of a session.
+            // A rename resolves when the field is committed, never per
+            // keystroke — typing "muzzle_left" passes through "muzzle".
+            // The Inspector must stay drawn after the toolbar for this.
             if let Some(i) = committed {
                 let resolved = resolve_socket_name(sockets, i);
                 if sockets[i].name != resolved {
@@ -1712,10 +1628,9 @@ impl Ui {
         // closure holds the borrow that `set_status` needs.
         let mut palette_feedback: Option<String> = None;
         egui::Window::new("Palette")
-            // Right column: the left one is the toolbar + Inspector,
-            // so a left-column Palette started life buried under them.
-            // (Float positions aren't persisted, so this constant is
-            // what every session actually gets.)
+            // Right column: the left one holds the toolbar and
+            // Inspector. Float positions aren't persisted, so this
+            // constant is what every session gets.
             .default_pos([ctx.screen_rect().width() - 240.0, 40.0])
             .resizable(true)
             .collapsible(true)
@@ -1774,10 +1689,9 @@ impl Ui {
                             .palette
                             .iter()
                             .any(|v| v.r == color.r && v.g == color.g && v.b == color.b);
-                        // Report both refusals. Silently doing nothing
-                        // reads as a broken button — the user has no way
-                        // to tell "already there" from "list is full"
-                        // from "the click missed".
+                        // Report both refusals: in silence there is no
+                        // way to tell "already there" from "list is
+                        // full" from "the click missed".
                         palette_feedback = Some(if exists {
                             format!(
                                 "Palette already has RGB({}, {}, {})",
@@ -1889,19 +1803,9 @@ impl Ui {
     }
 
     fn show_graph_panel(&mut self, ctx: &Context, graph: &mut PipelineGraph) {
-        // The graph as this frame found it. The panel edits it in a
-        // dozen places — four deferred actions, a node drag, and every
-        // widget in the inspector — and a `.vxlt` carries the result, so
-        // *any* of them leaving the document looking unmodified is a
-        // silent way to lose work: the unsaved-changes guard waves the
-        // exit through, and the disk poll reloads over it.
-        //
-        // Comparing beginning to end of this one call is what makes the
-        // signal trustworthy: everything that writes `self.graph` from
-        // outside the panel (an agent's batch, opening a file, a reload)
-        // happens between frames, so it can't be mistaken for a person
-        // editing — the file paths deliberately land on a *clean*
-        // document, and an agent's batch flags itself.
+        // The graph as this frame found it. Comparing start to end of
+        // one call is what makes the signal trustworthy: everything that
+        // writes the graph from outside happens between frames.
         let before = graph.clone();
 
         // Deferred actions: collected during the immediate-mode pass,
@@ -2041,12 +1945,9 @@ impl Ui {
     }
 
     fn show_help_panel(&mut self, ctx: &Context) {
-        // The list runs to roughly 1200 px. On a 1080p screen the
-        // window is taller than the space it has, and with
-        // `resizable(false)` and no scrolling the tail — File and
-        // Actions, i.e. the save/open shortcuts — was simply
-        // unreachable. Cap the height against the actual screen and
-        // scroll the overflow.
+        // The list runs past what a 1080p screen holds, and with no
+        // scrolling its tail — the save and open shortcuts — is
+        // unreachable. Cap against the screen and scroll the overflow.
         let max_height = ctx.screen_rect().height() * 0.75;
         egui::Window::new("Keyboard Shortcuts")
             .default_pos([ctx.screen_rect().width() / 2.0 - 150.0, 100.0])
@@ -2057,10 +1958,9 @@ impl Ui {
                 egui::ScrollArea::vertical()
                     .max_height(max_height)
                     .show(ui, |ui| {
-                        // One line instead of rewriting thirty entries per
-                        // platform: the chords below are bound to the
-                        // platform's command key (`primary_modifier` in
-                        // app/input), so the table stays written once.
+                        // One line instead of rewriting thirty entries
+                        // per platform: the chords bind to the
+                        // platform's command key, so the table is one copy.
                         #[cfg(target_os = "macos")]
                         {
                             ui.label(
@@ -2246,12 +2146,9 @@ impl Ui {
                     ui.add_space(16.0);
                     ui.separator();
                     ui.add_space(8.0);
-                    // Read off the manifest rather than typed here: the
-                    // license was stated in five places and one of them
-                    // was this dialog, which is the copy nobody greps.
-                    // `env!` makes it the same string `Cargo.toml`
-                    // publishes, and a build with no license field
-                    // fails to compile rather than shipping a blank.
+                    // Read off the manifest rather than typed here, so
+                    // this is the same string `Cargo.toml` publishes and
+                    // a missing license field fails the build.
                     ui.label(format!("{} License", env!("CARGO_PKG_LICENSE")));
                 });
             });
@@ -2272,10 +2169,9 @@ impl Ui {
 
                 ui.label("Voxelith v0.1.0");
                 ui.separator();
-                // Tool name highlighted: easy to miss in the previous flat
-                // style — users have ended up confused about which tool is
-                // active (especially Fill / Eyedropper, which behave
-                // very differently from the brush tools).
+                // The tool name is highlighted: which tool is active is
+                // easy to miss in a flat style, and Fill and Eyedropper
+                // behave very differently from the brush tools.
                 ui.label(
                     egui::RichText::new(format!("Tool: {}", editor.current_tool.name()))
                         .strong()
@@ -2329,10 +2225,9 @@ impl Ui {
 
                 // Right-aligned viewport / preview info.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Only claim wireframe when it's actually running:
-                    // on a GPU without POLYGON_MODE_LINE the flag can
-                    // still be set (from prefs written on other
-                    // hardware) while the renderer draws solid.
+                    // Only claim wireframe when it is actually running:
+                    // the flag can be set from prefs written on other
+                    // hardware while this GPU draws solid.
                     if self.viewport.wireframe_mode && self.wireframe_supported {
                         ui.label("[Wireframe]");
                     }
@@ -2391,11 +2286,8 @@ pub enum CameraView {
 }
 
 // ---- Generator parameter editors -------------------------------------
-//
-// Free functions taking only the generator's parameter struct, so the
-// graph sidebar can hand in the node's embedded generator directly.
-// (They predate the graph: the retired single-generator panel used the
-// same three editors, which is what made its retirement lossless.)
+// Free functions over the parameter struct alone, so the graph sidebar
+// can hand in a node's embedded generator directly.
 
 fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
     ui.heading("Perlin Terrain");
@@ -2422,12 +2314,9 @@ fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
             ui.add(egui::Slider::new(&mut t.depth, 8..=256));
             ui.end_row();
 
-            // The two heights are independent sliders but not
-            // independent values: the generator rejects min > max, and
-            // with Preview on that rejection only reached a log line —
-            // the overlay just vanished. Let whichever slider the user
-            // is dragging push the other, so the invalid combination is
-            // unreachable from the UI in the first place.
+            // Two sliders, but not two independent values: the
+            // generator rejects min > max, and under Preview that
+            // rejection only vanishes the overlay. Let each push the other.
             ui.label("Min Y");
             ui.add(egui::Slider::new(&mut t.min_height, -64..=64));
             if t.max_height < t.min_height {
@@ -2583,25 +2472,14 @@ const GRAPH_SIDEBAR_W: f32 = 280.0;
 const GRAPH_SIDEBAR_MIN_W: f32 = 220.0;
 const GRAPH_CANVAS_MIN_W: f32 = 200.0;
 
-/// Split the graph window's inner width into canvas and sidebar.
-///
-/// The two sit in one `horizontal_top` row with a separator between
-/// them, so what the row actually consumes is
-/// `canvas + spacing + divider + spacing + sidebar` — and if that comes
-/// out wider than what was available, egui grows the window to fit,
-/// which enlarges the available width, which widens the row again. The
-/// window then creeps outward every frame until it hits the screen.
-/// That is exactly what happened while this reserved a flat 12 px for a
-/// divider that cost 22: ten pixels a frame.
-///
-/// So the arithmetic is stated once, here, and pinned by a test: the
-/// parts must sum to *exactly* the width handed in.
+/// Split the graph window's inner width into canvas and sidebar. The
+/// parts must sum to **exactly** the width handed in, pinned by a test:
+/// over-reserving grows the window a few pixels every frame.
 fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
     let overhead = GRAPH_DIVIDER_W + item_spacing * 2.0;
     // Shrink the sidebar before the canvas, and stop both at their
-    // floors — at which point the row is wider than the window and egui
-    // scrolls or clips it, rather than the window growing without end.
-    // `min_size` on the window keeps this out of reach in practice.
+    // floors — past that egui clips the row rather than growing the
+    // window without end.
     let sidebar = GRAPH_SIDEBAR_W
         .min(available * 0.4)
         .max(GRAPH_SIDEBAR_MIN_W)
@@ -2610,26 +2488,9 @@ fn graph_split_widths(available: f32, item_spacing: f32) -> (f32, f32) {
     (canvas, sidebar)
 }
 
-/// The name socket `idx` keeps once its rename is committed.
-///
-/// glTF nodes are keyed by name downstream, so two sockets called
-/// `muzzle` leave the engine picking one of them arbitrarily, and a
-/// blank one it can't address at all — the kind of breakage that
-/// surfaces in the game, not in the editor. Placement already
-/// guarantees uniqueness (`next_socket_name`); the Inspector's rename
-/// field is the only other door, so this is where the invariant
-/// `Socket::name` documents actually gets enforced.
-///
-/// A blank name falls back to the default sequence; a taken one grows
-/// the smallest free `_N` suffix. The suffix is appended to whatever
-/// was typed rather than replacing a number already at the end:
-/// renaming onto a taken `muzzle_2` gives `muzzle_2_2`, which is ugly
-/// but predictable, where stripping the tail would silently hand the
-/// name to a different socket than the one the user typed at.
-///
-/// Surrounding whitespace goes too: ` muzzle ` and `muzzle` are two
-/// different glTF node names, and nothing in the editor or in the
-/// engine's inspector shows which one you have.
+/// The name socket `idx` keeps once its rename is committed: whitespace
+/// trimmed, a blank falling back to the default sequence, and a taken
+/// one growing the smallest free `_N` suffix.
 fn resolve_socket_name(sockets: &[Socket], idx: usize) -> String {
     let typed = sockets[idx].name.trim();
     if typed.is_empty() {
@@ -2775,11 +2636,9 @@ fn input_socket_screen(
 ) -> egui::Pos2 {
     let body = node_screen_rect(canvas_min, node);
     match &node.kind {
-        // Both 2-input kinds get vertically-stacked sockets so slot 0 and
-        // slot 1 land at DISTINCT positions. Mask was missing here, so its
-        // two sockets overlapped at body-center and the wire hit-test —
-        // which stops at the first slot within radius — could never reach
-        // slot 1 (#17).
+        // Both two-input kinds stack their sockets vertically so the
+        // slots land at distinct positions — overlapping them puts slot
+        // 1 out of reach of a hit-test that stops at the first match.
         NodeKind::Combine { .. } | NodeKind::Mask { .. } => {
             let body_inner_top = body.min.y + NODE_HEADER_H + 14.0;
             let y = body_inner_top + slot as f32 * 22.0;
@@ -2814,10 +2673,9 @@ fn cubic_bezier_point(
     )
 }
 
-/// Draw a wire from `from` (output socket) to `to` (input socket) as a
-/// horizontally-bowed cubic Bezier — the standard look for node-graph
-/// editors. Tessellated to a polyline so we don't depend on egui's
-/// CubicBezierShape API across versions.
+/// Draw a wire between two sockets as a horizontally-bowed cubic
+/// Bezier, tessellated to a polyline rather than depending on egui's
+/// `CubicBezierShape` API across versions.
 fn paint_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
     let dx = (to.x - from.x).abs().max(40.0);
     let c1 = egui::pos2(from.x + dx * 0.5, from.y);
@@ -2832,12 +2690,9 @@ fn paint_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
     painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0_f32, color)));
 }
 
-/// Visual graph editor canvas. Renders nodes + wires, handles
-/// click-select, body-drag, and socket-drag wire creation. Mutations
-/// to the graph (input slot changes, deletion) are deferred via the
-/// out-params so the caller can apply them outside of the borrow.
-/// Render one help-window row per chord in `section`, from the same
-/// table the keyboard dispatch reads.
+/// The graph canvas: nodes, wires, click-select, body drag and
+/// socket-drag wire creation. Graph mutations defer through the
+/// out-params so the caller applies them outside the borrow.
 fn chord_rows(ui: &mut egui::Ui, section: keymap::HelpSection) {
     for chord in keymap::CHORDS.iter().filter(|c| c.section == section) {
         ui.label(chord.chord_label);
@@ -2865,11 +2720,9 @@ fn graph_canvas(
     for node in &graph.nodes {
         let in_count = PipelineGraph::input_count(&node.kind);
         for slot in 0..in_count {
-            // Canonical accessor so EVERY node kind's slots are covered.
-            // The old inline match omitted Filter's input and both of
-            // Mask's slots (they fell through to `None`), so those wires
-            // were never drawn. `get_input` is Ok for any in-range slot on
-            // an existing node, so `.ok().flatten()` = the wired source.
+            // The canonical accessor, so every node kind's slots are
+            // covered — an inline match omitted three of them and those
+            // wires were simply never drawn.
             let Some(src_id) = graph.get_input(node.id, slot).ok().flatten() else {
                 continue;
             };
@@ -2897,15 +2750,9 @@ fn graph_canvas(
         }
     }
 
-    // ===== Nodes =====
-    // Two passes: first allocate all node body widgets so their drag
-    // responses are registered, then draw + handle sockets. Splitting
-    // keeps z-order predictable (sockets sit on top of body).
-    //
-    // First pass: register a click-and-drag interaction over each
-    // node body so egui can route hover / click / drag events. We
-    // capture the per-body response so the second pass can apply the
-    // delta to the node's position without re-allocating.
+    // Two passes: allocate every node body first so its drag response
+    // is registered, then draw and handle sockets. Splitting keeps
+    // z-order predictable, with sockets on top of bodies.
     struct NodeFrame {
         body_resp: egui::Response,
         delta: egui::Vec2,
@@ -2924,13 +2771,9 @@ fn graph_canvas(
         frames.push((node.id, NodeFrame { body_resp, delta }));
     }
 
-    // Apply body drags + clicks (mutates graph.position / selected).
-    // A dragged node is kept inside the canvas: `ui.interact` isn't
-    // clipped, so one dragged past the edge stays clickable but is
-    // never drawn — invisible is lost, as far as the user is concerned.
-    // Only drags clamp; re-flowing already-placed nodes on every resize
-    // would squash a saved layout the moment the panel got narrow, and
-    // widening it back wouldn't restore the positions.
+    // Apply body drags and clicks. A dragged node is clamped inside the
+    // canvas — `ui.interact` isn't clipped, so one dragged past the edge
+    // stays clickable but invisible. Only drags clamp, never a re-flow.
     let drag_limit = egui::vec2(
         (canvas_rect.width() - NODE_W).max(0.0),
         (canvas_rect.height() - NODE_H).max(0.0),
@@ -2948,10 +2791,9 @@ fn graph_canvas(
         }
     }
 
-    // Visual + socket pass. Reads `&graph.nodes` directly — the drag
-    // loop above is done with its `get_mut`, and the positions it wrote
-    // are already visible here, so mid-drag frames stay smooth without
-    // copying every node's parameters once per frame.
+    // Visual and socket pass, reading `&graph.nodes` directly: the drag
+    // loop is done with its `get_mut` and its positions are visible
+    // here, so no node's parameters need copying per frame.
     for node in &graph.nodes {
         let body = node_screen_rect(canvas_rect.min, node);
         let is_selected = *selected == Some(node.id);
@@ -3114,11 +2956,9 @@ fn graph_sidebar(
         return;
     };
 
-    // Snapshot of node ids for input ComboBoxes (avoids holding an
-    // immutable borrow on graph.nodes while we mutate one node below).
-    // Candidate sources = every node that HAS an output socket. Output
-    // nodes are sinks (no output), so excluding them stops the dropdown
-    // from offering a node that produces nothing (#18).
+    // Node ids snapshotted for the input combos, so no borrow is held
+    // while one node is mutated below. Output nodes are sinks, so
+    // excluding them keeps the dropdown from offering nothing.
     let candidates: Vec<(NodeId, String)> = graph
         .nodes
         .iter()
@@ -3143,13 +2983,9 @@ fn graph_sidebar(
                 input_slot(ui, "Input", *input, id, 0, &candidates, wire_action);
                 ui.horizontal(|ui| {
                     ui.label("Offset");
-                    // Bounded so the panel can't casually scatter
-                    // geometry thousands of cells apart — smoothed
-                    // export builds a dense field over the scene's
-                    // whole bounding box. This is UX guidance, not a
-                    // safety limit (offsets compose across nodes, and
-                    // a saved graph can carry any value); the real
-                    // ceiling lives in `mesh_world_smoothed`.
+                    // Bounded so the panel can't scatter geometry
+                    // thousands of cells apart. UX guidance, not a
+                    // safety limit — the real ceiling is downstream.
                     ui.add(egui::DragValue::new(dx).prefix("x:").range(-1024..=1024));
                     ui.add(egui::DragValue::new(dy).prefix("y:").range(-1024..=1024));
                     ui.add(egui::DragValue::new(dz).prefix("z:").range(-1024..=1024));
@@ -3205,12 +3041,9 @@ fn graph_sidebar(
         });
 }
 
-/// Sidebar editor for a `Filter` node's predicate. Top combo switches
-/// the predicate variant (resetting params to that variant's defaults
-/// on change); the rows below it edit the current variant's params.
-/// Variant switches discard the previous variant's params on purpose —
-/// keeping a "remembered y threshold" across switches would surprise
-/// the user more than help them.
+/// Sidebar editor for a `Filter` node's predicate: the combo switches
+/// variant and the rows edit its params. A switch discards the previous
+/// variant's params rather than remembering them.
 fn filter_predicate_ui(ui: &mut egui::Ui, predicate: &mut FilterPredicate, node_id: NodeId) {
     // Variant selector. We compare via `matches!` rather than tag enums
     // to avoid carrying a parallel discriminator type.
@@ -3309,12 +3142,9 @@ fn filter_predicate_ui(ui: &mut egui::Ui, predicate: &mut FilterPredicate, node_
     }
 }
 
-/// ComboBox for picking one of the graph's existing nodes as a node's
-/// input slot. Reports the pick through `wire_action` (rather than
-/// mutating the slot) so the caller can route it through
-/// `PipelineGraph::set_input`, which rejects and rolls back cycles.
-/// `target` (the node itself) is skipped in the list; Output nodes are
-/// pre-excluded from `candidates` upstream. "(none)" clears the slot.
+/// ComboBox for wiring an input slot. The pick is reported through
+/// `wire_action` rather than written, so the caller routes it through
+/// `set_input`, which rejects cycles. "(none)" clears the slot.
 fn input_slot(
     ui: &mut egui::Ui,
     label: &str,
@@ -3337,10 +3167,9 @@ fn input_slot(
         egui::ComboBox::from_id_salt(("input_slot", label, target))
             .selected_text(current_label)
             .show_ui(ui, |ui| {
-                // Report the pick through `wire_action` instead of writing
-                // the slot directly, so the caller routes it through
-                // `set_input` (cycle-checked). A direct write here could
-                // persist a cyclic graph into prefs (#18).
+                // Report through `wire_action` rather than writing the
+                // slot, so the caller routes it through the cycle check.
+                // A direct write could persist a cyclic graph.
                 if ui.selectable_label(current.is_none(), "(none)").clicked() {
                     *wire_action = Some((target, slot, None));
                 }
@@ -3373,12 +3202,9 @@ fn color_button_u8(ui: &mut egui::Ui, color: &mut [u8; 3]) {
 mod graph_layout_tests {
     use super::*;
 
-    /// The row must never ask for more width than it was handed.
-    ///
-    /// Any surplus is width egui adds to the window, which comes back
-    /// as more available width on the next frame, which produces more
-    /// surplus — the window creeps outward until it hits the screen
-    /// edge. A shortfall is merely a gap; a surplus is a runaway.
+    /// The row must never ask for more width than it was handed: any
+    /// surplus is width egui adds to the window, which comes back as
+    /// more surplus. A shortfall is a gap; a surplus is a runaway.
     #[test]
     fn the_graph_split_consumes_exactly_the_width_it_is_given() {
         for available in [520.0, 640.0, 960.0, 1440.0, 2560.0_f32] {
@@ -3407,11 +3233,9 @@ mod graph_layout_tests {
 
     #[test]
     fn procgen_settings_parse_with_fields_missing() {
-        // Read in the format it actually ships in. Without the
-        // struct-level `#[serde(default)]`, adding one field here
-        // without its own default makes every existing `prefs.ron`
-        // fail to parse — and `Prefs::load` answers a parse failure by
-        // discarding the user's whole workspace.
+        // Read in the format it ships in. Without the struct-level
+        // `#[serde(default)]`, one new field breaks every `prefs.ron` —
+        // and a parse failure discards the user's whole workspace.
         let s: ProcgenSettings = ron::from_str("()").expect("a partial struct is still settings");
         assert!(
             !s.graph_preview_enabled,
@@ -3421,11 +3245,9 @@ mod graph_layout_tests {
 
     #[test]
     fn procgen_settings_ignore_the_retired_single_generator_fields() {
-        // A prefs.ron written before 2026-08 carries the retired
-        // single-generator panel's state — an enum, nested parameter
-        // structs, a toggle. All of it must be *skipped*, not refused:
-        // refusing means `Prefs::load` throws away the user's whole
-        // workspace over keys that stopped mattering.
+        // An older `prefs.ron` carries the retired generator panel's
+        // state. All of it must be skipped rather than refused, or the
+        // user loses their whole workspace over keys nothing reads.
         let old = "(
             selected: Terrain,
             terrain: (width: 64, depth: 64, seed: 42),

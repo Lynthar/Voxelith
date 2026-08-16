@@ -1,12 +1,6 @@
-//! Where the server is allowed to read and write.
-//!
-//! Every path a tool accepts has to resolve inside one root directory.
-//! Over stdio that buys little on its own — the client launched this
-//! process and could have read the disk directly — but the same tool
-//! bodies serve the HTTP transport, where "open this project" arrives
-//! from whoever can reach the port. One rule for both beats a rule that
-//! changes with the transport: an agent's working recipe shouldn't stop
-//! working because it moved from a child process to a URL.
+//! Where the server may read and write: every path a tool accepts has
+//! to resolve inside one root directory, on both transports — one rule
+//! so an agent's recipe survives the move from stdio to a URL.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -17,11 +11,9 @@ pub struct Root {
     dir: PathBuf,
 }
 
-/// Why a path was refused.
-///
-/// All of these are answerable by sending a different path, which is
-/// why they're separate from "the file didn't load" — that one an agent
-/// can't fix by rewriting the argument.
+/// Why a path was refused. All of these are answerable by sending a
+/// different path, which is why they are separate from "the file didn't
+/// load".
 #[derive(Debug)]
 pub enum PathError {
     Empty,
@@ -43,11 +35,9 @@ impl fmt::Display for PathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PathError::Empty => write!(f, "a path is required, and this one is empty"),
-            // Through this module's own `display`, not `Path::display`:
-            // these paths have been through `canonicalize`, which on
-            // Windows hands back the `\\?\` verbatim form. That prefix
-            // is correct, unreadable, and — pasted back by an agent
-            // taking the message at its word — not what it typed.
+            // This module's own `display`, not `Path::display`: these
+            // have been canonicalized, which on Windows yields the
+            // `\\?\` verbatim form no agent should paste back.
             PathError::Unanchored(path) => write!(
                 f,
                 "{} doesn't name a file — give a path ending in a file name",
@@ -71,13 +61,9 @@ impl fmt::Display for PathError {
 
 impl std::error::Error for PathError {}
 
-/// A canonical path as a person — or a model — should see it.
-///
-/// `canonicalize` hands back Windows verbatim paths (`\\?\C:\…`). They
-/// are correct, and they're what we keep for actual file operations
-/// because that form is what lifts the `MAX_PATH` limit, but echoing one
-/// back in a tool answer reads as line noise and invites an agent to
-/// copy the prefix into places it doesn't belong.
+/// A canonical path as a person — or a model — should see it. The
+/// verbatim `\\?\` form is kept for file operations, since it lifts the
+/// `MAX_PATH` limit, but echoing it back reads as line noise.
 pub fn display(path: &Path) -> String {
     let text = path.display().to_string();
     if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
@@ -88,9 +74,8 @@ pub fn display(path: &Path) -> String {
 
 impl Root {
     /// Anchor at `dir`, which must exist. Stored canonicalized so the
-    /// containment test compares like with like — on Windows that means
-    /// both sides are `\\?\`-prefixed, and everywhere it means symlinks
-    /// in the root's *own* path don't cause false rejections.
+    /// containment test compares like with like, and so symlinks in the
+    /// root's own path don't cause false rejections.
     pub fn new(dir: &Path) -> std::io::Result<Self> {
         Ok(Self {
             dir: dir.canonicalize()?,
@@ -101,13 +86,9 @@ impl Root {
         &self.dir
     }
 
-    /// Resolve a requested path against the root, or refuse it.
-    ///
-    /// Relative paths hang off the root; absolute ones are taken as
-    /// given and then checked. Either way the answer is canonical, so
-    /// `..` segments and symlinks are resolved *before* the containment
-    /// test rather than pattern-matched away — a check on the literal
-    /// string is a check on spelling, not on where the write lands.
+    /// Resolve a requested path against the root, or refuse it. The
+    /// answer is canonical, so `..` and symlinks resolve *before* the
+    /// containment test — checking the literal string checks spelling.
     pub fn resolve(&self, requested: &str) -> Result<PathBuf, PathError> {
         if requested.trim().is_empty() {
             return Err(PathError::Empty);
@@ -119,11 +100,9 @@ impl Root {
             self.dir.join(requested)
         };
 
-        // A save target usually doesn't exist yet, and you can't
-        // canonicalize what isn't there — so fall back to canonicalizing
-        // the directory (which must exist) and putting the file name
-        // back. The directory is the part that could contain a symlink
-        // or a `..` worth resolving; the final component can't.
+        // A save target usually doesn't exist yet, so canonicalize the
+        // directory and put the file name back. The directory is the
+        // part that could hold a symlink or a `..`; the leaf can't.
         let resolved = match joined.canonicalize() {
             Ok(path) => path,
             Err(_) => {

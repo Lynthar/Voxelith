@@ -1,33 +1,6 @@
-//! Headless agent entry point: run a batch of `agent_ops` against a
-//! project file and report what happened, as JSON on stdout.
-//!
-//! This is the CLI face of [`crate::agent_ops`] — the thing a coding
-//! agent that can run shell commands drives:
-//!
-//! ```text
-//! voxelith exec ops.json --out hut.vxlt --describe
-//! voxelith exec more.json --in hut.vxlt --out hut.vxlt --export hut.glb
-//! voxelith inspect hut.vxlt --slice '{"axis":"y","index":0}'
-//! ```
-//!
-//! Each invocation is a whole session: load (or start empty) → apply →
-//! report → save / export. Nothing persists between runs except the
-//! `.vxlt`, which is what keeps the CLI honest — the file *is* the
-//! state, and a human can open it in the editor at any point.
-//!
-//! **stdout is JSON and nothing else** (logs go to stderr) so the caller
-//! can parse it without stripping banners. Success is
-//! `{"ok": true, …}` and exit code 0; failure is `{"ok": false, "error":
-//! {"code", "message", "op_index"?}}` and exit code 1. Ops failures pass
-//! their [`agent_ops::ErrorCode`](crate::agent_ops::ErrorCode) through as
-//! `code`, so an agent branches on one field either way.
-//!
-//! What this deliberately does *not* do: pivot / up-axis / unit-scale
-//! placement, Marching-Cubes smoothing, `gltfpack` compression. Those
-//! are `voxelith bake`'s job — it exists to turn finished `.vxlt` files
-//! into engine-ready assets, and duplicating its knobs here would give
-//! the two commands two sets of export semantics to disagree over.
-//! `exec --export` is the interactive File ▸ Export, headless.
+//! The CLI face of [`crate::agent_ops`]: load → apply → report → save,
+//! one whole session per invocation. **stdout is JSON and nothing
+//! else**; logs go to stderr.
 
 use std::path::{Path, PathBuf};
 
@@ -65,9 +38,8 @@ pub struct ExecOutcome {
     pub report: Option<ApplyReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<Description>,
-    /// The ASCII slice, one array entry per line. Split rather than sent
-    /// as one `\n`-escaped string so it stays readable in the raw
-    /// output — an escaped grid is unreadable exactly when someone is
+    /// The ASCII slice, one array entry per line. Split rather than one
+    /// `\n`-escaped string, which is unreadable exactly when someone is
     /// staring at it to work out what went wrong.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slice: Option<Vec<String>>,
@@ -90,10 +62,8 @@ pub struct ExportInfo {
 }
 
 /// A refused run. `code` is stable and machine-readable: either an
-/// `agent_ops` error code (when the batch itself failed) or one of this
-/// layer's — `ops_unreadable`, `invalid_ops_json`, `input_unreadable`,
-/// `invalid_slice`, `save_failed`, `export_failed`,
-/// `unsupported_export_format`, `dry_run_with_output`.
+/// `agent_ops` error code, when the batch itself failed, or one of this
+/// layer's own.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecError {
     pub code: &'static str,
@@ -185,11 +155,8 @@ impl ExecError {
 }
 
 /// `{"ok": true, "generators": [...]}` — the catalog a `generate` op
-/// picks from, each entry carrying its parameters at their default
-/// values. That listing *is* the parameter template: copy it, change
-/// what you want, send it back as `params`. Without this on the CLI the
-/// only way to learn a generator's parameter names would be a table in
-/// the docs, which is the drift the registry exists to avoid.
+/// picks from, each entry carrying its parameters at their defaults.
+/// That listing *is* the parameter template.
 pub fn generators_json() -> String {
     #[derive(Serialize)]
     struct Catalog {
@@ -206,22 +173,13 @@ pub fn generators_json() -> String {
     serde_json::to_string_pretty(&catalog).expect("the catalog must serialize")
 }
 
-/// Load → apply → describe → export → save, in that order.
-///
-/// The order is a promise about what a failure can leave behind. Ops
-/// are all-or-nothing ([`AgentSession::apply_ops`]), so a refused batch
-/// writes nothing at all. Past that, everything that can be checked
-/// without writing is checked first, and then the two writes run
-/// derived-file-first: an agent that reruns after a failure re-derives
-/// the export, but must never find the *project* file already carrying
-/// half the batch — `--in x --out x` is the documented editing loop,
-/// and ops like `translate` and `mirror_copy` applied twice are a model
-/// nobody asked for and a report that says everything went fine.
+/// Load → apply → describe → export → save, in that order. The order is
+/// a promise about what a failure can leave behind: checks before
+/// writes, and the derived file before the irreplaceable one.
 pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
-    // Parsed before anything else runs. This command *is* the session:
-    // nothing survives it but the files it writes, so a typo in --slice
-    // surfacing after the batch had already been applied would throw
-    // away work the agent has no way to get back.
+    // Parsed before anything else runs. This command is the whole
+    // session, so a typo in --slice surfacing after the batch applied
+    // would throw away work nothing can get back.
     let slice_request = match &request.slice {
         Some(text) => Some(serde_json::from_str::<SliceRequest>(text).map_err(|e| {
             ExecError::new(
@@ -234,11 +192,9 @@ pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
 
     let (mut session, state) = open_session(request.input.as_deref())?;
 
-    // A dry run reports on a preview rather than on the session, so
-    // --describe / --slice show the world the batch *would* leave. The
-    // alternative is one envelope holding two contradictory pictures:
-    // a report of the world after the batch beside a description of the
-    // world it declined to change.
+    // A dry run reports on a preview rather than the session, so
+    // --describe and --slice show the world the batch would leave
+    // instead of the one it declined to change.
     let mut preview = None;
     let report = match &request.ops {
         Some(path) => {
@@ -272,24 +228,16 @@ pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
     };
     let description = request.describe.then(|| view.describe());
 
-    // Everything about an export that can be known before writing
-    // anything, checked before writing anything. The extension used to
-    // be read inside `export_mesh`, which runs *after* the project has
-    // been saved: `--in x.vxlt --out x.vxlt --export x.fbx` overwrote
-    // the input, then failed, and reported an envelope saying nothing
-    // was written — so an agent following the documented "fix that one
-    // op and resend" loop applied its non-idempotent ops to an already
-    // edited file, twice, and got a clean report both times.
+    // Everything knowable about an export before writing, checked
+    // before writing: an unsupported extension caught after the save
+    // leaves the input overwritten and the report saying otherwise.
     if let Some(path) = &request.export {
         check_export_target(path)?;
     }
 
-    // Export first, save last. The checks above cover the failures a
-    // path can be inspected for, and this covers the rest: a full disk
-    // or a revoked permission leaves the *derived* file half-written
-    // rather than the source one, and re-running regenerates it. The
-    // project file — the thing that isn't reproducible — is written by
-    // the last fallible step there is.
+    // Export first, save last: a full disk leaves the derived file
+    // half-written rather than the source one. The project file is
+    // written by the last fallible step there is.
     let exported = match &request.export {
         Some(path) => Some(export_mesh(&session, path)?),
         None => None,
@@ -308,11 +256,9 @@ pub fn run_exec(request: &ExecRequest) -> Result<ExecOutcome, ExecError> {
     })
 }
 
-/// Start a session, from a `.vxlt` or empty.
-///
-/// The loaded [`EditorState`] rides along untouched so a later save
-/// preserves the artist's camera, palette and brush — an agent editing
-/// someone's project has no business resetting their workspace.
+/// Start a session, from a `.vxlt` or empty. The loaded [`EditorState`]
+/// rides along untouched, so a later save preserves the artist's
+/// camera, palette and brush.
 pub(crate) fn open_session(input: Option<&Path>) -> Result<(AgentSession, EditorState), ExecError> {
     let Some(path) = input else {
         return Ok((AgentSession::new(), EditorState::default()));
@@ -330,11 +276,9 @@ pub(crate) fn open_session(input: Option<&Path>) -> Result<(AgentSession, Editor
         .iter()
         .map(|socket| Socket::new(socket.name.clone(), socket.position, socket.normal))
         .collect();
-    // The graph rides in the session for the same reason the sockets do:
-    // it is document data, and a load → edit → save round trip that
-    // dropped it would quietly delete the recipe the model was built
-    // from. `normalize` because the file is an external input — its
-    // `next_id` is whatever some other build wrote there.
+    // The graph rides in the session like the sockets: document data a
+    // round trip must not drop. `normalize` because the file is external
+    // input, and its `next_id` is whatever wrote it.
     session.graph = state.graph.clone();
     session.graph.normalize();
     session.metadata = metadata;
@@ -424,31 +368,23 @@ pub struct RenderedInfo {
     /// model disappeared.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub empty: bool,
-    /// True when rays ran out of steps before crossing the scene: part
-    /// of this image is background because the walk gave up, not
-    /// because nothing is there. Same job as `empty` for the case
-    /// `empty` can't see — a scene too big to trace, where the bounds
-    /// promise plenty and the picture shows none of it.
+    /// True when rays ran out of steps before crossing the scene, so
+    /// part of the background is the walk giving up. `empty` covers the
+    /// no-voxels case; this covers a scene too big to trace.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
 
-/// Turn a `--view` spec (`"iso"`, `"front,top"`, `"all"`) into
-/// viewpoints.
-///
-/// Here rather than in `main` so the binary never constructs an
-/// `ExecError`: the stable error codes are this layer's vocabulary, and
-/// a second place minting them is how two spellings of the same failure
-/// get shipped.
+/// Turn a `--view` spec into viewpoints. Here rather than in `main` so
+/// the binary never constructs an `ExecError` — the stable error codes
+/// are this layer's vocabulary and want one place minting them.
 pub fn parse_views(spec: &str) -> Result<Vec<ViewKind>, ExecError> {
     ViewKind::parse_list(spec).map_err(|message| ExecError::new("unknown_view", message))
 }
 
-/// Draw one or more views of a project and write them as PNG files.
-///
-/// The CLI half of [`crate::view`]. Over MCP the same renders come back
-/// inline as image content; here they're files, because a shell agent
-/// reads a picture by opening it.
+/// Draw views of a project and write them as PNG files — the CLI half
+/// of [`crate::view`]. Over MCP the same renders come back inline;
+/// here they are files, because a shell agent opens one to read it.
 pub fn run_render(request: &RenderRequest) -> Result<RenderOutcome, ExecError> {
     if request.views.is_empty() {
         return Err(ExecError::new(
@@ -496,10 +432,9 @@ fn image_path(base: &Path, kind: ViewKind) -> PathBuf {
     base.with_file_name(format!("{stem}-{}.png", kind.as_str()))
 }
 
-/// What an export target can be refused for without writing a byte:
-/// an extension nothing here can produce, or a directory that isn't
-/// there. Called before any write, and again (for the format) by
-/// [`export_mesh`], which needs the answer anyway.
+/// What an export target can be refused for without writing a byte: an
+/// extension nothing here produces, or a missing directory. Called
+/// before any write, and again by [`export_mesh`] for the format.
 pub(crate) fn check_export_target(path: &Path) -> Result<(), ExecError> {
     let format = path
         .extension()
@@ -852,12 +787,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `--in x --out x --export y` is the documented editing loop, and
-    /// a failed export must not leave the project half-edited behind an
-    /// envelope that says nothing was written: an agent told to "fix
-    /// that op and resend" would then apply the batch to an already
-    /// edited file. `translate`, `rotate` and `mirror_copy` are not
-    /// idempotent, and the second run reports success.
+    /// `--in x --out x --export y` is the documented editing loop, so a
+    /// failed export must not leave the project edited behind a report
+    /// saying nothing was written — the ops are not idempotent.
     #[test]
     fn a_refused_export_leaves_the_project_file_untouched() {
         let dir = scratch("export_then_save");
@@ -938,11 +870,9 @@ mod tests {
 
     #[test]
     fn a_malformed_slice_request_is_caught_before_the_batch_runs() {
-        // Ordering, not just the error code: the batch below would fail
-        // on its own, and what comes back must still be the slice's
-        // complaint. One invocation is the whole session — a --slice
-        // typo discovered *after* a batch applied would throw the work
-        // away with nothing written and nothing to resume from.
+        // Ordering, not just the code: the batch below would fail on its
+        // own, and what comes back must still be the slice's complaint,
+        // because one invocation is the whole session.
         let dir = scratch("bad_slice");
         let error = run_exec(&ExecRequest {
             ops: Some(write_ops(

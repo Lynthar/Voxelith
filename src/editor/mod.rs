@@ -1,10 +1,5 @@
-//! Editor functionality: tools, commands, undo/redo.
-//!
-//! This module contains:
-//! - Ray casting for voxel picking
-//! - Tool implementations (place, remove, paint)
-//! - Command pattern for undo/redo
-//! - History management
+//! Editor state and behavior: voxel picking, the tools, the undo
+//! history, selections, the clipboard and named sockets.
 
 mod clipboard;
 mod commands;
@@ -35,18 +30,9 @@ pub use transform::{
 
 use crate::core::Voxel;
 
-/// Symmetric mirroring of brush effects across world-origin planes.
-///
-/// Each enabled axis mirrors the brush's writes across the corresponding
-/// plane through the world origin (`x = 0` / `y = 0` / `z = 0`). With
-/// multiple flags on, the brush replicates across every combination —
-/// 1 plane → 2-fold, 2 planes → 4-fold, 3 planes → 8-fold (octahedral)
-/// symmetry.
-///
-/// Mirroring is cell-aligned: cell `n` reflects to cell `-n - 1` so the
-/// symmetry plane lies *between* cells rather than through one. Without
-/// this offset, a cell at `n = 0` would mirror to itself and the brush
-/// would have no visible mirror partner there.
+/// Mirroring of brush writes across the world-origin planes; enabled
+/// axes combine, up to 8-fold. Cell-aligned: cell `n` reflects to
+/// `-n - 1`, so the plane lies between cells rather than through one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct SymmetryAxes {
     pub x: bool,
@@ -111,11 +97,9 @@ pub struct Editor {
     /// Paint / Fill all honor it; Eyedropper doesn't write so it's
     /// exempt). Persists across sessions via prefs.
     pub symmetry: SymmetryAxes,
-    /// Active box selection, if any. Set by the `Select` tool's
-    /// click-drag-release lifecycle and cleared via Esc / Ctrl+D.
-    /// Selection state is *not* persisted across sessions and *not*
-    /// pushed onto the undo stack — it's an ephemeral marquee, like
-    /// in image editors.
+    /// Active box selection, if any. Neither persisted across sessions
+    /// nor pushed onto the undo stack — an ephemeral marquee, as in
+    /// image editors.
     pub selection: Option<Selection>,
 }
 
@@ -169,19 +153,16 @@ impl Editor {
         ]
     }
 
-    /// Switch to `tool` because the user asked for it (number key,
-    /// toolbar). Alt's temporary eyedropper never comes
-    /// through here — it is derived per read on the app side
-    /// (`effective_tool`), so an explicit pick can't be rolled back by
-    /// an Alt release.
+    /// Switch to `tool` because the user asked for it. Alt's transient
+    /// eyedropper never comes through here — it is derived per read, so
+    /// an explicit pick can't be rolled back by an Alt release.
     pub fn select_tool(&mut self, tool: Tool) {
         self.current_tool = tool;
     }
 
-    /// Set brush color from palette index. Preserves the brush's
-    /// material flags (emissive / metallic) — those behave like a brush
-    /// mode (e.g. symmetry), so picking a palette color shouldn't clear
-    /// them. Only the color changes.
+    /// Set the brush color from a palette index, preserving the
+    /// material flags: those behave like a brush mode, so picking a
+    /// color shouldn't clear them.
     pub fn set_palette_color(&mut self, index: usize) {
         if let Some(c) = self.palette.get(index) {
             self.brush_color.r = c.r;

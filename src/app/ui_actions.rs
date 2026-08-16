@@ -12,11 +12,9 @@ impl App {
     pub(super) fn handle_ui_actions(&mut self) {
         for action in self.ui.state.take_actions() {
             match action {
-                // Exit routes through the same guard and the same
-                // shutdown path as the window's close button, instead
-                // of the `process::exit` it used to call — that skipped
-                // every destructor and made the menu item behave
-                // differently from the X.
+                // Exit routes through the same guard and shutdown path
+                // as the window's close button, so the menu item and
+                // the X can't behave differently.
                 UiAction::Exit => self.guard_then(PendingAction::Exit),
                 UiAction::Undo => {
                     if self
@@ -40,13 +38,9 @@ impl App {
                 // Confirmed by the caller (the menu raises a confirm
                 // dialog first) — this arm just does it.
                 UiAction::ClearAll => {
-                    // Clearing discards document data (voxels, sockets,
-                    // the graph), and none of it through a path the mesh
-                    // rebuild notices: `world.clear()` drops chunks
-                    // without dirtying any. Flag the document ourselves
-                    // — but only when there was something to clear, so
-                    // clearing an already-empty scene doesn't raise a
-                    // pointless unsaved prompt on exit.
+                    // `world.clear()` drops chunks without dirtying any,
+                    // so the rebuild notices nothing — flag the document
+                    // here, but only when there was something to clear.
                     let had_content = self.document.world.scene_center().is_some()
                         || !self.document.sockets.is_empty()
                         || !self.document.graph.nodes.is_empty();
@@ -83,13 +77,9 @@ impl App {
                     self.guard_then(PendingAction::Generate(GenerateKind::Pyramid));
                 }
                 UiAction::ResetCamera => {
-                    // "Reset Camera" recenters the orbit pivot on the
-                    // scene while preserving the current view direction —
-                    // identical to the F key (both route through
-                    // recenter_camera_on_scene). Snapping back to a fixed
-                    // default orientation is the job of SetCameraView
-                    // (Top/Front/Side), not this action. No-op on an empty
-                    // world (nothing to focus on).
+                    // Reset Camera recenters the pivot while keeping the
+                    // view direction; snapping to a fixed orientation is
+                    // `SetCameraView`'s job. A no-op on an empty world.
                     self.recenter_camera_on_scene();
                 }
                 UiAction::SetCameraView(view) => {
@@ -120,9 +110,8 @@ impl App {
                 UiAction::FrameSelected => self.frame_selected(),
                 UiAction::FrameGenerated => self.frame_generated(),
                 // Recovery replaces the scene, so it goes through the
-                // unsaved-changes guard like New / Open — the prompt it
-                // came from is non-modal, and edits made behind it are
-                // real work the user never agreed to lose.
+                // guard like New and Open: its prompt is non-modal, and
+                // edits made behind it are real work.
                 UiAction::RecoverAutosave => {
                     self.guard_then(PendingAction::RecoverAutosave);
                 }
@@ -153,10 +142,9 @@ impl App {
                 // --- unsaved-changes prompt answers ---
                 UiAction::UnsavedSave => {
                     self.save_project();
-                    // `do_save_project` clears the flag on success. If
-                    // it's still set the write failed or the user backed
-                    // out of the Save As picker — either way, don't go
-                    // ahead and destroy the scene.
+                    // `do_save_project` clears the flag on success, so a
+                    // flag still set means the write failed or the
+                    // picker was cancelled — don't destroy the scene.
                     if self.document.unsaved() {
                         self.drop_pending_guarded();
                         self.ui.set_status("Not saved — your work is still open");
@@ -176,15 +164,9 @@ impl App {
         }
     }
 
-    /// Replace the scene with one of the built-in demo shapes.
-    ///
-    /// `reset_scene_session_state` does the wipe, including the GPU
-    /// chunk meshes — that part is load-bearing. `World::clear()` only
-    /// drops the chunks; `rebuild_all_meshes()` then re-meshes the
-    /// *new* world's dirty ones. Any chunk position the previous scene
-    /// occupied but the new one doesn't is never visited again, so
-    /// without the wipe its GPU mesh lingers and renders as ghost
-    /// geometry over an otherwise-correct world.
+    /// Replace the scene with a built-in demo shape. The wipe in
+    /// `reset_scene_session_state` includes the GPU meshes: a chunk the
+    /// new world doesn't occupy would otherwise linger as ghost geometry.
     pub(super) fn generate_scene(&mut self, kind: GenerateKind) {
         self.document.world.clear();
         self.reset_scene_session_state();
@@ -203,13 +185,8 @@ impl App {
     /// are surfaced via the status bar.
     fn run_graph(&mut self) {
         // The same two ceilings an agent's graph goes through, applied
-        // to the one in the panel. Not politeness: this runs on the
-        // thread that draws, the evaluator descends recursively, and a
-        // source generator sizes its buffer from its own parameters
-        // before anything downstream gets a look — so a graph out of a
-        // `.vxlt` (an external file, which can hold a chain long enough
-        // to overflow the stack or a terrain node whose height span
-        // overflows `i32`) doesn't fail here, it takes the editor.
+        // to the panel's. This runs on the drawing thread, so a graph
+        // out of a `.vxlt` doesn't fail here — it takes the editor.
         if let Err(refusal) = voxelith::agent_ops::check_graph(&self.document.graph) {
             log::warn!("Graph refused before evaluation: {}", refusal.message);
             self.ui.set_status(format!("Graph: {}", refusal.message));
@@ -256,14 +233,9 @@ impl App {
         self.invalidate_preview();
     }
 
-    /// Turn a generated [`VoxelPatch`] into an undoable `SetVoxels`
-    /// change list. Shared by the graph and the glTF import so both
-    /// treat duplicate and identity writes identically:
-    /// 1. **Dedupe by position, last write wins** (`VoxelPatch::
-    ///    dedup_last_write`) — otherwise re-running a generator that
-    ///    overwrites a cell flips it each run (see that method's docs).
-    /// 2. **Drop identity writes** (cell already equals the final value)
-    ///    so re-running over an unchanged world pushes no no-op undo entry.
+    /// Turn a generated [`VoxelPatch`] into an undoable change list,
+    /// shared by the graph and glTF import: dedupe by position with the
+    /// last write winning, then drop identity writes.
     pub(super) fn patch_to_changes(&self, patch: &VoxelPatch) -> Vec<VoxelChange> {
         patch
             .dedup_last_write()

@@ -8,19 +8,13 @@ use crate::core::Voxel;
 
 use super::{GenError, GenResult, GeneratorCategory, GeneratorMeta, VoxelGenerator, VoxelPatch};
 
-/// Heightmap terrain generator using fractal Brownian motion (FBM)
-/// over Perlin noise.
-///
-/// Produces a `width × depth` patch centered on the world origin. The
-/// height field at each `(x, z)` is the sum of `octaves` Perlin samples
-/// with doubling frequency and halving amplitude per octave. Output is
-/// stratified — grass on top, a dirt band, then stone below — so the
-/// shape is visible immediately without lighting tweaks.
+/// Heightmap terrain from fractal Brownian motion over Perlin noise.
+/// Produces a `width × depth` patch centered on the origin, stratified
+/// grass over dirt over stone.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-// Every field defaults, so a partial set of parameters is a legal
-// one: the agent-ops registry merges what a caller named over
-// these, a graph node spells out only what it wants to differ,
-// and a `.vxlt` written before a field existed still loads.
+// Every field defaults, so a partial set of parameters is legal: the
+// registry merges what a caller named over these, and a `.vxlt` written
+// before a field existed still loads.
 #[serde(default)]
 pub struct PerlinTerrain {
     /// Seed for the underlying Perlin permutation table.
@@ -41,12 +35,9 @@ pub struct PerlinTerrain {
 
 impl Default for PerlinTerrain {
     fn default() -> Self {
-        // Defaults tuned for "looks like a coherent landscape" on a
-        // 64x64 footprint: shorter height range and lower frequency
-        // produce gentler, more continuous slopes; fewer octaves cuts
-        // the high-frequency choppiness that made every column read
-        // as an isolated grass spike. Users who want jagged terrain
-        // can dial these up in the panel.
+        // Tuned for a coherent landscape on a 64×64 footprint: a
+        // shorter height range and lower frequency give gentler slopes,
+        // and fewer octaves cut the per-column spikiness.
         Self {
             seed: 42,
             width: 64,
@@ -99,11 +90,9 @@ impl VoxelGenerator for PerlinTerrain {
         let stone = Voxel::from_rgb(128, 128, 128);
         let dirt_band: i32 = 4;
 
-        // Span exactly width × depth columns, centered on the origin.
-        // Upper bound is `dim - half` (not `half`): for odd sizes the
-        // half-open `-half..half` range would drop the final column/row
-        // (e.g. width 255 → only 254 columns). Even sizes are unchanged
-        // (dim - half == half).
+        // Span exactly width × depth columns centered on the origin. The
+        // upper bound is `dim - half`, not `half` — the half-open range
+        // would drop the last column at odd sizes.
         let x_end = self.width as i32 - half_w;
         let z_end = self.depth as i32 - half_d;
         for z in -half_d..z_end {
@@ -116,19 +105,9 @@ impl VoxelGenerator for PerlinTerrain {
                 let mut freq = self.frequency;
 
                 for octave in 0..octaves {
-                    // Offset each octave so it doesn't sample the same
-                    // lattice as the others. Perlin noise is exactly 0
-                    // at every integer lattice point, and terrain is
-                    // sampled at integer (x, z) — so at frequency 0.5
-                    // (the panel's own maximum) every octave past the
-                    // first landed on whole numbers and contributed
-                    // nothing, while still counting toward `total_amp`.
-                    // The result was a single octave, flattened by the
-                    // normalization. The offsets are irrational-ish
-                    // constants scaled by the octave index, so they can
-                    // never all be integers at once, and are fixed
-                    // rather than seed-derived to keep a given seed's
-                    // output stable.
+                    // Offset each octave off the integer lattice, where
+                    // Perlin is exactly 0. Fixed rather than
+                    // seed-derived, so a given seed stays stable.
                     let ox = octave as f64 * 0.7548776662;
                     let oz = octave as f64 * 0.5698402909;
                     let n = perlin.get([x as f64 * freq + ox, z as f64 * freq + oz]);
@@ -170,13 +149,9 @@ mod tests {
 
     #[test]
     fn every_octave_contributes_at_the_slider_maximum() {
-        // Perlin noise is exactly 0 on integer lattice points, and
-        // terrain samples integer (x, z). At frequency 0.5 — the
-        // panel's own maximum — every octave past the first landed on
-        // whole numbers and contributed nothing while still counting
-        // toward the amplitude normalization, collapsing FBM to one
-        // flattened octave. Two terrains that differ only in octave
-        // count must differ in output.
+        // Perlin is exactly 0 on integer lattice points and terrain
+        // samples integers, so without the offsets FBM collapses to one
+        // octave. Two octave counts must differ in output.
         let one = PerlinTerrain {
             width: 16,
             depth: 16,
@@ -259,11 +234,9 @@ mod tests {
 
     #[test]
     fn test_odd_dimensions_generate_full_extent() {
-        // Regression: `-half..half` dropped the last column/row for odd
-        // width/depth (e.g. 255 -> 254). The footprint must span the
-        // full requested width × depth. Every column gets at least one
-        // voxel (min_height..=h always includes min_height), so the count
-        // of distinct x / z equals width / depth.
+        // Regression: `-half..half` dropped the last column at odd
+        // sizes. The footprint must span the full requested width and
+        // depth, and every column gets at least one voxel.
         let g = PerlinTerrain {
             seed: 3,
             width: 9,

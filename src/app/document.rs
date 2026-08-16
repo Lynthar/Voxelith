@@ -1,51 +1,29 @@
-//! The document: everything that belongs to the *project* rather than
-//! to the session, in one place.
-//!
-//! Before this, the document's pieces lived on three hosts — the world
-//! on `App`, the sockets on `Editor`, the pipeline graph on `Ui` (the
-//! heaviest ownership misplacement of the three) — and "the document
-//! changed" was two booleans maintained by hand at every producer.
-//! R3 caught graph edits not raising them, R4 caught sockets, Clear
-//! All and graph-only undo steps; each patch was correct and the
-//! disease was structural. One owner, one counter.
+//! The document: everything belonging to the *project* rather than the
+//! session — world, sockets, pipeline graph, metadata — under one owner
+//! and one revision counter.
 
 use voxelith::core::World;
 use voxelith::editor::Socket;
 use voxelith::io::ProjectMetadata;
 use voxelith::procgen::PipelineGraph;
 
-/// The open project: world + sockets + pipeline graph + metadata.
-///
-/// Dirty state is a private [`DocumentMeta`] — revisions only move
-/// through the methods below, so the invariant the two booleans used
-/// to carry by convention ("autosave must never clear the
-/// unsaved-changes flag") holds by construction: `mark_autosaved`
-/// cannot touch the saved mark.
+/// The open project: world, sockets, pipeline graph and metadata.
+/// Dirty state is a private [`DocumentMeta`], so "autosave must never
+/// clear the unsaved flag" holds by construction.
 pub(super) struct Document {
     pub world: World,
     pub sockets: Vec<Socket>,
     pub graph: PipelineGraph,
-    /// Identity of the project (`name` / `author` / `created_at` /
-    /// `modified_at`). Held by the session and written out explicitly,
-    /// so Save As onto an unrelated file no longer inherits *that*
-    /// file's identity (the old read-back-at-save scheme did).
+    /// Identity of the project. Held by the session and written out
+    /// explicitly, so Save As onto an unrelated file doesn't inherit
+    /// that file's name and author.
     pub metadata: ProjectMetadata,
     meta: DocumentMeta,
 }
 
-/// Three high-water marks over one monotonic revision counter.
-///
-/// `unsaved` and `autosave_due` are *derived*, never stored: a state
-/// where autosave has run but the user's own file is stale is simply
-/// `saved < autosaved == revision` — representable, correct, and not a
-/// pair of booleans someone must remember to keep from clobbering each
-/// other.
-///
-/// Deliberately NOT the same counter as `CommandHistory::generation()`:
-/// that one only moves for undoable edits and exists to invalidate a
-/// parked agent batch; this one moves for *every* document change,
-/// sockets and graph edits included, which are managed outside the
-/// undo history on purpose.
+/// Three high-water marks over one monotonic revision counter;
+/// `unsaved` and `autosave_due` are derived, never stored. Not the same
+/// counter as `CommandHistory::generation()` — that one is undo-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DocumentMeta {
     /// Bumped on every document change.
@@ -79,29 +57,24 @@ impl Document {
         self.meta.revision += 1;
     }
 
-    /// The document and the user's own file now agree: save, open,
-    /// new, import, reload. Retires the autosave debt too — the file
-    /// holds this exact state, so rewriting the crash net would be
-    /// pointless.
+    /// The document and the user's own file now agree: save, open, new,
+    /// import, reload. Retires the autosave debt too, since the file
+    /// already holds this exact state.
     pub fn mark_saved(&mut self) {
         self.meta.saved = self.meta.revision;
         self.meta.autosaved = self.meta.revision;
     }
 
-    /// A successful autosave write. Touches ONLY the autosave mark —
-    /// `unsaved()` keeps answering true, which is the invariant the
-    /// old boolean pair carried by convention: a clean exit deletes
-    /// the autosave, so "edit → autosave → close" must still prompt.
+    /// A successful autosave write. Touches only the autosave mark, so
+    /// `unsaved()` keeps answering true — a clean exit deletes the
+    /// autosave, so "edit → autosave → close" must still prompt.
     pub fn mark_autosaved(&mut self) {
         self.meta.autosaved = self.meta.revision;
     }
 
-    /// Recovered work is a document with no file of its own: advance
-    /// the revision past every mark so `unsaved()` holds until a
-    /// manual save — otherwise the guard would wave a clean exit
-    /// through, and the exit would delete the autosave that held the
-    /// only copy. The autosave debt is retired (the autosave IS this
-    /// state); the timer restart is the caller's clock to manage.
+    /// Recovered work has no file of its own, so the revision advances
+    /// past every mark and `unsaved()` holds until a manual save. The
+    /// autosave debt is retired — the autosave *is* this state.
     pub fn mark_recovered(&mut self) {
         self.meta.revision += 1;
         self.meta.autosaved = self.meta.revision;
@@ -137,10 +110,9 @@ mod tests {
 
     #[test]
     fn edit_then_autosave_then_close_still_prompts() {
-        // THE invariant: autosave is a crash net that a clean exit
-        // deletes. If its write cleared `unsaved`, the sequence
-        // "edit → autosave fires → close" skipped the prompt and then
-        // destroyed the only copy on the way out.
+        // Autosave is a crash net a clean exit deletes. If its write
+        // cleared `unsaved`, "edit → autosave → close" would skip the
+        // prompt and destroy the only copy on the way out.
         let mut doc = Document::new();
         doc.bump();
         doc.mark_autosaved();
@@ -185,10 +157,9 @@ mod tests {
 
     #[test]
     fn undo_back_to_the_save_point_still_reads_unsaved() {
-        // Matches the boolean model this replaces: revisions are
-        // monotonic, so undoing back to visually-identical state does
-        // not clear the flag. (A content hash could; recorded as the
-        // deliberate, pre-existing limitation it is.)
+        // Revisions are monotonic, so undoing back to a
+        // visually-identical state does not clear the flag. A content
+        // hash could; this is the deliberate limitation.
         let mut doc = Document::new();
         doc.mark_saved();
         doc.bump(); // an edit

@@ -1,14 +1,6 @@
-//! Procedural generation algorithms.
-//!
-//! Every generator (noise, WFC, L-System, ...) implements
-//! [`VoxelGenerator`] and emits a [`VoxelPatch`] — a list of voxel
-//! writes — rather than mutating a `World` directly. Decoupling the
-//! output lets callers route the same patch through
-//! [`CommandHistory`] (for undo) or into a preview/scratch world
-//! without the generator knowing which happened. `io::voxelize_glb`
-//! produces the same type for the same reason.
-//!
-//! [`CommandHistory`]: crate::editor::CommandHistory
+//! Procedural generation. Every generator implements
+//! [`VoxelGenerator`] and emits a [`VoxelPatch`] rather than mutating a
+//! `World`, so one patch can be undone, previewed or discarded.
 
 mod graph;
 mod terrain;
@@ -53,15 +45,8 @@ pub enum GeneratorCategory {
     General,
 }
 
-/// Static metadata describing a generator. Concrete generators return
-/// their own (usually compile-time-constant) metadata from
+/// Static metadata describing a generator, returned by
 /// [`VoxelGenerator::metadata`].
-///
-/// This used to carry a `backend` field (`Algorithmic` / `LocalModel` /
-/// `RemoteAPI` / `Hybrid`) for a future where a generator might be a
-/// model rather than an algorithm. Every generator ever written set it
-/// to `Algorithmic`, nothing ever read it, and the remote-generation
-/// path it anticipated has since been removed — so it went too.
 #[derive(Debug, Clone, Copy)]
 pub struct GeneratorMeta {
     pub id: &'static str,
@@ -70,17 +55,9 @@ pub struct GeneratorMeta {
     pub category: GeneratorCategory,
 }
 
-/// A bundle of voxel writes produced by a generator.
-///
-/// Stored as a flat `Vec<(pos, voxel)>` rather than a dense buffer
-/// because most generators are sparse (terrain heightmaps, scattered
-/// trees) and the apply-via-`CommandHistory` path needs the same
-/// representation anyway.
-///
-/// `notes` carries per-run diagnostics — non-fatal warnings the
-/// generator wants the UI to surface (e.g. WFC's "N cells fell back
-/// to empty"). Consumers that don't care can ignore the field; it
-/// defaults to empty.
+/// A bundle of voxel writes produced by a generator. Flat rather than
+/// dense because most generators are sparse; `notes` carries non-fatal
+/// diagnostics for the UI to surface.
 #[derive(Debug, Clone, Default)]
 pub struct VoxelPatch {
     pub voxels: Vec<((i32, i32, i32), Voxel)>,
@@ -120,19 +97,9 @@ impl VoxelPatch {
         }
     }
 
-    /// Collapse duplicate positions, keeping the **last** write for each,
-    /// returned in first-seen order. Generators legitimately overwrite a
-    /// cell — `LSystemTree` rasterizes a trunk voxel, then draws a leaf
-    /// cluster over the same branch tip — and the final write is the
-    /// intended value.
-    ///
-    /// Load-bearing for undo determinism. Consumers turn a patch into a
-    /// `SetVoxels` command by reading each position's *world* old-value
-    /// once and dropping identity writes. If duplicates survive to that
-    /// step, both records read the same world old-value, so which one the
-    /// identity filter keeps depends on the current world — re-running the
-    /// same generator then flips the cell (trunk↔leaf) every run. Deduping
-    /// first makes the conversion idempotent.
+    /// Collapse duplicate positions, keeping the last write for each in
+    /// first-seen order. Load-bearing for undo: a surviving duplicate
+    /// makes the identity filter's choice depend on the current world.
     pub fn dedup_last_write(&self) -> Vec<((i32, i32, i32), Voxel)> {
         let mut final_voxel: HashMap<(i32, i32, i32), Voxel> =
             HashMap::with_capacity(self.voxels.len());
@@ -151,26 +118,17 @@ impl VoxelPatch {
     }
 }
 
-/// Trait every voxel generator implements.
-///
-/// Inputs (seeds, prompts, dimensions, ...) live as fields on the
-/// concrete type. The same struct that holds parameter state is the
-/// thing that runs — UI panels can edit fields in place and call
-/// [`generate`](VoxelGenerator::generate) without any glue.
-///
-/// `Send + Sync` is required so generators can be moved to a worker
-/// thread — the preview path evaluates them off the main thread.
+/// Trait every voxel generator implements. Parameters live as fields on
+/// the concrete type, so the struct holding them is the thing that
+/// runs. `Send + Sync` — previews evaluate off the main thread.
 pub trait VoxelGenerator: Send + Sync {
     fn metadata(&self) -> GeneratorMeta;
 
     /// Run the generator and return its output patch.
     fn generate(&self) -> GenResult<VoxelPatch>;
 
-    /// Hint for UI progress display. Default: zero. No caller reads it
-    /// yet — it stays because "preview time/count" is on the roadmap
-    /// (docs/STATUS.md, Procgen) and WFC / terrain already compute
-    /// honest estimates. (`supports_incremental` used to sit beside it
-    /// with neither an implementation nor a plan; that one is gone.)
+    /// Hint for UI progress display, default zero. No caller reads it
+    /// yet; WFC and terrain already compute honest estimates.
     fn estimate_duration(&self) -> Duration {
         Duration::ZERO
     }
@@ -204,9 +162,8 @@ mod tests {
     #[test]
     fn dedup_stops_rerun_oscillation_through_the_identity_filter() {
         // Build the change list exactly like `App::patch_to_changes`:
-        // read every position's old value from the pre-apply world, drop
-        // identity writes, THEN apply. Reading all olds up front is what
-        // makes an un-deduped duplicate flip the cell on each re-run.
+        // read every old value from the pre-apply world, drop identity
+        // writes, then apply. Un-deduped duplicates flip on re-run.
         fn apply_deduped(patch: &VoxelPatch, world: &mut World) {
             let changes: Vec<_> = patch
                 .dedup_last_write()

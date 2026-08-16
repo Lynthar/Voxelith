@@ -1,17 +1,6 @@
-//! Application state, event loop integration, and frame rendering.
-//!
-//! `App` owns every long-lived runtime resource (window, renderer, world,
-//! editor, UI). The `winit` event loop drives it through the
-//! `ApplicationHandler` impl in `handler.rs`. Behavior is split across
-//! sibling submodules by responsibility:
-//!
-//! - `file_ops` — new/save/open/import/export
-//! - `shapes`   — built-in sphere/pyramid generators
-//! - `input`    — raycast, tool apply, keyboard shortcuts
-//! - `ui_actions` — drains `UiAction`s queued by the egui layer
-//! - `agent_bridge` — serves an MCP client from this world
-//! - `render`   — per-frame wgpu pass
-//! - `handler`  — winit `ApplicationHandler`
+//! Application state and the frame loop. `App` owns every long-lived
+//! resource — window, renderer, document, editor, UI — and the sibling
+//! modules split its behavior by responsibility.
 
 mod agent_bridge;
 mod document;
@@ -57,11 +46,9 @@ use preview::PreviewState;
 /// voxels of similar color.
 const BRUSH_PREVIEW_ALPHA: f32 = 0.75;
 
-/// Alpha applied to the move-drag voxel ghost — the translucent copy
-/// of a selection's content that follows the cursor while it's being
-/// relocated. A touch lighter than the brush hint (0.75) so it reads
-/// as "in transit" rather than already placed, while staying clearly
-/// visible against the voxels it slides over.
+/// Alpha for the move-drag ghost — the translucent copy of a
+/// selection that follows the cursor. Lighter than the brush hint, so
+/// it reads as in transit rather than already placed.
 const MOVE_GHOST_ALPHA: f32 = 0.55;
 
 /// How often `tick_autosave` writes the crash-recovery file while there
@@ -74,38 +61,24 @@ const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 /// tail of any interaction, so activity never *feels* throttled.
 const ACTIVE_GRACE: Duration = Duration::from_millis(1500);
 
-/// Frame cadence when nothing is happening: no input inside the grace
-/// window, no camera key held, no gesture mid-flight. Ten frames a
-/// second keeps every per-frame tick honest — autosave, the 500 ms disk
-/// poll, agent-bridge calls arriving on their channel, the review
-/// timeout — while cutting a motionless editor's GPU/CPU burn to a
-/// rounding error. Input wakes the loop immediately (the wait is on
-/// events, not a sleep), so responsiveness doesn't ride on this number.
+/// Frame cadence when nothing is happening. Ten a second keeps every
+/// per-frame tick honest while cutting a motionless editor's burn to
+/// nothing; input wakes the loop immediately regardless.
 const IDLE_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Cells a shape gesture may write in one commit. Matches the agent
-/// layer's per-op region ceiling (128³) on purpose: what one `box` op
-/// may cover is a sensible bound for what one drag may cover, and one
-/// shared number beats two explanations. Without a cap the gesture is
-/// open-ended — a glancing-angle drag near the raycast reach spans a
-/// ~1000-cell footprint, and the enumeration + change list for it
-/// freezes the frame loop or exhausts memory before the user has
-/// committed anything.
+/// Cells a shape gesture may write in one commit, matching the agent
+/// layer's per-op ceiling. Uncapped, a glancing-angle drag near the
+/// raycast reach freezes the frame loop before anything commits.
 pub(super) const MAX_SHAPE_COMMIT_CELLS: i64 = 2_097_152;
 
-/// Cells the live shape *preview* re-enumerates per cursor step. Lower
-/// than the commit cap because this work runs on every mouse move —
-/// enumerate + mesh + upload — where the commit pays it once. Past
-/// this the preview goes dark with a status hint; the commit itself
-/// still works up to [`MAX_SHAPE_COMMIT_CELLS`].
+/// Cells the live preview re-enumerates per cursor step. Lower than the
+/// commit cap because it runs on every mouse move; past it the preview
+/// goes dark, while the commit still works.
 pub(super) const MAX_SHAPE_PREVIEW_CELLS: i64 = 262_144;
 
-/// Cells a shape gesture costs, before symmetry expansion. A line's
-/// cost is its length — costing it by bounding box would refuse a long
-/// thin diagonal that actually touches a few hundred cells — while the
-/// volumetric tools scan their full AABB, so the AABB *is* their cost.
-/// `i64` throughout: the i32 product wraps for exactly the drags this
-/// exists to refuse.
+/// Cells a shape gesture costs, before symmetry. A line costs its
+/// length, the volumetric tools their AABB. `i64` throughout — the i32
+/// product wraps for exactly the drags this exists to refuse.
 pub(super) fn shape_cell_cost(tool: Tool, a: (i32, i32, i32), b: (i32, i32, i32)) -> i64 {
     let extent = |p: i32, q: i32| (p as i64 - q as i64).abs() + 1;
     let (ex, ey, ez) = (extent(a.0, b.0), extent(a.1, b.1), extent(a.2, b.2));
@@ -165,23 +138,18 @@ pub struct App {
     last_frame: Instant,
     frame_times: VecDeque<f32>,
 
-    /// When the user last touched the app (any keyboard / mouse /
-    /// wheel / raw-motion event). Drives the frame scheduler: full
-    /// rate for a grace window after the last touch, an idle heartbeat
-    /// after that. See `App::frame_interval`.
+    /// When the user last touched the app. Drives the frame scheduler:
+    /// full rate for a grace window after the last touch, an idle
+    /// heartbeat after that.
     pub(super) last_interaction: Instant,
     /// When the next frame is due. `about_to_wait` requests a redraw
-    /// once this passes and parks the loop until then — the replacement
-    /// for the old unconditional `ControlFlow::Poll` + request_redraw
-    /// pair, which rendered a motionless scene at the display's full
-    /// refresh rate for as long as the app was open.
+    /// once this passes and parks the loop until then, rather than
+    /// polling a motionless scene at the display's refresh rate.
     pub(super) next_frame_at: Instant,
 
-    /// `(milliseconds, chunks)` of the most recent non-empty
-    /// dirty-chunk rebuild — mesh generation + GPU upload + dirty-flag
-    /// clear, i.e. the cost a big edit adds to its frame. `None` until
-    /// the first rebuild. Surfaced by the perf HUD via
-    /// `calculate_stats`.
+    /// `(milliseconds, chunks)` of the most recent non-empty rebuild —
+    /// the cost a big edit adds to its frame. `None` until the first
+    /// one; surfaced by the perf HUD.
     last_rebuild: Option<(f32, usize)>,
 
     cursor_captured: bool,
@@ -207,15 +175,9 @@ pub struct App {
     /// approval. Off until the Agent panel starts it.
     agent: AgentBridgeState,
 
-    /// Cache key for the brush hover overlay so we don't regenerate
-    /// its mesh on every CursorMoved when nothing meaningful changed.
-    /// `(active cell, tool, brush color, brush size, symmetry, shape
-    /// drag key)`. The "active cell" is `hover.voxel_pos` for
-    /// brush tools and `hover.adjacent_pos` for shape tools (so
-    /// shapes lock to the ground-plane fallback when the world is
-    /// empty). The trailing `Option<ShapeDragKey>` carries the
-    /// shape drag's enough-to-detect-change snapshot during a
-    /// Footprint or Height phase.
+    /// Cache key for the hover overlay, so its mesh is regenerated only
+    /// when something meaningful changed. The active cell is the
+    /// hovered one for brush tools and the adjacent one for shapes.
     last_brush_preview_key: Option<BrushPreviewKey>,
 
     /// Cache key for the selection wireframe so we don't rebuild the
@@ -223,46 +185,37 @@ pub struct App {
     /// hasn't changed.
     last_selection_box: Option<Selection>,
 
-    /// Companion cache discriminant to `last_selection_box` for the
-    /// move-drag voxel ghost: `Some(delta)` while ghosting, `None`
-    /// otherwise. Load-bearing on the commit frame — the drag's final
-    /// box equals the committed selection box, so a box-only cache
-    /// would early-out and strand the ghost mesh on screen after the
-    /// move lands.
+    /// Companion cache key to `last_selection_box` for the move ghost.
+    /// Load-bearing on the commit frame: the drag's final box equals the
+    /// committed one, so a box-only cache would strand the ghost.
     last_ghost_delta: Option<(i32, i32, i32)>,
 
-    /// Cache of the socket gizmo's geometry inputs — `(position,
-    /// normal)` per socket — so `update_socket_visualization` rebuilds
-    /// the line buffer only when sockets are placed / deleted / moved /
-    /// loaded, not every frame. Names don't affect the gizmo, so
-    /// renaming a socket doesn't invalidate this.
+    /// Cache of the socket gizmo's geometry inputs, so the line buffer
+    /// rebuilds only when sockets move rather than every frame. Names
+    /// don't affect the gizmo, so a rename doesn't invalidate it.
     last_socket_viz: Vec<([f32; 3], [f32; 3])>,
 
-    /// Voxel data captured by the most recent Copy / Cut. Pasting
-    /// composites these onto the world (only the non-air voxels;
-    /// see `Clipboard` docs). Not persisted across sessions —
-    /// matches the convention in MagicaVoxel / Goxel / vengi.
+    /// Voxel data from the most recent Copy or Cut. Paste composites
+    /// the non-air voxels onto the world. Not persisted across
+    /// sessions, matching every comparable editor.
     pub(super) clipboard: Option<Clipboard>,
 
     /// Persisted user preferences. Loaded at startup, dehydrated and
     /// written back on close. The recent-files MRU lives here.
     prefs: Prefs,
 
-    /// Tokio multi-thread runtime running on its own background OS
-    /// thread, so the winit main thread never awaits. The agent
-    /// bridge's HTTP server runs there. Lives the entire app lifetime;
-    /// no shutdown path needed.
+    /// Tokio runtime on its own background thread, so the winit main
+    /// thread never awaits. The agent bridge's HTTP server runs there,
+    /// for the whole app lifetime.
     pub(super) async_runtime: runtime::AsyncRuntime,
 
     /// When the last autosave ran. `tick_autosave` rate-limits writes to
     /// `AUTOSAVE_INTERVAL`.
     pub(super) last_autosave: Instant,
 
-    /// Modification time of `project_path` as of the last time we wrote
-    /// it or read it. `tick_disk_reload` compares the file against this
-    /// to tell somebody else's write from our own — an agent driving the
-    /// MCP server with `--checkpoint`, or a `voxelith exec --out` run.
-    /// `None` whenever no project file is open.
+    /// Modification time of `project_path` as of the last read or write.
+    /// `tick_disk_reload` compares against it to tell somebody else's
+    /// write from our own. `None` when no project file is open.
     pub(super) watched_mtime: Option<std::time::SystemTime>,
     /// When the project file was last polled. See `DISK_POLL_INTERVAL`.
     pub(super) last_disk_poll: Instant,
@@ -275,12 +228,9 @@ pub struct App {
     /// only place holding an `ActiveEventLoop`.
     pub(super) exit_requested: bool,
 
-    /// World-space AABB (inclusive cell coords) of the most recent
-    /// procgen / graph generation or GLB import, powering the "Frame Generated"
-    /// camera action. `None` until something is generated this session;
-    /// set at each generation chokepoint. Not cleared on undo — framing
-    /// stale bounds just frames where the geometry was, and the action
-    /// guards on `None`.
+    /// AABB of the most recent generation or import, for the "Frame
+    /// Generated" action. `None` until something is generated; not
+    /// cleared on undo, since stale bounds still frame where it was.
     pub(super) last_generated_bounds: Option<CellAabb>,
 }
 
@@ -295,11 +245,9 @@ pub(super) enum PendingAction {
     ImportVox,
     Exit,
     Generate(GenerateKind),
-    /// Load the crash-recovery autosave over the current scene.
-    ///
-    /// Guarded like the rest because the recovery prompt is *non-modal*:
-    /// the default scene is live behind it, so a few edits made there
-    /// and then a click on Recover used to discard them without a word.
+    /// Load the crash-recovery autosave over the current scene. Guarded
+    /// like the rest, because the prompt is non-modal and the default
+    /// scene is live behind it.
     RecoverAutosave,
 }
 
@@ -328,14 +276,9 @@ pub(super) enum GenerateKind {
     Pyramid,
 }
 
-/// A stored `[r, g, b, a]` as a brush-ready voxel.
-///
-/// The alpha is dropped rather than restored, and that is the point:
-/// every voxel that reaches the world is opaque, and the brush is one
-/// step from the world. A stored alpha of 0 would hand the brush the
-/// greedy mesher's "no visible face" sentinel — solid to every count,
-/// invisible in every picture — and both files this reads from
-/// (`prefs.ron`, `.vxlt`) are files something else can write.
+/// A stored `[r, g, b, a]` as a brush-ready voxel. Alpha is dropped
+/// rather than restored: every voxel that reaches the world is opaque,
+/// and both files this reads from are externally writable.
 pub(super) fn brush_from_stored(color: [u8; 4]) -> Voxel {
     Voxel::from_rgb(color[0], color[1], color[2])
 }
@@ -415,21 +358,15 @@ impl App {
         }
     }
 
-    /// Initial window inner-size from prefs. Read by `handler::resumed`.
-    ///
-    /// Sanity-guarded: implausibly large values (older builds wrote
-    /// physical pixels into the logical-size field, which then grew
-    /// by scale_factor on every restart) fall back to a known-good
-    /// default. The next `save_prefs` will overwrite the bad entry
-    /// with a proper logical size.
+    /// Initial window inner-size from prefs, read by
+    /// `handler::resumed`. Implausible values fall back to a known-good
+    /// default, which the next `save_prefs` writes back.
     pub(super) fn initial_window_size(&self) -> (u32, u32) {
         let w = self.prefs.window.width;
         let h = self.prefs.window.height;
-        // Range must match the clamp in `save_prefs` — otherwise a size
-        // this side accepts but that side never writes (or the reverse)
-        // makes a valid window silently reset. A 2560- or 3840-wide logical
-        // window (a 2K / 4K display at scale 1.0) used to be rejected here
-        // (old max 2048) yet saved fine, so it never restored (#9).
+        // The range must match the clamp in `save_prefs`: a size one
+        // side accepts and the other never writes makes a valid window
+        // silently reset on every restart.
         if !(640..=4096).contains(&w) || !(480..=4096).contains(&h) {
             (1280, 720)
         } else {
@@ -437,10 +374,9 @@ impl App {
         }
     }
 
-    /// Push the current path to the recent-files MRU. Called from
-    /// file_ops after a successful open/save/import/export. Mirrors
-    /// the updated list to `ui.recent_files` so the next frame's
-    /// Open Recent menu reflects it.
+    /// Push the current path to the recent-files MRU and mirror the
+    /// list to `ui.recent_files`, so the next frame's Open Recent menu
+    /// reflects it.
     pub(super) fn touch_recent(&mut self, path: &std::path::Path) {
         self.prefs.touch_recent(path);
         self.ui.recent_files = self.prefs.recent_files.clone();
@@ -476,11 +412,9 @@ impl App {
             brush_tint_zone: self.editor.brush_color.tint_zone(),
         };
         if let Some(window) = &self.window {
-            // `inner_size()` returns physical pixels; `WindowPrefs` is
-            // in logical pixels (matches how we restore via
-            // `LogicalSize` in handler::resumed). Without this conversion
-            // the window grows by `scale_factor` on every restart on
-            // high-DPI displays, eventually larger than the monitor.
+            // `inner_size()` is physical pixels and `WindowPrefs` is
+            // logical, matching the restore path. Without the
+            // conversion the window grows by `scale_factor` per restart.
             let size = window.inner_size();
             let scale = window.scale_factor().max(0.1);
             let logical_w = ((size.width as f64 / scale).round() as u32).clamp(640, 4096);
@@ -496,10 +430,9 @@ impl App {
     }
 }
 
-/// Expand `cells` with every symmetry mirror combination, deduped.
-/// `Symmetry off` returns `cells` unchanged so the common path skips
-/// the HashSet allocation. Used by both the live shape preview and
-/// the shape commit path so they always render the same set.
+/// Expand `cells` with every symmetry mirror, deduped; symmetry off
+/// returns them unchanged. Used by both the live preview and the commit
+/// path, so the two always agree.
 fn expand_with_symmetry(
     cells: Vec<(i32, i32, i32)>,
     symmetry: SymmetryAxes,
@@ -516,18 +449,9 @@ fn expand_with_symmetry(
     out.into_iter().collect()
 }
 
-/// Locked face plane captured at the start of a brush stroke. The
-/// stroke's drag-paint stays on this plane until release, so paint
-/// doesn't stack along the view direction as new voxels occlude the
-/// cursor's ray-vs-voxels hit.
-///
-/// The plane is axis-aligned (face normal is one of ±X / ±Y / ±Z),
-/// stored as `axis` (which axis is the normal) plus `sign` (which
-/// face). `plane_coord` is the world-space position of the plane
-/// along `axis`. `anchor_along_axis` is the locked value of
-/// `adjacent_pos[axis]` — every paint cell in the stroke pins this
-/// component, so Place fills along the face, Remove / Paint stay on
-/// the same layer.
+/// The face plane locked at the start of a brush stroke, so drag-paint
+/// stays on it until release rather than stacking along the view
+/// direction. Axis-aligned, stored as an axis plus a sign.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct StrokePlane {
     pub axis: usize,
@@ -536,10 +460,9 @@ pub(super) struct StrokePlane {
     pub anchor_along_axis: i32,
 }
 
-/// Build a `StrokePlane` from a raycast hit. Returns `None` when
-/// the hit's normal isn't axis-aligned (e.g. starting inside a
-/// voxel produces `(0, 0, 0)`); the caller falls back to the
-/// existing per-cell ray-vs-voxels path.
+/// Build a `StrokePlane` from a raycast hit, or `None` when the hit's
+/// normal isn't axis-aligned. The caller then falls back to the
+/// per-cell ray path.
 pub(super) fn build_stroke_plane(hit: &RaycastHit) -> Option<StrokePlane> {
     let (nx, ny, nz) = hit.normal;
     let (axis, sign) = if nx != 0 && ny == 0 && nz == 0 {
@@ -552,11 +475,9 @@ pub(super) fn build_stroke_plane(hit: &RaycastHit) -> Option<StrokePlane> {
         return None;
     };
     let ap = [hit.adjacent_pos.0, hit.adjacent_pos.1, hit.adjacent_pos.2];
-    // The plane is the face *between* `voxel_pos` and `adjacent_pos`.
-    // For sign > 0 the plane sits at `adjacent_pos[axis]` (its near
-    // face); for sign < 0 it sits at `adjacent_pos[axis] + 1`
-    // (its far face). Either way, every cell painted on this plane
-    // has `adjacent_pos[axis] == anchor_along_axis`.
+    // The plane is the face between `voxel_pos` and `adjacent_pos`:
+    // near face for a positive sign, far face for a negative one.
+    // Either way every painted cell pins `adjacent_pos[axis]`.
     let plane_coord = if sign > 0 {
         ap[axis] as f32
     } else {
@@ -575,36 +496,21 @@ pub(super) fn build_stroke_plane(hit: &RaycastHit) -> Option<StrokePlane> {
 /// responsive at the default camera distance.
 pub(super) const SHAPE_HEIGHT_PIXELS_PER_VOXEL: f32 = 8.0;
 
-/// The one in-flight edit gesture, if any.
-///
-/// Replaces eight parallel latch fields (button-held flag, stroke
-/// plane, stroke dedup cell, press position, shape drag, two selection
-/// anchors, move ghost) whose cleanup lists had to be maintained by
-/// hand at every exit point — focus loss, release, Esc, tool switch,
-/// scene reset each carried a slightly different subset, and the
-/// combinations they missed ("both anchors at once") each needed a
-/// defensive branch. One value makes the illegal combinations
-/// unrepresentable and gives every exit the same verb: back to `Idle`.
-///
-/// The camera dimension deliberately stays outside this enum: a
-/// Height-phase pause with a middle-button orbit is a legal, useful
-/// overlap (inspecting the extrusion from another angle), so
-/// `cursor_captured` + `CameraController` keep owning navigation.
+/// The one in-flight edit gesture, if any. One value makes illegal
+/// combinations unrepresentable and gives every exit the same verb.
+/// The camera stays outside it — orbiting mid-gesture is legal.
 #[derive(Debug, Default)]
 pub(super) enum EditInteraction {
     /// No gesture in flight.
     #[default]
     Idle,
-    /// Left button held. A brush stroke for Place / Remove / Paint;
-    /// for the click tools (Eyedropper / Fill / Socket) it's a plain
-    /// press-hold that uses none of the fields but still counts as
-    /// "the button is down" for release bookkeeping and frame pacing.
+    /// Left button held: a brush stroke for the painting tools, and for
+    /// the click tools a plain hold that uses none of the fields but
+    /// still counts as "the button is down".
     BrushStroke {
-        /// Locked face plane for drag-paint — the vengi-style fix
-        /// that keeps a stroke on one face instead of stacking toward
-        /// the camera as new voxels occlude the ray. `None` until the
-        /// first apply hits something: a press over empty sky arms
-        /// the stroke, and the first in-world cell locks the plane.
+        /// Locked face plane for drag-paint, keeping a stroke on one
+        /// face instead of stacking toward the camera. `None` until the
+        /// first apply hits something and locks it.
         plane: Option<StrokePlane>,
         /// Cell the most recent stroke step applied at, so drag-paint
         /// doesn't re-apply while the cursor sits in the same cell.
@@ -613,19 +519,16 @@ pub(super) enum EditInteraction {
         /// keeps single-click hand tremor from painting a streak.
         start_screen: (f32, f32),
     },
-    /// Shape phase one: left button held, the cursor's plane-locked
-    /// hit is the footprint's other corner (W × D on the locked
-    /// plane). `anchor` is the first press's `adjacent_pos`, sitting
-    /// on `plane` (`anchor[plane.axis] == plane.anchor_along_axis`).
+    /// Shape phase one: button held, the cursor's plane-locked hit is
+    /// the footprint's other corner. `anchor` is the first press's
+    /// `adjacent_pos`, sitting on `plane`.
     ShapeFootprint {
         anchor: (i32, i32, i32),
         plane: StrokePlane,
     },
-    /// Shape phase two: button released, the cursor's vertical screen
-    /// movement extrudes height along the plane normal. A second
-    /// click commits; Esc cancels. (vengi `ShapeBrush`'s two-phase
-    /// design — W/D from a 1:1 ray-vs-plane projection, H on its own
-    /// dedicated screen-Y axis.)
+    /// Shape phase two: button released, vertical cursor movement
+    /// extrudes height along the plane normal. A second click commits
+    /// and Esc cancels.
     ShapeHeight {
         anchor: (i32, i32, i32),
         plane: StrokePlane,
@@ -645,12 +548,9 @@ pub(super) enum EditInteraction {
     /// runs `move_selection` with that delta as one undoable Command.
     SelectMove {
         anchor: (i32, i32, i32),
-        /// The selection's non-air voxels (world-space), snapshotted
-        /// at pick-up so the per-frame ghost translates this set
-        /// instead of re-reading the world each cell crossed. Dropped
-        /// with the state on commit / cancel. Empty when the box was
-        /// too big to sweep — the move itself is refused with a
-        /// message when it commits.
+        /// The selection's non-air voxels, snapshotted at pick-up so the
+        /// ghost translates this set rather than re-reading the world.
+        /// Empty when the box was too big to sweep.
         ghost: Vec<((i32, i32, i32), Voxel)>,
     },
 }
@@ -674,10 +574,9 @@ impl EditInteraction {
         }
     }
 
-    /// Build the shape-gesture cache key for `update_brush_preview`,
-    /// or `None` when no shape gesture is in flight. `hovered_cell` is
-    /// the cursor's current plane-locked `adjacent_pos` (Footprint
-    /// phase only; `None` falls back to the anchor).
+    /// The shape-gesture cache key for `update_brush_preview`, or
+    /// `None` when no shape gesture is in flight. `hovered_cell` is the
+    /// Footprint phase's current cell.
     pub(super) fn shape_cache_key(
         &self,
         cursor_y: f32,
@@ -729,10 +628,9 @@ impl EditInteraction {
 pub(super) enum ShapeDragKey {
     Footprint {
         anchor: (i32, i32, i32),
-        /// Current cursor's plane-locked cell. Without this in the
-        /// key, dragging the cursor across cells in Footprint phase
-        /// wouldn't invalidate the cache and the preview would
-        /// freeze on the first cell.
+        /// The cursor's plane-locked cell. Without it in the key, a
+        /// Footprint-phase drag wouldn't invalidate the cache and the
+        /// preview would freeze on the first cell.
         end_cell: (i32, i32, i32),
     },
     Height {
@@ -787,13 +685,9 @@ impl App {
     /// Initialize the application with a window.
     pub(super) fn init(&mut self, window: Window) {
         let window = Arc::new(window);
-        // Default cursor_pos to the screen center so a zoom-to-cursor
-        // scroll BEFORE any cursor movement anchors at the screen
-        // center (≈ camera target) instead of the (0,0) top-left
-        // corner — the latter would shift the orbit pivot toward the
-        // top-left of the world on the first scroll, which is
-        // surprising. CursorMoved overwrites this on the first real
-        // mouse move.
+        // Default the cursor to the screen center, so a scroll before
+        // any mouse movement anchors there rather than at the top-left
+        // corner and drags the orbit pivot with it.
         let physical = window.inner_size();
         self.cursor_pos = (physical.width as f32 / 2.0, physical.height as f32 / 2.0);
         self.window = Some(window.clone());
@@ -811,10 +705,9 @@ impl App {
             None,
         );
 
-        // egui is a 2D overlay — its render pass attaches no depth
-        // texture, so its pipeline must not declare a depth format
-        // either. Mismatch trips wgpu validation
-        // ("Incompatible depth-stencil attachment format").
+        // egui is a 2D overlay whose pass attaches no depth texture, so
+        // its pipeline must not declare a depth format either or wgpu
+        // validation refuses the mismatch.
         let egui_renderer =
             egui_wgpu::Renderer::new(&renderer.device, renderer.config.format, None, 1, false);
 
@@ -822,26 +715,16 @@ impl App {
         self.egui_state = Some(egui_state);
         self.egui_renderer = Some(egui_renderer);
 
-        // Always start on the default scene so the first frame has
-        // something to draw, then defer any crash-recovery PROMPT to the
-        // first `RedrawRequested`. Showing a native modal (rfd) here —
-        // inside winit's `resumed` callback — exits the process with
-        // code 1 on Windows (no Rust panic; confirmed it's the modal's
-        // timing, not the file or its loading). By the first frame the
-        // event loop is running and the window has presented, so the
-        // dialog behaves like the in-loop file dialogs that already work.
+        // Always start on the default scene, then defer the recovery
+        // prompt to the first `RedrawRequested`: a dialog raised inside
+        // `resumed` exits the process on the Windows setup.
         self.create_initial_scene();
         // The rebuild above bumped the revision; the default scene is
         // the baseline, not unsaved work.
         self.document.mark_saved();
-        // If a crash-recovery autosave is on disk, the last session
-        // didn't exit cleanly (a clean exit deletes it) — raise the
-        // in-app recovery prompt. The default scene is already up behind
-        // it. The prompt is egui, NOT a native `rfd::MessageDialog`:
-        // showing one of those exits the process on this winit + wgpu
-        // setup (it was the real cause of the "autosave bricks startup"
-        // crash, not the file). See `Ui::show_recovery_prompt` and the
-        // `RecoverAutosave` / `DiscardAutosave` actions.
+        // An autosave on disk means the last session didn't exit
+        // cleanly, so raise the recovery prompt. It is egui, never an
+        // `rfd::MessageDialog` — that exits the process here.
         if Self::autosave_path().is_some_and(|p| p.exists()) {
             self.ui.state.show_recovery_prompt = true;
         }
@@ -853,25 +736,18 @@ impl App {
         self.document.world.create_test_ground(20, 2);
         self.rebuild_all_meshes();
         // Anchor the orbit pivot on the actual scene rather than the
-        // hardcoded (0,0,0) target from `Camera::new`. Without this,
-        // middle-mouse orbit circles a point underneath the model and
-        // the visible cube swings through a wide arc each rotation.
+        // origin, or orbit circles a point underneath the model and the
+        // visible geometry swings through a wide arc.
         self.recenter_camera_on_scene();
     }
 
-    /// Reset every piece of session state that refers to the geometry
-    /// of the scene being replaced.
+    /// Reset every piece of session state that refers to the geometry of
+    /// the scene being replaced. Callers that restore from a file run
+    /// this first and repopulate afterwards.
     ///
-    /// Every whole-scene replacement path — New, Open, Import, crash
-    /// recovery, Clear All, Generate\* — must call this. They each used
-    /// to open-code their own subset, and the parts they all forgot
-    /// were the selection and the generated-bounds: project A's marquee
-    /// stayed live over project B, so Delete / Ctrl+X / arrow-nudge hit
-    /// B's voxels at A's coordinates, and Frame Generated flew off to
-    /// where the *previous* scene's geometry had been.
-    ///
-    /// Callers that restore state from a file (open / recover) run this
-    /// first and repopulate sockets afterwards.
+    /// # Safety
+    /// Every whole-scene replacement path must call this, or a stale
+    /// marquee edits the new world at the old coordinates.
     pub(super) fn reset_scene_session_state(&mut self) {
         self.editor.history.clear();
         // Clears the selection plus the drag / move anchors and the
@@ -879,19 +755,14 @@ impl App {
         self.deselect();
         self.document.sockets.clear();
         // The graph is document data like the sockets, so it goes with
-        // the scene. Open / reload put the incoming file's graph back
-        // immediately after this call; New Scene is the path that wants
-        // the empty one this leaves behind.
+        // the scene. Open and reload put the file's graph back right
+        // after; New Scene wants the empty one this leaves.
         self.document.graph = PipelineGraph::default();
         self.cancel_interaction();
         self.last_generated_bounds = None;
-        // A batch parked for approval was built against the world that
-        // is being thrown away: its `old_voxel`s describe cells that no
-        // longer exist, so committing it here would write a change list
-        // whose undo restores a scene nobody was ever looking at. The
-        // history-depth check in `accept_agent_batch` doesn't catch this
-        // one — `history.clear()` above can land on the same (0, 0) the
-        // batch was parked at.
+        // A parked batch was built against the world being thrown away,
+        // and the generation check can't catch this one: `history
+        // .clear()` above can land on the same value it parked at.
         self.drop_pending_review_for_new_scene();
         if let Some(renderer) = &mut self.renderer {
             renderer.chunk_meshes.clear();
@@ -899,12 +770,8 @@ impl App {
     }
 
     /// Run `action`, or park it until the user answers the
-    /// unsaved-changes prompt.
-    ///
-    /// Lives on `App` rather than in the UiAction dispatch because
-    /// Ctrl+N / Ctrl+O call `new_project` / `open_project` directly from
-    /// the key handler and would sail straight past a guard installed
-    /// only in the queue.
+    /// unsaved-changes prompt. On `App` rather than in the UiAction
+    /// dispatch, because the key handler calls the file ops directly.
     pub(super) fn guard_then(&mut self, action: PendingAction) {
         if !self.document.unsaved() {
             self.run_guarded(action);
@@ -927,14 +794,9 @@ impl App {
         }
     }
 
-    /// Give up on the parked action — the user cancelled, or the save
-    /// they asked for first didn't happen.
-    ///
-    /// Recovery is the one action whose entry point closes behind it:
-    /// `Ui::show_recovery_prompt` clears its own flag the moment it
-    /// dispatches, so dropping the action silently would leave the
-    /// autosave on disk with no way back to it this session — and a
-    /// clean exit later deletes it. Put the prompt back instead.
+    /// Give up on the parked action. Recovery is the one whose entry
+    /// point closes behind it, so dropping it silently would strand the
+    /// autosave — the prompt goes back up instead.
     pub(super) fn drop_pending_guarded(&mut self) {
         if let Some(PendingAction::RecoverAutosave) = self.pending_guarded.take() {
             self.ui.state.show_recovery_prompt = true;
@@ -947,19 +809,9 @@ impl App {
         Prefs::config_path().and_then(|p| p.parent().map(|d| d.join("autosave.vxlt")))
     }
 
-    /// Per-frame autosave tick. Cheap when idle (one bool + one elapsed
-    /// check). Writes whenever the document changed — an *empty* world
-    /// included: after Clear All, or with nothing but a pipeline graph
-    /// or sockets, the empty scene IS the latest state, and skipping it
-    /// (as this used to) meant a crash recovered a stale autosave with
-    /// voxels the user had deliberately removed, while graph-only work
-    /// wasn't recoverable at all. A successful write moves the
-    /// autosave mark (`Document::mark_autosaved`) so the next interval
-    /// finds nothing due until the document changes again; a failed
-    /// write is logged and retried next interval. The *saved* mark is
-    /// untouched — `mark_autosaved` can't reach it, which is how "edit
-    /// → autosave → close still prompts" holds by construction rather
-    /// than by this function remembering to.
+    /// Per-frame autosave tick, cheap when idle. Writes whenever the
+    /// document changed, an empty world included — post-Clear-All
+    /// emptiness *is* the document state. Only the autosave mark moves.
     pub(super) fn tick_autosave(&mut self) {
         if !self.document.autosave_due() || self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
             return;
@@ -972,15 +824,9 @@ impl App {
         }
         let state = self.current_editor_state();
         let metadata = self.document.metadata.clone();
-        // Atomic write: serialize to a temp file, then rename it over the
-        // real autosave. A crash mid-write then leaves at most a stale
-        // temp, never a half-written `autosave.vxlt` — so recovery
-        // always loads a COMPLETE last state. `fs::rename` replaces the
-        // destination on Windows (MoveFileEx) as on POSIX, and both
-        // files share the dir so it's a same-volume move. The temp name
-        // carries the process id for the same reason the project save's
-        // does: two running Voxeliths share one config dir, and a shared
-        // temp name lets their autosaves interleave into garbage.
+        // Atomic write: serialize to a per-process temp, then rename it
+        // over the autosave, so a crash mid-write leaves at most a stale
+        // temp and recovery always loads a complete state.
         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
         let result =
             voxelith::io::save_world_with_state(&self.document.world, state, metadata, &tmp)
@@ -1010,14 +856,9 @@ impl App {
         }
     }
 
-    /// Snap `camera.target` to the world's scene-center (AABB of all
-    /// non-air voxels), then re-derive controller yaw / pitch /
-    /// distance from the new pose. Camera position itself is
-    /// untouched — only the orbit pivot moves, so the user's current
-    /// view direction smoothly rotates onto the scene rather than
-    /// jumping.
-    ///
-    /// No-op when the world is empty (nothing meaningful to focus on).
+    /// Snap `camera.target` to the scene center and re-derive the
+    /// controller's angles. The position is untouched, so only the orbit
+    /// pivot moves. A no-op on an empty world.
     pub(super) fn recenter_camera_on_scene(&mut self) {
         let Some(center) = self.document.world.scene_center() else {
             return;
@@ -1031,15 +872,9 @@ impl App {
             .sync_orbit_state_from_camera(&renderer.camera);
     }
 
-    /// How long after this frame the next one is due — the frame
-    /// scheduler's one policy decision.
-    ///
-    /// Full rate while the user is plausibly mid-something: inside the
-    /// grace window after any input, while the fly camera has a key or
-    /// mouse button down (continuous motion that must not depend on OS
-    /// key-repeat), or while a gesture is latched (stroke, shape drag,
-    /// selection drag / move, captured orbit). Everything else gets the
-    /// idle heartbeat, which still services every per-frame tick.
+    /// How long until the next frame is due — the scheduler's one policy
+    /// decision. Full rate while the user is plausibly mid-something,
+    /// the idle heartbeat otherwise.
     pub(super) fn frame_interval(&self) -> Duration {
         let navigating = self
             .renderer
@@ -1054,22 +889,17 @@ impl App {
         }
     }
 
-    /// Abandon whatever gesture is in flight — back to `Idle` with the
-    /// stroke's undo entry sealed. The one verb every exit point uses:
-    /// focus loss, scene replacement, Esc's shape arm. `end_stroke` is
-    /// a no-op when no stroke is open, so callers don't need to know
-    /// which state they're cancelling — that's the point.
+    /// Abandon whatever gesture is in flight — back to `Idle`, with any
+    /// stroke's undo entry sealed. The one verb every exit point uses,
+    /// so no caller needs to know which state it is cancelling.
     pub(super) fn cancel_interaction(&mut self) {
         self.editor.history.end_stroke();
         self.interaction = EditInteraction::Idle;
     }
 
-    /// Rebuild meshes for all dirty chunks and upload them to the GPU.
-    ///
-    /// Mesh generation runs on rayon's thread pool. Uploads stay on
-    /// the calling thread because wgpu device/queue handles aren't
-    /// trivially shareable with workers and uploads are cheap
-    /// relative to mesh construction.
+    /// Rebuild meshes for all dirty chunks and upload them. Meshing runs
+    /// on the rayon pool; uploads stay on the calling thread, where the
+    /// wgpu handles live and the cost is small anyway.
     pub(super) fn rebuild_all_meshes(&mut self) {
         if self.renderer.is_none() {
             return;
@@ -1081,20 +911,14 @@ impl App {
         }
         let started = Instant::now();
 
-        // Dirty chunks this frame ⟺ voxel data changed (a write marks its
-        // chunk dirty; boundary writes also mark neighbors). This is the
-        // single chokepoint every edit / generation / import / paste
-        // funnels into, so it's where the document's revision moves for
-        // voxel data. The load / new / initial-scene paths mark the
-        // document saved again after their own rebuild — that world came
-        // out of (or is) the baseline. Sockets, graph edits and undo/redo
-        // steps reach no chunk, so their sites bump for themselves.
+        // Dirty chunks mean voxel data changed, and this is the single
+        // chokepoint every edit funnels into — so it is where the
+        // revision moves. Non-voxel edits bump at their own sites.
         self.document.bump();
 
-        // Concurrent reads only: mesher acquires read locks on the dirty
-        // chunk + its 26 Moore neighbors (3³−1 — per-vertex AO samples
-        // diagonal chunks, not just the 6 faces; see mesh::neighbors).
-        // Multiple workers on disjoint chunks share-read those fine.
+        // Concurrent reads only: each mesher read-locks its chunk and
+        // the 26 neighbors AO samples, and workers on disjoint chunks
+        // share those fine. See `mesh::neighbors`.
         let mesher = &self.mesher;
         let world = &self.document.world;
         let meshes: Vec<_> = dirty
@@ -1116,36 +940,15 @@ impl App {
         self.last_rebuild = Some((started.elapsed().as_secs_f32() * 1000.0, dirty.len()));
     }
 
-    /// Refresh the translucent brush/shape hover overlay. Called every
-    /// frame; the cache key short-circuits when nothing meaningful
-    /// changed so the cost is just a few field comparisons.
-    ///
-    /// Three preview modes share this overlay slot:
-    /// 1. **Brush tools** (Place/Remove/Paint/Fill): brush sphere at
-    ///    the hovered cell, expanded by symmetry mirrors.
-    /// 2. **Shape tools, idle** (no drag): single-cell anchor hint at
-    ///    `adjacent_pos` (the cell where the next press would anchor).
-    /// 3. **Shape tools, dragging** (left held with anchor set): full
-    ///    shape voxel set from anchor to current cell, plus mirrors.
-    ///
-    /// Eyedropper has no preview (its color != the sampled color would
-    /// mislead).
+    /// Refresh the hover overlay: a brush sphere, an idle shape's anchor
+    /// hint, or a dragging shape's full cell set, each with symmetry
+    /// mirrors. Cached, so an unchanged frame costs a few comparisons.
     pub(super) fn update_brush_preview(&mut self) {
         let tool = self.effective_tool();
 
-        // Per-frame reconciliation of gesture vs. tool — the "tool
-        // switch cancels the gesture it orphans" rule, checked here
-        // because tool switches arrive through several doors (number
-        // keys, toolbar, Alt release). A shape gesture
-        // survives switches *within* the shape family (Box → Sphere
-        // mid-drag re-previews and commits as the new shape — long-
-        // standing behavior); a Select drag dies with the Select tool
-        // (it was never committed, and the marquee preview following
-        // the cursor under a brush tool would be nonsense). The
-        // generic BrushStroke hold is deliberately NOT reconciled:
-        // switching tools mid-stroke and continuing to paint as the
-        // new tool is established behavior the release path already
-        // handles (it seals the merged undo entry unconditionally).
+        // A tool switch cancels the gesture it orphans, reconciled here
+        // because switches arrive through several doors. A shape gesture
+        // survives within the shape family; a Select drag does not.
         match self.interaction {
             EditInteraction::ShapeFootprint { .. } | EditInteraction::ShapeHeight { .. }
                 if !tool.is_shape() =>
@@ -1165,17 +968,14 @@ impl App {
         let size = self.editor.brush_size;
         let cursor_y = self.cursor_pos.1;
 
-        // Eyedropper, Select, and Socket skip the brush-style hover
-        // overlay entirely. Eyedropper would mislead (brush color !=
-        // sampled color); Select draws its own AABB wireframe; Socket
-        // draws its own gizmo overlay (`update_socket_visualization`).
+        // Eyedropper, Select and Socket skip this overlay: the first
+        // would show the brush color rather than the sampled one, and
+        // the other two draw their own.
         let show = !matches!(tool, Tool::Eyedropper | Tool::Select | Tool::Socket);
 
-        // Cache key. `cell` is hover-derived for non-shape tools and
-        // for idle shapes; for an active shape gesture, `cell` is fixed
-        // to `(0,0,0)` since the gesture's own cache key already
-        // captures everything that affects the preview output
-        // (including the current hovered cell in Footprint phase).
+        // `cell` is hover-derived for non-shape tools and idle shapes.
+        // An active shape gesture pins it, since the gesture's own key
+        // already captures everything affecting the output.
         let hovered_cell = self.editor.hovered_voxel.map(|h| h.adjacent_pos);
         let drag_key = self.interaction.shape_cache_key(cursor_y, hovered_cell);
         let key = if show {
@@ -1183,13 +983,9 @@ impl App {
                 Some(((0, 0, 0), tool, color, size, symmetry, drag_key))
             } else {
                 self.editor.hovered_voxel.map(|h| {
-                    // Key on the cell the preview is actually DRAWN at:
-                    // Place (like the shape tools) previews on `adjacent_pos`
-                    // — the empty cell in front of the hit face — the rest
-                    // on `voxel_pos`. Keying Place on `voxel_pos` left the
-                    // preview stale when the cursor crossed to another face
-                    // of the same voxel (adjacent_pos moved but the key
-                    // didn't, so no regen).
+                    // Key on the cell the preview is drawn at: Place uses
+                    // `adjacent_pos`, the rest `voxel_pos`. Otherwise
+                    // crossing to another face of the same voxel is stale.
                     let cell = if tool.is_shape() || matches!(tool, Tool::Place) {
                         h.adjacent_pos
                     } else {
@@ -1214,10 +1010,9 @@ impl App {
             return;
         }
 
-        // Compute the preview cell list. An active shape gesture has
-        // its own dedicated branch (no dependency on `hovered_voxel`
-        // in Height phase, since the cursor lives in screen space);
-        // all other modes need a real hover.
+        // An active shape gesture has its own branch — Height phase
+        // reads screen space, not a hovered cell — while every other
+        // mode needs a real hover.
         let shape_ends = match self.interaction {
             EditInteraction::ShapeFootprint { anchor, .. } => {
                 // Footprint: cursor's plane-locked hit is the
@@ -1303,22 +1098,9 @@ impl App {
         }
     }
 
-    /// Refresh the box-selection wireframe **and** the move-drag voxel
-    /// ghost. Both overlays are driven from the interaction state and
-    /// share one cache gate:
-    ///
-    /// 1. **`SelectDrag`**: live AABB from anchor → current cell.
-    ///    No ghost.
-    /// 2. **`SelectMove`**: existing AABB translated by
-    ///    `current - anchor`, plus a translucent ghost of the
-    ///    picked-up voxels at the same delta.
-    /// 3. **Idle with a committed selection**: static AABB, no ghost.
-    /// 4. **Nothing**: clear both slots.
-    ///
-    /// Cached against `(last_selection_box, last_ghost_delta)` so
-    /// dragging inside the same cell doesn't rebuild either buffer.
-    /// The delta half of the key is what clears the ghost on the
-    /// commit frame, where the wireframe box alone is unchanged.
+    /// Refresh the selection wireframe and the move ghost, both driven
+    /// from the interaction state through one cache gate. The delta half
+    /// of the key is what clears the ghost on the commit frame.
     pub(super) fn update_selection_visualization(&mut self) {
         // Resolve the wireframe box and, for a move drag, the live
         // translation delta the ghost follows.
@@ -1332,11 +1114,9 @@ impl App {
                 (box_, None)
             }
             EditInteraction::SelectMove { anchor, .. } => {
-                // Move drag — existing selection translated by the
-                // cursor delta. Falls back to the un-translated
-                // selection if there's no current hover (cursor
-                // off-world); the user sees the box stay put rather
-                // than vanish.
+                // Move drag: the selection translated by the cursor
+                // delta, falling back to the untranslated box when the
+                // cursor is off-world, so it stays put rather than vanish.
                 match (self.editor.selection, self.editor.hovered_voxel) {
                     (Some(sel), Some(hit)) => {
                         let cur = Self::select_anchor_pos(&hit);
@@ -1381,18 +1161,13 @@ impl App {
         }
     }
 
-    /// Snapshot the selection's non-air voxels (world-space) at the
-    /// start of a move drag, so the per-frame ghost just translates
-    /// the captured set by the live delta rather than re-reading the
-    /// world every time the cursor crosses a cell. Extracts the same
-    /// content as `copy_selection_to_clipboard`, but keeps absolute
-    /// positions since the ghost renders in world space.
+    /// Snapshot the selection's non-air voxels at the start of a move
+    /// drag, so the ghost translates the captured set rather than
+    /// re-reading the world. Positions stay absolute.
     pub(super) fn move_ghost_snapshot(&self, sel: Selection) -> Vec<((i32, i32, i32), Voxel)> {
-        // Same dense-sweep bound as the selection operations in
-        // `input.rs`: this walks every cell of the AABB, air included,
-        // and it runs at *pick-up* — before the user has even dragged.
-        // An oversized box just gets no ghost; the move itself is
-        // refused with a message when it commits.
+        // The same dense-sweep bound the selection operations use: this
+        // walks every cell of the AABB at pick-up. An oversized box
+        // simply gets no ghost.
         let extent = |a: i32, b: i32| (b as i64 - a as i64) + 1;
         let cells = extent(sel.min.0, sel.max.0)
             * extent(sel.min.1, sel.max.1)
@@ -1408,16 +1183,9 @@ impl App {
             .collect()
     }
 
-    /// Refresh the socket gizmo overlay from `editor.sockets`. Each
-    /// socket renders as a directional pin through the line pipeline
-    /// (a shaft + arrowhead along its outward normal, plus a base cross
-    /// on the surface), so the orientation that export bakes is visible
-    /// in-scene.
-    ///
-    /// Cached against the `(position, normal)` list: cheap to recompute
-    /// each frame for the handful of sockets a scene carries, and only
-    /// touches the GPU when that list actually changes (place / delete /
-    /// load). Renames don't move the gizmo, so they don't rebuild it.
+    /// Refresh the socket gizmos, so the orientation the export bakes is
+    /// visible in-scene. Cached against the `(position, normal)` list,
+    /// which a rename doesn't change.
     pub(super) fn update_socket_visualization(&mut self) {
         let cur: Vec<([f32; 3], [f32; 3])> = self
             .document
@@ -1434,12 +1202,9 @@ impl App {
         }
     }
 
-    /// Resolve the cell a Select-tool gesture should anchor at for a
-    /// given raycast hit. Real-voxel hits select the hit cell itself
-    /// (so clicking a tree trunk grabs the trunk); virtual-ground
-    /// hits use `adjacent_pos` (the cell *on* the plane, not the
-    /// `(x, -1, z)` ghost below it) — otherwise an empty-world drag
-    /// would silently put the selection one cell underground.
+    /// The cell a Select gesture anchors at. A real hit selects the hit
+    /// cell; a virtual ground hit uses `adjacent_pos`, or an empty-world
+    /// drag puts the selection one cell underground.
     pub(super) fn select_anchor_pos(hit: &RaycastHit) -> (i32, i32, i32) {
         if hit.virtual_ground {
             hit.adjacent_pos
@@ -1476,22 +1241,9 @@ impl Default for App {
     }
 }
 
-/// Shrink a restored window size that the monitor can't display.
-///
-/// Both sizes are logical pixels. A size saved on a bigger display
-/// restores verbatim on a smaller one — unplug the 4K dock and the
-/// 3840x2160 entry produces a window whose bottom edge, and with it
-/// the status bar, hangs off screen; the title bar is the only part
-/// you can grab, so it can't be dragged back into view either.
-///
-/// Sizes that already fit are returned untouched: the saved value is
-/// the *inner* size, so a window filling its monitor is normal, and
-/// trimming it every launch would shrink it a step at a time. Once
-/// something doesn't fit, both axes get the 10% margin — winit sizes
-/// the inner area only, decorations live outside it, and there's no
-/// cross-platform work-area query to subtract a taskbar with. A
-/// monitor reporting a zero dimension tells us nothing, so in that
-/// case the saved size stands.
+/// Shrink a restored window size the monitor can't display — a size
+/// saved on a 4K dock otherwise hangs its status bar off a laptop
+/// screen. Sizes that already fit are returned untouched.
 fn fit_window_to_monitor((w, h): (u32, u32), (mon_w, mon_h): (u32, u32)) -> (u32, u32) {
     if mon_w == 0 || mon_h == 0 || (w <= mon_w && h <= mon_h) {
         return (w, h);

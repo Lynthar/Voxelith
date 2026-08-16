@@ -8,31 +8,19 @@ use std::time::Duration;
 use super::{Command, CommandHistory, RaycastHit, SymmetryAxes, VoxelChange};
 use crate::core::{Voxel, World};
 
-/// Time window within which consecutive brush writes coalesce into a
-/// single undo entry. Picked to match a reasonable drag/click cadence
-/// (≈5 actions/sec) so paint strokes feel like one operation while
-/// distinct user gestures stay separate.
+/// Time window within which consecutive brush writes coalesce into one
+/// undo entry — about five actions a second, so a stroke feels like one
+/// operation while separate gestures stay separate.
 pub const STROKE_MERGE_WINDOW: Duration = Duration::from_millis(200);
 
-/// Maximum chebyshev distance (in voxels) that `flood_fill` will
-/// expand from its start cell. Without this cap a fill in an unbounded
-/// world could traverse arbitrarily far; the only existing limit was
-/// `max_voxels`, which is a count cap, not a spatial one.
+/// Maximum Chebyshev distance `flood_fill` expands from its start cell.
+/// `max_voxels` is a count cap, not a spatial one, so without this a
+/// fill in an unbounded world could travel arbitrarily far.
 pub const MAX_FILL_DIST: i32 = 64;
 
-/// Available editing tools.
-///
-/// Brush tools (`Place`/`Remove`/`Paint`/`Eyedropper`/`Fill`) act on
-/// the hovered cell every click or drag-step. Shape tools (`Line`,
-/// `Box`, `Sphere`, `Cylinder`) use the two-phase gesture `app/input`
-/// implements: drag a footprint on the locked face plane, release,
-/// move the cursor vertically to set height, and a **second click**
-/// commits the whole shape as one `Command` (Esc cancels). This doc
-/// used to claim mouse-up committed — it doesn't, and the drift
-/// between here, the README and the in-app help is exactly what
-/// stale gesture descriptions cost. The `Select` tool is the one
-/// that *does* commit on release: drag corner-to-corner, release,
-/// and the `Selection` AABB lands in `Editor::selection`.
+/// Available editing tools. Brush tools act on the hovered cell per
+/// click or drag-step; shape tools run the two-phase footprint → height
+/// gesture and commit on a second click. `Select` commits on release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     /// Place voxels
@@ -60,11 +48,9 @@ pub enum Tool {
     /// Box selection: drag corner-to-corner to mark an AABB region
     /// for batch operations (copy / cut / paste / delete / move).
     Select,
-    /// Place a named attachment point. Single click drops a socket at
-    /// the center of the clicked face, oriented along the face normal;
-    /// it carries no voxels and exports to glTF as an empty node. Kept
-    /// **last** in the enum so the `current_tool as usize` discriminant
-    /// in `.vxlt` / prefs stays stable for the existing tools.
+    /// Place a named attachment point at the center of the clicked
+    /// face, oriented along its normal. Kept **last** in the enum so the
+    /// discriminant stored in `.vxlt` and prefs stays stable.
     Socket,
 }
 
@@ -104,20 +90,16 @@ impl Tool {
         }
     }
 
-    /// Whether this tool uses click-anchor / drag-extent / release-
-    /// commit semantics. Shape tools do; brush tools don't. `Select`
-    /// shares the gesture but goes through its own commit path
-    /// (writing into `Editor::selection`, not the world).
+    /// Whether this tool uses click-anchor / drag-extent semantics.
+    /// Shape tools do, brush tools don't, and `Select` shares the
+    /// gesture but commits into `Editor::selection` rather than a world.
     pub fn is_shape(&self) -> bool {
         matches!(self, Tool::Line | Tool::Box | Tool::Sphere | Tool::Cylinder)
     }
 
-    /// Whether this tool needs an anchor cell to operate. Place,
-    /// every shape tool, and Select need one (so they can build /
-    /// pick into an empty world via the y=0 ground-plane raycast
-    /// fallback); brush tools that read the hovered cell
-    /// (Remove/Paint/Eyedropper/Fill) need a real solid voxel and
-    /// shouldn't engage the fallback.
+    /// Whether this tool needs an anchor cell, and so may use the y=0
+    /// ground-plane fallback to work in an empty world. Tools that read
+    /// the hovered cell need a real voxel and must not engage it.
     pub fn uses_ground_plane_fallback(&self) -> bool {
         // Socket joins this set so a socket can be dropped on the y=0
         // ground in an empty world (e.g. a spawn / origin marker), not
@@ -140,10 +122,9 @@ pub trait EditorTool {
     /// Apply the tool at the given hit location
     fn apply(&self, ctx: &mut ToolContext, hit: &RaycastHit);
 
-    /// Positions the brush hover overlay should highlight, including
-    /// any symmetry-mirrored copies (deduped). Caller passes its
-    /// current `symmetry` so a single source of truth drives both this
-    /// preview and the matching `apply` call.
+    /// Positions the hover overlay should highlight, symmetry copies
+    /// included and deduped. The caller passes its own `symmetry`, so
+    /// one source drives both this preview and the matching `apply`.
     fn preview_positions(
         &self,
         hit: &RaycastHit,
@@ -188,10 +169,9 @@ impl EditorTool for BrushTool {
         let center = match self.mode {
             Tool::Place => hit.adjacent_pos,
             Tool::Remove | Tool::Paint => hit.voxel_pos,
-            // Eyedropper / Fill go through input.rs's tool dispatch,
-            // not BrushTool. Shape tools and Select have their own
-            // click-anchor / drag / commit lifecycle and never call
-            // this path.
+            // Eyedropper and Fill go through input.rs's dispatch rather
+            // than BrushTool; shape tools and Select have their own
+            // gesture lifecycle and never reach this path.
             Tool::Eyedropper
             | Tool::Fill
             | Tool::Line
@@ -202,17 +182,15 @@ impl EditorTool for BrushTool {
             | Tool::Socket => return,
         };
 
-        // Expand the brush sphere across symmetry mirrors. Spheres that
-        // overlap near a symmetry plane would double-count cells, so we
-        // dedup via HashSet — both for efficiency and so the resulting
-        // change set has each position exactly once.
+        // Expand the brush sphere across symmetry mirrors, deduped:
+        // spheres overlapping near a plane would otherwise write the
+        // same position twice.
         let positions = Self::affected_positions(center, ctx.brush_size, ctx.symmetry);
 
         let changes: Vec<VoxelChange> = match self.mode {
-            // Place only writes into empty cells — it never overwrites an
-            // existing solid voxel, so brushing over a model (or a large
-            // brush straddling one) can't punch its color through. Use
-            // Paint to recolor solids.
+            // Place writes only into empty cells, so brushing over a
+            // model can't punch its color through. Paint recolors
+            // solids.
             Tool::Place => positions
                 .into_iter()
                 .filter_map(|pos| {
@@ -283,12 +261,9 @@ impl EditorTool for BrushTool {
             // be too expensive to compute every frame.
             Tool::Fill => symmetry.mirror_positions(hit.voxel_pos),
             Tool::Eyedropper => vec![hit.voxel_pos],
-            // Shape tools and Select have their own preview path
-            // (App::update_brush_preview for shapes; the dedicated
-            // selection-mesh slot for Select). BrushTool's preview is
-            // bypassed for them. Empty here keeps the trait satisfied
-            // without contributing stray cells if someone ever calls
-            // this for a non-brush tool by mistake.
+            // Shape tools and Select have their own preview paths and
+            // bypass this one. Empty keeps the trait satisfied without
+            // contributing stray cells if it is ever called anyway.
             Tool::Line
             | Tool::Box
             | Tool::Sphere
@@ -332,15 +307,9 @@ pub fn eyedrop(world: &World, hit: &RaycastHit) -> Option<Voxel> {
     }
 }
 
-/// What a flood fill did.
-///
-/// `truncated` is the half a bare count can't express: a fill that
-/// wrote every cell of its region and one that hit a cap with more to
-/// go report the same number, and Fill is a destructive edit the user
-/// is entitled to be told about. It is set only when a cell that would
-/// *genuinely have been written* was turned away by one of the two
-/// caps — a flood running into air at the radius is the region ending
-/// on its own, not a cap biting.
+/// What a flood fill did. `truncated` is set only when a cell that
+/// would genuinely have been written was turned away by a cap — a
+/// region ending on its own is not a cap biting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FillOutcome {
     /// Cells actually written. A cell already equal to the brush voxel
@@ -352,41 +321,16 @@ pub struct FillOutcome {
 }
 
 /// The voxel at `pos` if it belongs to the seed's region, else `None`.
-///
-/// Membership is decided by RGBA only: cells that share the seed's
-/// color belong to one region even when their emissive / metallic /
-/// tint-zone bits differ, and each is rewritten with the brush's full
-/// voxel (color + material bits). Matching on the whole 8-byte voxel
-/// used to stop a fill at a same-colored-but-differently-flagged
-/// neighbor and made the result depend on which cell was seeded.
-///
-/// Air is never part of a region, whatever its color. `Voxel::AIR
-/// .color()` is `[0, 0, 0, 0]` — and so is a *solid* voxel built from a
-/// fully-transparent palette entry, which `.vox` import can produce.
-/// Without that guard, filling such a voxel matched every neighboring
-/// air cell and flooded the empty space around it with solid geometry.
-///
-/// One function decides this so the caps' "was anything actually left
-/// out?" test can't drift from the fill's own notion of the region.
+/// Membership is by RGBA alone, and air never belongs whatever its
+/// color — one function, so the caps can't drift from the fill.
 fn region_voxel(world: &World, pos: (i32, i32, i32), target_rgba: [u8; 4]) -> Option<Voxel> {
     let v = world.get_voxel(pos.0, pos.1, pos.2);
     (!v.is_air() && v.color() == target_rgba).then_some(v)
 }
 
-/// Compute the changes a flood-fill would make from `start`, without
-/// applying them. Pulled out of `flood_fill` so callers that need to
-/// batch multiple fills into a single undo entry (notably the symmetric
-/// fill path in `app::input::apply_tool`) can collect changes from
-/// several seeds and submit one combined `Command`.
-///
-/// Region membership is decided by RGBA alone (see [`region_voxel`]),
-/// so a cell whose color already equals `new_voxel`'s but whose
-/// material flags or tint zone differ is still rewritten — "same color"
-/// is not "no change" here. The result is empty only when the seed's
-/// region yields no writes at all.
-///
-/// The returned flag is `truncated` in the [`FillOutcome`] sense: a
-/// cell of the region was left out by a cap.
+/// The changes a flood fill from `start` would make, without applying
+/// them, so several seeds can batch into one undo entry. Membership is
+/// by RGBA, so "same color" is not "no change"; the flag is `truncated`.
 pub fn compute_flood_fill_changes(
     world: &World,
     start: (i32, i32, i32),
@@ -404,10 +348,9 @@ pub fn compute_flood_fill_changes(
         if visited.contains(&pos) {
             continue;
         }
-        // Spatial cap: skip cells outside the chebyshev radius around
-        // `start`. Prevents runaway fills in unbounded worlds where
-        // the connected region might extend far beyond what the user
-        // intended to paint.
+        // Spatial cap: skip cells outside the Chebyshev radius around
+        // `start`, so a connected region in an unbounded world can't
+        // run far past what the user meant to paint.
         if (pos.0 - start.0).abs() > MAX_FILL_DIST
             || (pos.1 - start.1).abs() > MAX_FILL_DIST
             || (pos.2 - start.2).abs() > MAX_FILL_DIST
@@ -422,14 +365,9 @@ pub fn compute_flood_fill_changes(
             continue;
         };
 
-        // Cap on cells *matched*, not writes emitted: a region already
-        // holding `new_voxel` still needs bounding so the flood can't run
-        // away in an unbounded world.
-        //
-        // Tested here rather than at the top of the loop so `truncated`
-        // means "a real cell was left out". At the top it also fired on
-        // the air neighbors still queued when a region ends exactly on
-        // the budget, reporting a truncation that never happened.
+        // Cap on cells matched, not writes emitted, so a region already
+        // holding `new_voxel` is still bounded. Tested here rather than
+        // at the top, so `truncated` means a real cell was left out.
         if visited.len() >= max_voxels {
             truncated = true;
             break;
@@ -485,15 +423,9 @@ pub fn flood_fill(
     FillOutcome { written, truncated }
 }
 
-/// Flood fill from multiple seeds, batching all resulting writes into
-/// a single `Command` so the whole symmetric stroke is one undo entry.
-/// Each seed's flood is computed against the *original* world snapshot
-/// (not the cumulative one), so two seeds spreading toward the same
-/// region won't surprise each other; the per-position dedup keeps the
-/// first occurrence (any later mirror writing the same cell would
-/// produce the same `new_voxel` anyway, so the choice is benign).
-/// Each seed carries its own caps, so `truncated` is true when *any*
-/// mirror hit one — the stroke as a whole came up short.
+/// Flood fill from several seeds as one `Command`, so a symmetric
+/// stroke is one undo entry. Each seed runs against the original world
+/// and carries its own caps, so `truncated` is true if any hit one.
 pub fn flood_fill_multi(
     world: &mut World,
     history: &mut CommandHistory,
@@ -566,12 +498,9 @@ mod tests {
 
     #[test]
     fn test_flood_fill_never_spreads_into_air() {
-        // A `.vox` palette entry with alpha 0 imports as a *solid*
-        // voxel whose `color()` is [0,0,0,0] — the same bytes
-        // `Voxel::AIR` reports. Region membership is decided on color,
-        // so without an explicit air check every empty cell around such
-        // a voxel matched the seed and the fill flooded open space with
-        // geometry.
+        // A solid voxel whose `color()` is [0,0,0,0] reports the same
+        // bytes as air, and membership is decided on color — so without
+        // an explicit air check the fill floods open space.
         let mut world = World::new();
         let mut history = CommandHistory::new(100);
 
@@ -755,11 +684,9 @@ mod tests {
 
     #[test]
     fn flood_fill_budget_reports_truncation_only_when_it_bites() {
-        // A 4-cell strip filled under a budget of exactly 4. The region
-        // ends on the budget, so nothing was left out — but the air
-        // neighbors of the last cell are still queued when the cap is
-        // reached. Testing the cap before deciding those cells aren't
-        // part of the region reported a truncation that never happened.
+        // A 4-cell strip under a budget of exactly 4: the region ends on
+        // the budget, so nothing was left out, even though air
+        // neighbors are still queued when the cap is reached.
         let mut world = World::new();
         let mut history = CommandHistory::new(100);
         let target = Voxel::from_rgb(100, 100, 100);

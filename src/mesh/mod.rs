@@ -1,18 +1,6 @@
-//! Mesh generation from voxel data.
-//!
-//! This module converts voxel chunks into renderable triangle meshes.
-//! Three meshing strategies, all shipped:
-//! - Greedy: merged faces + per-vertex AO. The default for rendering
-//!   and for OBJ / GLB export.
-//! - Naive: one quad per visible face. Reference implementation and
-//!   fallback; shares the quad helpers so windings stay identical.
-//! - Marching Cubes: smooth surfaces. **Export only** — never wired
-//!   into the render path (see `mesh_world_smoothed`).
-//!
-//! `patch_to_mesh` reuses the same face emission helpers to render
-//! a procgen `VoxelPatch` (or any sparse voxel list) directly to a
-//! mesh, with internal face culling — used for the procgen preview
-//! overlay.
+//! Voxel chunks to triangle meshes: greedy (the render and export
+//! default), naive (reference, shares the quad helpers), and Marching
+//! Cubes (export only). `patch_to_mesh` renders a sparse voxel list.
 
 mod ao;
 mod greedy;
@@ -32,10 +20,8 @@ pub(crate) use ao::{ao_to_f32, compute_face_ao, unpack_ao};
 
 use crate::core::{ChunkPos, World};
 
-/// Trait for mesh generation strategies.
-///
-/// Implementations receive the world plus a chunk position so they can
-/// look up neighbor chunks for boundary face culling.
+/// A mesh generation strategy. Implementations get the world plus a
+/// chunk position so they can read neighbors for boundary culling.
 pub trait Mesher {
     /// Generate the mesh for the chunk at `chunk_pos`. Returns an empty
     /// mesh if the chunk doesn't exist or contains only air.
@@ -108,27 +94,9 @@ pub(crate) fn face_quad_vertices(
     face_quad_vertices_sized(x, y, z, face, 1.0, 1.0, color)
 }
 
-/// Build the 4 vertices of a `w × h` face at start cell `(x, y, z)`,
-/// where `w` and `h` are extents in the face's plane. The greedy
-/// mesher uses this to emit merged rectangular quads; `w == h == 1.0`
-/// reduces to the unit-cube case used by the naive mesher, so both
-/// meshers go through the same winding logic and the merged quads
-/// stay consistent with the unmerged ones at chunk boundaries.
-///
-/// Per-face axis convention (matches Lysenko's reference greedy
-/// algorithm and the established voxel-engine convention):
-/// - `+Y` / `-Y`: `w` along +X, `h` along +Z
-/// - `+X` / `-X`: `w` along +Z, `h` along +Y
-/// - `+Z` / `-Z`: `w` along +X, `h` along +Y
-///
-/// Vertices are emitted in walk order around the face perimeter
-/// (CW from outside in world space — verify by computing
-/// `(v1-v0) × (v2-v0)` against the face normal). The triangle
-/// indices in `ChunkMesh::push_quad` are then **reversed** so each
-/// emitted triangle has its cross product parallel to the face
-/// normal, giving CCW-from-outside winding that matches wgpu /
-/// glTF / standard convention. See `test_winding_cross_parallel_to_face_normal`
-/// for the hard verification across all 6 face directions.
+/// The four vertices of a `w × h` face at cell `(x, y, z)`, walked
+/// clockwise from outside; `ChunkMesh::push_quad` reverses the indices
+/// to give CCW-from-outside, which `test_winding_*` pins.
 pub(crate) fn face_quad_vertices_sized(
     x: f32,
     y: f32,
@@ -197,10 +165,8 @@ pub(crate) fn apply_face_shading(color: [f32; 4], face: Face) -> [f32; 4] {
     ]
 }
 
-/// Build the 4 vertices of a `w × h` face with explicit per-vertex
-/// AO values. Wraps `face_quad_vertices_sized` and writes
-/// `ao[i]` into `vertices[i].ao`. Per-vertex AO order matches
-/// `face_vertex_signs` (used by `compute_face_ao`).
+/// As [`face_quad_vertices_sized`], with explicit per-vertex AO in
+/// `face_vertex_signs` order.
 #[allow(clippy::too_many_arguments)] // flat quad geometry — a struct would just move eight names one level down
 pub(crate) fn face_quad_vertices_sized_ao(
     x: f32,

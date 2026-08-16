@@ -1,22 +1,6 @@
-//! Selection transforms: 90° rotations around an axis-aligned axis and
-//! mirror flips. Both produce an overlap-safe `Vec<VoxelChange>` the
-//! caller wraps in `Command::set_voxels` so a single Ctrl+Z reverses
-//! the whole transform.
-//!
-//! **Anchor convention: `sel.min` stays put.** Rotation may swap the
-//! AABB's W / H / D (e.g. a 4×1×2 selection rotated around Y becomes
-//! 2×1×4) and the new box extends from the original `min` along the
-//! swapped axes. No ±0.5 cell drift, no special cases for odd / even
-//! side lengths — every transform is a pure integer remap on cell
-//! indices local to the source `min`.
-//!
-//! Internally everything reduces to "given a source cell, produce a
-//! destination cell". The shared [`build_remap_changes`] handles the
-//! source-clear / destination-write bookkeeping with the same
-//! overlap-safe scheme as `build_move_changes` (which is now a thin
-//! delta-mapping wrapper around it): when a position is both a
-//! source clear and a destination write, the world's pre-transform
-//! value is recorded as `old_voxel` so undo restores exactly.
+//! Selection rotations and mirror flips, as overlap-safe change lists.
+//! **`sel.min` stays put** and every transform is a pure integer remap
+//! on cell indices local to it — no drift, no odd/even special cases.
 
 use std::collections::HashMap;
 
@@ -33,14 +17,9 @@ pub enum Axis {
     Z,
 }
 
-/// Rotation amount in 90° increments. The sign is **right-handed and
-/// unified across all three axes**, so the same variant turns the same
-/// way whichever axis you rotate about. `Cw` is the +90° right-hand
-/// quarter turn (about X it sends +Y -> +Z, about Y +Z -> +X, about Z
-/// +X -> +Y), `Ccw` its -90° inverse, `Half` a 180° turn. The
-/// `Cw`/`Ccw` names are kept for API/UI stability even though a
-/// right-handed +90° reads as *counter*-clockwise seen from the axis's
-/// positive end looking toward the origin.
+/// Rotation in 90° increments, right-handed and unified across all
+/// three axes: `Cw` is the +90° quarter turn (about X, +Y → +Z), `Ccw`
+/// its inverse, `Half` a 180° turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Quarter {
     Cw,
@@ -48,13 +27,9 @@ pub enum Quarter {
     Half,
 }
 
-/// AABB of `sel` after a rotation around `axis`. `sel.min` is preserved;
-/// the new `max` extends from `min` by the (possibly swapped) extents.
-///
-/// - `Axis::Y` rotations swap **W ↔ D** (X and Z dimensions)
-/// - `Axis::X` rotations swap **H ↔ D** (Y and Z dimensions)
-/// - `Axis::Z` rotations swap **W ↔ H** (X and Y dimensions)
-/// - `Quarter::Half` (180°) leaves the size unchanged on every axis
+/// AABB of `sel` after a rotation around `axis`. `sel.min` is preserved
+/// and the new `max` extends from it by the possibly swapped extents; a
+/// quarter turn swaps the two axes perpendicular to `axis`.
 pub fn rotated_aabb(sel: Selection, axis: Axis, quarter: Quarter) -> Selection {
     let (w, h, d) = sel.size();
     let (nw, nh, nd) = match (axis, quarter) {
@@ -69,14 +44,9 @@ pub fn rotated_aabb(sel: Selection, axis: Axis, quarter: Quarter) -> Selection {
     }
 }
 
-/// Map a world-space cell inside `sel` to its rotated counterpart
-/// inside the AABB returned by [`rotated_aabb`]. Pure integer math
-/// — no rounding, no drift across multiple rotations.
-///
-/// The transforms are written on local cell indices `(lx, ly, lz)`
-/// relative to `sel.min`. After the transform the result is added
-/// back to `sel.min` (which equals the new selection's `min` under
-/// our anchor convention) to land in world space.
+/// Map a world cell inside `sel` to its rotated counterpart inside
+/// [`rotated_aabb`]. Pure integer math on indices local to `sel.min`,
+/// added back afterwards — no rounding, no drift across rotations.
 pub fn rotate_pos(
     sel: Selection,
     axis: Axis,
@@ -88,13 +58,9 @@ pub fn rotate_pos(
     let ly = pos.1 - sel.min.1;
     let lz = pos.2 - sel.min.2;
 
-    // Each arm spells out the local-coord transform for one (axis,
-    // quarter) pair. `Cw` is a right-handed +90° turn about `axis` and
-    // `Ccw` its -90° inverse, unified across all three axes so the same
-    // button turns the same way whichever axis you pick. A +90° turn
-    // cycles the two perpendicular axes by the right-hand rule: about
-    // X, +Y -> +Z; about Y, +Z -> +X; about Z, +X -> +Y. `Half` is two
-    // +90° turns composed and so is sign-agnostic.
+    // One arm per (axis, quarter) pair. A +90° turn cycles the two
+    // perpendicular axes by the right-hand rule; `Half` is two of them
+    // composed and so is sign-agnostic.
     let (nlx, nly, nlz) = match (axis, quarter) {
         (Axis::Y, Quarter::Cw) => (lz, ly, w - 1 - lx),
         (Axis::Y, Quarter::Ccw) => (d - 1 - lz, ly, lx),
@@ -126,18 +92,9 @@ pub fn mirror_pos(sel: Selection, axis: Axis, pos: (i32, i32, i32)) -> (i32, i32
     (sel.min.0 + nlx, sel.min.1 + nly, sel.min.2 + nlz)
 }
 
-/// Build the `VoxelChange` list for a remap: each non-air voxel in
-/// `sel` moves from its source position to `mapping(source)`. Source
-/// cells clear to AIR; destination cells receive the moved voxel.
-///
-/// Overlap (where source and destination share cells) is handled the
-/// same way as `build_move_changes`: when a position is both a source
-/// clear and a destination write, the world's pre-transform value is
-/// recorded as `old_voxel` (so undo restores the original world), and
-/// the destination write wins on `new_voxel`.
-///
-/// The function is generic over the mapping so rotation / mirror /
-/// translation all share the same overlap bookkeeping.
+/// The `VoxelChange` list for a remap: each non-air voxel moves to
+/// `mapping(source)` and its source clears. Where the two overlap, the
+/// pre-transform value is the `old_voxel` and the destination wins.
 pub fn build_remap_changes<F>(world: &World, sel: Selection, mapping: F) -> Vec<VoxelChange>
 where
     F: Fn((i32, i32, i32)) -> (i32, i32, i32),
@@ -162,10 +119,9 @@ where
         by_pos.insert(p, (old, Voxel::AIR));
     }
 
-    // Step 2: destination positions receive the moved voxel. For new
-    // (non-overlapping) destinations, read old_voxel from the world
-    // now. For overlap destinations, `entry().or_insert` preserves
-    // the world-old that Step 1 stored — undo restores exactly.
+    // Step 2: destinations receive the moved voxel. A fresh destination
+    // reads its `old_voxel` from the world now; an overlapping one keeps
+    // the value Step 1 stored, via `entry().or_insert`.
     for &(src, vox) in &originals {
         let dest = mapping(src);
         let world_old = world.get_voxel(dest.0, dest.1, dest.2);
@@ -189,10 +145,9 @@ where
         .collect()
 }
 
-/// Convenience: rotate `sel`'s contents around `axis` by `quarter`,
-/// returning `(new_selection_aabb, voxel_changes)`. The caller wraps
-/// `voxel_changes` in `Command::set_voxels` and updates
-/// `editor.selection` to `new_selection_aabb`.
+/// Rotate `sel`'s contents around `axis`, returning the new AABB and
+/// the changes. The caller commits the changes and moves
+/// `editor.selection` onto the new AABB.
 pub fn rotate_selection_changes(
     world: &World,
     sel: Selection,
@@ -270,10 +225,9 @@ mod tests {
 
     #[test]
     fn rotate_y_cw_known_corners() {
-        // 4×1×2 selection at origin, Y-CW.
-        // Local (lx, lz) → (lz, W-1-lx), W=4.
-        // Corner (0,0,0): local (0,0,0) → (0,0,3) world.
-        // Corner (3,0,1): local (3,0,1) → local (1,0,0) → (1,0,0) world.
+        // A 4×1×2 selection at the origin, Y-CW: local (lx, lz) maps to
+        // (lz, W-1-lx) with W=4, so (0,0,0) lands at (0,0,3) and
+        // (3,0,1) at (1,0,0).
         let s = Selection::from_corners((0, 0, 0), (3, 0, 1));
         assert_eq!(rotate_pos(s, Axis::Y, Quarter::Cw, (0, 0, 0)), (0, 0, 3));
         assert_eq!(rotate_pos(s, Axis::Y, Quarter::Cw, (3, 0, 1)), (1, 0, 0));
@@ -281,10 +235,9 @@ mod tests {
 
     #[test]
     fn rotate_x_cw_is_right_handed_plus_90() {
-        // Unified convention: Cw is a right-hand +90° about the axis.
-        // About X that sends +Y -> +Z, so a vertical 1×2×1 column (along
-        // +Y) becomes a 1×1×2 row along +Z: the bottom cell stays put and
-        // the top swings out to the far +Z cell.
+        // Cw is a right-hand +90°, so about X it sends +Y to +Z: a
+        // vertical column becomes a row along +Z, the bottom cell
+        // staying put and the top swinging out.
         let s = Selection::from_corners((0, 0, 0), (0, 1, 0)); // 1×2×1
         assert_eq!(rotated_aabb(s, Axis::X, Quarter::Cw).size(), (1, 1, 2));
         assert_eq!(rotate_pos(s, Axis::X, Quarter::Cw, (0, 0, 0)), (0, 0, 0));
@@ -303,10 +256,9 @@ mod tests {
 
     #[test]
     fn all_axes_cw_share_right_handed_sign() {
-        // Regression guard for the pre-fix bug where X/Z-Cw were -90°
-        // while Y-Cw was +90°. Pin the "leading" +90° mapping of each
-        // axis so none can silently flip sign again:
-        // about X: +Y -> +Z ; about Y: +Z -> +X ; about Z: +X -> +Y.
+        // Pin the leading +90° mapping of each axis so none can silently
+        // flip sign: about X, +Y to +Z; about Y, +Z to +X; about Z,
+        // +X to +Y.
         let sx = Selection::from_corners((0, 0, 0), (0, 1, 0)); // along +Y
         assert_eq!(rotate_pos(sx, Axis::X, Quarter::Cw, (0, 1, 0)), (0, 0, 1));
         let sy = Selection::from_corners((0, 0, 0), (0, 0, 1)); // along +Z
@@ -413,14 +365,9 @@ mod tests {
 
     #[test]
     fn rotate_y_cw_overlap_writes_correct_changes() {
-        // 2×1×1 region at origin, rotated Y-CW.
-        // Local (lx, lz) → (lz, W-1-lx), W=2:
-        //   (0,0,0) → (0,0,1)   [R moves to +Z end]
-        //   (1,0,0) → (0,0,0)   [G moves to where R was]
-        // (0,0,0) is a destination AND a source — overlap. Build:
-        //   (0,0,0): old=R, new=G    (R cleared by Step 1, G written by Step 2)
-        //   (1,0,0): old=G, new=AIR  (cleared, no dest writes here)
-        //   (0,0,1): old=AIR, new=R  (fresh dest)
+        // A 2×1×1 region rotated Y-CW: R moves to the +Z end and G to
+        // where R was, so (0,0,0) is both a source and a destination —
+        // its `old_voxel` must be R, the pre-transform value.
         let mut world = World::new();
         let r = voxel(255, 0, 0);
         let g = voxel(0, 255, 0);
@@ -578,11 +525,9 @@ mod tests {
 
     #[test]
     fn rotate_into_existing_voxels_records_correct_old() {
-        // Rotation lands a moved voxel onto a cell that already holds
-        // a different voxel outside the selection. The destination
-        // cell IS inside the new AABB (rotated_aabb extends from min)
-        // so this is the "destination overwrites pre-existing" case.
-        // old_voxel must reflect the world state, not AIR.
+        // A moved voxel lands on a cell already holding another one
+        // outside the selection, so `old_voxel` must be the world's
+        // value there rather than AIR.
         let mut world = World::new();
         let moving = voxel(255, 0, 0);
         let pre_existing = voxel(0, 0, 255);

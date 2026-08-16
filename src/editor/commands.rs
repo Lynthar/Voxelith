@@ -1,53 +1,24 @@
-//! Command pattern for undo/redo functionality.
-//!
-//! Each edit operation is encapsulated in a Command that knows how to
-//! execute and reverse itself.
-//!
-//! Brush strokes are aggregated via [`CommandHistory::execute_merge`]:
-//! within a configurable time window, consecutive `SetVoxels` commands
-//! are merged into the most recent undo entry instead of being pushed
-//! as separate units. The merge keeps the *earliest* `old_voxel` per
-//! position and the *latest* `new_voxel`, so a single Ctrl+Z reverses
-//! the whole stroke even if the user painted the same cell multiple
-//! times. Merging requires `stroke_open` (set by `execute_merge`,
-//! cleared by `execute` / `end_stroke` / `undo` / `redo`).
+//! Undo/redo. Every edit is one `Command` that knows how to reverse
+//! itself; brush strokes collapse into a single entry through
+//! [`CommandHistory::execute_merge`].
 
 use crate::core::{Voxel, World};
 use crate::procgen::PipelineGraph;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-/// A pipeline-graph replacement riding with a command: the graph as it
-/// was before the command and as the command leaves it.
-///
-/// The graph is document data exactly like the voxels — it persists in
-/// `.vxlt` and an agent's `graph` op replaces it — so an undo that put
-/// the voxels back while leaving the new graph in place restored a
-/// document that never existed (and lost the old graph for good, since
-/// nothing else held a copy). The rider is what makes "one undo entry
-/// per batch" true of the whole batch rather than of its voxel half.
+/// A pipeline-graph replacement riding with a command: the graph before
+/// it and after it. The graph is document data like the voxels, so an
+/// undo has to step both or it restores a state that never existed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphTransition {
     pub before: PipelineGraph,
     pub after: PipelineGraph,
 }
 
-/// A reversible edit command.
-///
-/// One variant on purpose: every edit in the app — a single brush
-/// click, a drag-painted stroke, a filled region, a generator patch,
-/// a selection rotate — is a batch of per-voxel changes, and routing
-/// all of them through one shape is what lets `try_merge_with`
-/// collapse a stroke into a single undo entry. There used to be
-/// `SetVoxel` and `FillRegion` variants as well; both were unused,
-/// and either one would have quietly opted its caller out of stroke
-/// merging (`FillRegion` also recorded a whole AABB of old voxels
-/// where the changed cells alone would do).
-///
-/// The `graph` rider stays inside the one variant for the same reason:
-/// a `SetGraph` variant would be a command brush strokes can't merge
-/// with, and the merge rule for the rider is exactly the per-voxel one
-/// (earliest `before`, latest `after`).
+/// A reversible edit command. One variant on purpose: every edit is a
+/// batch of per-voxel changes, and routing them all through one shape
+/// is what lets a stroke collapse into a single undo entry.
 #[derive(Debug, Clone)]
 pub enum Command {
     /// Set multiple voxels (batch operation)
@@ -77,11 +48,9 @@ impl Command {
         }
     }
 
-    /// Create a batch that also replaces the document's pipeline graph
-    /// (an agent batch whose `graph` / `graph_edit` op landed). Commit
+    /// A batch that also replaces the document's pipeline graph. Commit
     /// through [`CommandHistory::execute_with_graph`], never plain
-    /// `execute` — the rider only takes effect where a `&mut
-    /// PipelineGraph` is in reach.
+    /// `execute` — that path has no graph to apply the rider to.
     pub fn set_voxels_with_graph(
         changes: Vec<VoxelChange>,
         graph: Option<GraphTransition>,
@@ -109,14 +78,9 @@ impl Command {
     /// Reverse the command (undo changes)
     pub fn undo(&self, world: &mut World) {
         let Command::SetVoxels { changes, .. } = self;
-        // Reverse order: if two changes ever share a position (a
-        // generator patch that wrote a cell twice, or a symmetry
-        // brush stroke mirroring a cell onto itself), the EARLIEST
-        // record holds the true pre-command value and must be
-        // restored LAST to win. Forward replay would leave a later
-        // record's old_voxel. (Generator patches are now de-duped
-        // upstream, so same-position olds are equal anyway — this
-        // keeps undo exact for any caller regardless.)
+        // Reverse order: when two changes share a position, the
+        // earliest record holds the true pre-command value and has to
+        // be restored last to win.
         for change in changes.iter().rev() {
             world.set_voxel(change.pos.0, change.pos.1, change.pos.2, change.old_voxel);
         }
@@ -130,17 +94,9 @@ impl Command {
         voxels_noop && graph_noop
     }
 
-    /// Absorb `other` into `self` in place.
-    ///
-    /// For each position, the earliest `old_voxel` is preserved (so
-    /// undo restores the pre-stroke state) and the latest `new_voxel`
-    /// is taken (so the stroke ends in its final visible state). Any
-    /// two commands merge, `Command` having a single variant; add a
-    /// second one and every destructuring here stops compiling, which
-    /// is the point at which a "these two don't merge" path would have
-    /// to come back. The graph rider follows the same rule — earliest
-    /// `before`, latest `after` — though in practice only agent
-    /// batches carry one and those never go through `execute_merge`.
+    /// Absorb `other` into `self`: per position the earliest
+    /// `old_voxel` is kept and the latest `new_voxel` taken. The graph
+    /// rider follows the same rule — earliest `before`, latest `after`.
     pub fn merge_with(&mut self, other: Command) {
         let Command::SetVoxels {
             changes: other_changes,
@@ -208,33 +164,16 @@ impl CommandHistory {
         }
     }
 
-    /// A counter that moves whenever this history changed the world,
-    /// and never moves back.
-    ///
-    /// The stack depths look like they say the same thing and don't:
-    /// `(undo, redo)` returns to a pair it already held in at least
-    /// three ordinary ways — undo then draw (the redo stack is cleared
-    /// by the new command), draw with the undo stack already at
-    /// `max_size` (the push trims the oldest), and continuing a stroke
-    /// (a merge folds into the entry already on top). Each of those
-    /// leaves a *different world* behind the same numbers.
-    ///
-    /// Anything holding a change list computed against an earlier world
-    /// — the editor's agent bridge parks one while a human decides —
-    /// has to be able to tell that the ground moved, because its
-    /// `old_voxel`s describe the world as it *was*, and committing them
-    /// afterwards makes undo restore a state that never existed.
+    /// A counter that moves whenever this history changed the world and
+    /// never moves back. The `(undo, redo)` depths can't stand in: that
+    /// pair returns to values it has already held.
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// Execute a command and push it as a fresh undo entry.
-    /// Use this for one-shot operations (single click, fill, paste).
-    ///
-    /// Voxel-only: a command carrying a graph rider must go through
-    /// [`execute_with_graph`](Self::execute_with_graph) — this path has
-    /// no `&mut PipelineGraph` to apply the rider to, so it would push
-    /// an entry whose undo restores a graph the forward pass never set.
+    /// Execute a command and push it as a fresh undo entry — one-shot
+    /// operations. Voxel-only: a graph rider must go through
+    /// [`execute_with_graph`](Self::execute_with_graph).
     pub fn execute(&mut self, command: Command, world: &mut World) {
         debug_assert!(
             command.graph_rider().is_none(),
@@ -269,12 +208,9 @@ impl CommandHistory {
         self.stroke_open = false;
     }
 
-    /// Execute a command, merging into the most recent undo entry if
-    /// it's part of an open stroke and within `merge_window`. Falls
-    /// back to a fresh push otherwise. Use this for brush-style tools.
-    ///
-    /// Voxel-only, like [`execute`](Self::execute) — brush strokes are
-    /// the only caller and never carry a graph rider.
+    /// Execute a command, merging into the most recent undo entry when
+    /// it belongs to an open stroke within `merge_window`. Voxel-only,
+    /// like [`execute`](Self::execute).
     pub fn execute_merge(&mut self, command: Command, world: &mut World, merge_window: Duration) {
         debug_assert!(
             command.graph_rider().is_none(),
@@ -326,12 +262,9 @@ impl CommandHistory {
         self.generation += 1;
     }
 
-    /// Undo the last command.
-    ///
-    /// Takes the document's pipeline graph alongside the world because
-    /// any entry may carry a [`GraphTransition`]: an agent batch that
-    /// replaced the graph undoes back to the graph it replaced, or the
-    /// old recipe would be gone for good the moment the batch landed.
+    /// Undo the last command. Takes the pipeline graph alongside the
+    /// world because any entry may carry a [`GraphTransition`], and
+    /// nothing else holds a copy of the graph it replaced.
     pub fn undo(&mut self, world: &mut World, graph: &mut PipelineGraph) -> bool {
         if let Some(command) = self.undo_stack.pop_back() {
             command.undo(world);
@@ -410,11 +343,9 @@ mod tests {
         }])
     }
 
-    /// The three ways `(undo_count, redo_count)` comes back to a pair
-    /// it already held while the world underneath it changed. Each was
-    /// a way for the agent bridge to accept a batch built against a
-    /// world that is gone; the generation counter is what tells them
-    /// apart.
+    /// The three ways `(undo_count, redo_count)` returns to a pair it
+    /// already held while the world underneath changed. The generation
+    /// counter is what tells them apart.
     #[test]
     fn every_edit_moves_the_generation_even_when_the_depths_do_not() {
         let mut world = World::new();
@@ -458,9 +389,8 @@ mod tests {
         assert_ne!(mark, history.generation());
     }
 
-    /// It only ever counts up, so a mark taken earlier can never be
-    /// matched again by later activity — including the `clear` that
-    /// accompanies throwing the world away, which lands both depths
+    /// It only counts up, so an earlier mark can never be matched by
+    /// later activity — including the `clear` that lands both depths
     /// back on `(0, 0)`.
     #[test]
     fn the_generation_never_returns_to_a_value_it_has_left() {

@@ -1,42 +1,6 @@
-//! Headless batch export ("bake"): turn many `.vxlt` sources into
-//! optimized, engine-ready `.glb` assets from one declarative spec, so
-//! re-exporting a whole art set after a tweak is a single command instead
-//! of N interactive dialog trips. [`BakeSpec`] is the spec format.
-//!
-//! The bake is CPU-only: it reuses the same mesh + [`crate::io::gltf`]
-//! export path the interactive UI uses (it operates on `World` / mesh
-//! data, never the wgpu render context), so it needs no GPU and no window.
-//! `main.rs` routes `voxelith bake <spec.json>` here before the winit /
-//! egui app is ever constructed.
-//!
-//! Pipeline per item:
-//! 1. load `.vxlt` → `World` + `EditorState` ([`crate::io::load_world_with_state`]);
-//! 2. export `.glb` (greedy, or Marching Cubes when `smoothing` is set)
-//!    with a deterministic placement transform (pivot / up-axis /
-//!    unit-scale), applied as a lossless root node so vertex data is
-//!    never rewritten;
-//! 3. optional geometry compression via `gltfpack` (meshopt);
-//! 4. write a per-item JSON report next to the output.
-//!
-//! ## Spec schema
-//!
-//! ```jsonc
-//! {
-//!   "defaults": { "mesher": "greedy", "smoothing": "none",
-//!                 "up_axis": "y", "unit_scale": 1.0,
-//!                 "pivot": "base-center", "optimize": "meshopt" },
-//!   "items": [
-//!     { "src": "buildings/farm.vxlt", "out": "buildings/farm.glb" },
-//!     { "src": "chars/knight.vxlt",   "out": "chars/knight.glb", "pivot": "feet" },
-//!     { "srcDir": "creatures/", "outDir": "creatures/" }   // one item per .vxlt
-//!   ]
-//! }
-//! ```
-//!
-//! Per-item fields override the matching `defaults`; anything unset falls
-//! back to the *tool* defaults (identity placement, greedy mesh, no
-//! optimize), so a minimal `{ "items": [...] }` reproduces the interactive
-//! export. Paths are resolved relative to the spec file's directory.
+//! Headless batch export: `.vxlt` sources to engine-ready `.glb` from
+//! one declarative spec ([`BakeSpec`]), CPU-only. Per-item fields
+//! override `defaults`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,10 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::editor::Socket;
 use crate::io::{self, ExportTransform, Pivot, SocketNode, UpAxis};
 
-/// A spec-level failure that aborts the whole bake before any item runs
-/// (unreadable / invalid spec, bad `--shard`, unreadable `srcDir`).
-/// Per-item failures do *not* surface here — they're captured in that
-/// item's [`ItemReport`] so one bad model never sinks the batch.
+/// A spec-level failure that aborts the bake before any item runs.
+/// Per-item failures do not surface here — they land in that item's
+/// [`ItemReport`], so one bad model never sinks the batch.
 #[derive(Debug)]
 pub enum BakeError {
     Spec(String),
@@ -76,11 +39,9 @@ pub struct BakeSpec {
     pub defaults: Settings,
     #[serde(default)]
     pub items: Vec<RawItem>,
-    /// Top-level keys we don't recognize, captured so a typo can be
-    /// reported instead of silently doing nothing. `deny_unknown_fields`
-    /// isn't an option here — serde doesn't support it alongside the
-    /// `flatten` in `RawItem` (it rejects the *valid* flattened keys
-    /// too), so catching the leftovers is the workable equivalent.
+    /// Unrecognized top-level keys, captured so a typo is reported
+    /// rather than silently ignored. `deny_unknown_fields` can't be
+    /// used alongside the `flatten` in `RawItem`.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -100,10 +61,9 @@ pub struct Settings {
     pub unit_scale: Option<f32>,
     pub pivot: Option<String>,
     pub optimize: Option<String>,
-    /// Escape hatch: explicit `gltfpack` args replacing the safe default
-    /// set. Use to enable quantization when you don't rely on faction
-    /// tint: quantizing `TEXCOORD_0` can shift the integer tint zone it
-    /// carries, which corrupts faction recolor (see [`run_gltfpack`]).
+    /// Explicit `gltfpack` args replacing the safe default set. Only
+    /// enable quantization when faction tint is unused: it can shift the
+    /// integer zone `TEXCOORD_0` carries (see [`run_gltfpack`]).
     pub optimize_args: Option<Vec<String>>,
 }
 
@@ -191,11 +151,9 @@ impl ResolvedItem {
 // Reports
 // ===========================================================================
 
-/// Per-item outcome, written beside the output with the output's
-/// extension replaced by `.report.json` (`farm.glb` → `farm.report.json`
-/// — `Path::with_extension` semantics, not an appended suffix). The
-/// headless analogue of the interactive post-export dialog; also
-/// returned in the [`BakeOutcome`].
+/// Per-item outcome, written beside the output with the extension
+/// replaced by `.report.json` — `Path::with_extension` semantics, not an
+/// appended suffix. Also returned in the [`BakeOutcome`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemReport {
     pub src: String,
@@ -251,11 +209,9 @@ impl BakeOutcome {
             let _ = writeln!(out, "Baked {ok}/{total} item(s) ({failed} failed).");
         }
         if total == 0 {
-            // "Baked 0/0 item(s)." on its own reads like success, and
-            // the exit code is 0, so a CI step that silently baked
-            // nothing looks identical to one that worked. Unknown spec
-            // keys are ignored by design, so a typo'd "Items" lands
-            // here too.
+            // "Baked 0/0 item(s)." reads like success at exit code 0, so
+            // a CI step that baked nothing looks identical to one that
+            // worked. A typo'd "Items" lands here too.
             let _ = writeln!(
                 out,
                 "warning: nothing to bake — \"items\" is empty, or --shard \
@@ -303,12 +259,9 @@ impl BakeOutcome {
 // Public entry point
 // ===========================================================================
 
-/// Read and run a bake spec. `shard`, when `Some("i/n")`, processes only
-/// every n-th item starting at i — for CI fan-out across processes.
-///
-/// Returns `Err` only for spec-level problems (the whole run can't start);
-/// individual model failures are recorded in the returned reports with
-/// `ok == false`, so the batch always completes what it can.
+/// Read and run a bake spec; `shard` as `Some("i/n")` processes every
+/// n-th item for CI fan-out. `Err` only for spec-level problems —
+/// per-model failures ride in the reports, so the batch finishes.
 pub fn run_bake(spec_path: &Path, shard: Option<&str>) -> Result<BakeOutcome, BakeError> {
     let text = std::fs::read_to_string(spec_path).map_err(|e| {
         BakeError::Spec(format!("could not read spec {}: {e}", spec_path.display()))
@@ -344,10 +297,9 @@ pub fn run_bake(spec_path: &Path, shard: Option<&str>) -> Result<BakeOutcome, Ba
 // Spec resolution
 // ===========================================================================
 
-/// Report keys the spec carried that we don't act on. Ignoring them is
-/// deliberate (forward compatibility with future spec versions), but
-/// ignoring them *silently* means a typo'd `"smoothng"` produces an
-/// asset that looks fine and isn't what was asked for.
+/// Report keys the spec carried that nothing acts on. Ignoring them is
+/// deliberate; ignoring them *silently* means a typo'd `"smoothng"`
+/// produces an asset that looks fine and isn't what was asked for.
 fn warn_unknown_keys(where_: &str, unknown: &BTreeMap<String, serde_json::Value>) {
     if unknown.is_empty() {
         return;
@@ -715,31 +667,9 @@ impl std::fmt::Display for OptimizeError {
     }
 }
 
-/// Compress `glb` in place via meshoptimizer's `gltfpack`.
-///
-/// A Voxelith `.glb` is vertex-coloured and carries two channels no
-/// material samples, which rules most of a stock glTF optimization chain
-/// out: **texture compression** has nothing to compress (there is no
-/// `baseColorTexture` — the only "UV" is the tint-zone mirror, not a
-/// sampled texture); **Draco** quantizes attributes, and quantizing that
-/// UV shifts the integer zone index; and a naive **prune** deletes
-/// `COLOR_0` / `_TINTZONE` / `TEXCOORD_0` precisely because nothing
-/// samples them. What is left — and what is actually worth doing here —
-/// is meshopt geometry compression. The win is transmission and GPU
-/// upload weight, never triangle count: greedy meshing already set that.
-///
-/// Default args are correctness-first for this format:
-/// - `-cc` : `EXT_meshopt_compression` — the main win (vertex-cache
-///   reorder + vertex/index buffer compression).
-/// - `-noq`: no quantization — protects the **integer tint-zone** carried
-///   in `TEXCOORD_0.x` (quantization can shift it and corrupt faction
-///   recolor) and keeps `COLOR_0` AO exact. Override via `optimize_args`
-///   to trade this for smaller files when you don't use faction tint.
-/// - `-kn` : keep named nodes — preserves the named socket empty-nodes.
-/// - `-km` : keep named materials — preserves the plain/emissive/metallic split.
-///
-/// Never decimates (no `-si`) — simplification would destroy the hard
-/// voxel edges and per-vertex AO the export works to preserve.
+/// Compress `glb` in place via meshoptimizer's `gltfpack`. Never `-si`
+/// — decimation destroys the hard edges and baked AO — and `-noq`,
+/// since quantization shifts the integer tint zone in `TEXCOORD_0`.
 fn run_gltfpack(glb: &Path, args_override: Option<&[String]>) -> Result<(), OptimizeError> {
     // gltfpack writes a fresh file; go via a temp then rename over the
     // input so a mid-run failure can't leave a half-written .glb.

@@ -1,11 +1,6 @@
-//! L-System tree generator using a 3D turtle.
-//!
-//! The L-system rewrites `AXIOM` by `RULE_F` for `iterations` rounds,
-//! then a turtle interprets the resulting string. Push/pop (`[` / `]`)
-//! manages branch stack; on each push we apply a random roll seeded
-//! from `self.seed` so sibling branches don't collapse into a plane.
-//! `F` rasterizes a 3D Bresenham line into the patch as trunk; on
-//! every `]` we drop a small leaf cluster at the branch tip.
+//! L-System tree from a 3D turtle. The axiom is rewritten for
+//! `iterations` rounds, then interpreted: `F` rasterizes a line as
+//! trunk, `[`/`]` push and pop, and each `]` drops a leaf cluster.
 
 use glam::{Mat3, Vec3};
 use rand::rngs::StdRng;
@@ -17,10 +12,9 @@ use super::{GenError, GenResult, GeneratorCategory, GeneratorMeta, VoxelGenerato
 
 /// Plant L-system grown by a 3D turtle.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-// Every field defaults, so a partial set of parameters is a legal
-// one: the agent-ops registry merges what a caller named over
-// these, a graph node spells out only what it wants to differ,
-// and a `.vxlt` written before a field existed still loads.
+// Every field defaults, so a partial set of parameters is legal: the
+// registry merges what a caller named over these, and a `.vxlt` written
+// before a field existed still loads.
 #[serde(default)]
 pub struct LSystemTree {
     pub seed: u32,

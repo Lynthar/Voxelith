@@ -1,21 +1,11 @@
-//! Ray casting for voxel picking.
-//!
-//! Uses the DDA (Digital Differential Analyzer) algorithm for efficient
-//! voxel traversal along a ray.
+//! Ray casting for voxel picking, by DDA traversal along the ray.
 
 use crate::core::World;
 use glam::{Mat4, Vec3, Vec4};
 
-/// How far past the camera's current orbit radius a ground-plane orbit
-/// pivot may sit, as a multiple of that radius.
-///
-/// Re-anchoring the pivot never moves the image — the new point is on
-/// the view ray — so the only thing it changes is the orbit radius, and
-/// that is where the damage hides: the press looks like nothing
-/// happened and the *next* drag swings the camera at the new scale. A
-/// crossing twice as far as the camera already orbits is the most that
-/// can still be called "roughly what I'm working on"; beyond that it is
-/// the horizon, and pivoting there turns a small drag into a teleport.
+/// How far past the current orbit radius a ground-plane pivot may sit,
+/// as a multiple of it. Re-anchoring never moves the image, only the
+/// radius — so the damage shows up on the *next* drag.
 const GROUND_PIVOT_MAX_GROWTH: f32 = 2.0;
 
 /// A ray in 3D space
@@ -36,11 +26,8 @@ impl Ray {
         }
     }
 
-    /// Create a ray from screen coordinates
-    ///
-    /// screen_pos: (x, y) in pixels from top-left
-    /// screen_size: (width, height) in pixels
-    /// view_proj_inv: inverse of view-projection matrix
+    /// Create a ray from screen coordinates, in pixels from the
+    /// top-left, against the inverse view-projection matrix.
     pub fn from_screen(
         screen_pos: (f32, f32),
         screen_size: (f32, f32),
@@ -87,12 +74,9 @@ pub struct RaycastHit {
     pub normal: (i32, i32, i32),
     /// Distance along the ray
     pub distance: f32,
-    /// True when this hit was synthesized by `cast_with_ground_plane`
-    /// because the ray missed every real voxel. Lets shape tools
-    /// detect the empty-world case and substitute screen-space
-    /// vertical drag for the missing Y axis (otherwise an empty-world
-    /// drag is stuck flat on the plane and Sphere / Cylinder produce
-    /// a disk).
+    /// True when the hit was synthesized because the ray missed every
+    /// real voxel. Shape tools read it to substitute a screen-space
+    /// vertical drag, or an empty-world sphere comes out a disk.
     pub virtual_ground: bool,
 }
 
@@ -219,23 +203,9 @@ impl VoxelRaycast {
         None
     }
 
-    /// Cast a ray, falling back to a virtual hit on the horizontal
-    /// plane at `y = plane_y` when no solid voxel intercepts it.
-    ///
-    /// Used for the Place tool so the user can place voxels into a
-    /// freshly-cleared (empty) world — without a fallback, raycast
-    /// would miss everything and Place would have no anchor.
-    ///
-    /// The synthesized hit puts `voxel_pos` at `y = plane_y - 1` (a
-    /// virtual sub-plane "ghost" anchor) and `adjacent_pos` on the
-    /// plane itself, so a Place tool that writes at `adjacent_pos`
-    /// lands directly on the plane. Other tools (Remove/Paint/Eyedrop/
-    /// Fill) shouldn't call this — their semantics break on virtual
-    /// hits — they should call [`Self::cast`] instead.
-    ///
-    /// Only fires when the camera is above the plane and looking down;
-    /// looking sideways or up at the plane gives no synthetic hit
-    /// (avoids the cursor "snapping" to the plane behind the user).
+    /// Cast a ray, falling back to a virtual hit on `y = plane_y` when
+    /// no voxel intercepts it, so anchor tools work in an empty world.
+    /// Only fires looking down at the plane from above.
     pub fn cast_with_ground_plane(
         ray: &Ray,
         world: &World,
@@ -268,46 +238,16 @@ impl VoxelRaycast {
         })
     }
 
-    /// Resolve an orbit pivot from a camera-forward `ray` (origin =
-    /// camera position, direction = camera forward), Unity-style:
-    ///
-    /// 1. **Voxel surface** — first solid voxel the ray hits. However
-    ///    far away, this is something the user is looking at.
-    /// 2. **Ground plane** — else the `y = 0` (XZ) intersection, when it
-    ///    lies ahead (`t > 0`), within `max_distance`, and **near where
-    ///    the camera is already orbiting** (see
-    ///    [`GROUND_PIVOT_MAX_GROWTH`]). Nothing is being looked at here
-    ///    — the crossing is a geometric coincidence — so it is only
-    ///    worth pivoting around while it stays at the scale the user is
-    ///    working at.
-    /// 3. **`fallback`** — else the caller's current camera target. For
-    ///    a forward ray the view-depth plane through the target meets
-    ///    the ray exactly at the target, so this *is* the "view-depth
-    ///    plane" fallback; returning the target leaves the pivot depth
-    ///    unchanged and, crucially, keeps the press jump-free.
-    ///
-    /// The result (cases 1–2) always lies on `ray`, so moving the
-    /// camera target onto it preserves the view direction — the orbit
-    /// re-anchors without any visible camera jump, only `distance`
-    /// changes. Returns a continuous world point, not a grid cell.
+    /// Resolve an orbit pivot from a camera-forward ray: the first
+    /// solid voxel, else a nearby `y = 0` crossing, else `fallback`.
+    /// The result lies on the ray, so re-anchoring never moves the view.
     pub fn orbit_pivot(ray: &Ray, world: &World, max_distance: f32, fallback: Vec3) -> Vec3 {
         if let Some(hit) = Self::cast(ray, world, max_distance) {
             return ray.at(hit.distance);
         }
-        // Ground-plane intersection. `1e-4` rejects rays parallel
-        // enough to y=0 that `t` would explode. Both directions
-        // (looking down from above, or up from below) are valid as long
-        // as the crossing is ahead and within reach — unlike
-        // `cast_with_ground_plane`, which is placement-oriented and only
-        // fires looking down.
-        //
-        // Reach is the smaller of the caller's cap and a multiple of
-        // the radius the camera is *currently* orbiting at — which is
-        // exactly `origin - fallback`, since `fallback` is the current
-        // target. The absolute cap alone is not enough: at 500 it is a
-        // horizon distance, and a camera orbiting at 40 that tilts a few
-        // degrees below level crosses y=0 around 400 out, which passes
-        // the cap and multiplies the orbit radius by ten.
+        // Ground-plane intersection; `1e-4` rejects rays parallel enough
+        // that `t` explodes. Reach is the smaller of the caller's cap
+        // and a multiple of the radius the camera currently orbits at.
         if ray.direction.y.abs() > 1e-4 {
             let t = -ray.origin.y / ray.direction.y;
             let orbit_radius = (ray.origin - fallback).length();
@@ -444,13 +384,9 @@ mod tests {
 
     #[test]
     fn orbit_pivot_does_not_re_anchor_onto_the_horizon() {
-        // The reported teleport: camera 20 up, orbiting something 40
-        // away, tilted just 3° below level. The y=0 crossing is ~380
-        // out — an order of magnitude past where the camera is actually
-        // orbiting, and nothing the user is looking at. Re-anchoring
-        // there leaves the image alone (the point is on the view ray)
-        // and then multiplies the orbit radius by ten, so the first
-        // drag throws the camera hundreds of units.
+        // A camera orbiting at 40, tilted 3° below level, crosses y=0
+        // some 380 out. Re-anchoring there leaves the image alone and
+        // then multiplies the orbit radius by ten.
         let world = World::new();
         let fallback = Vec3::new(0.0, 20.0, -40.0);
         let ray = Ray::new(

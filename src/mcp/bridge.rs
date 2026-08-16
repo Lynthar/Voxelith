@@ -1,30 +1,6 @@
-//! The editor as the document.
-//!
-//! [`super::VoxelithMcp`] serves a document this process owns outright,
-//! which is exactly what a headless agent wants. This serves the one
-//! already open in front of a human: the world, the selection and the
-//! undo stack all belong to the editor, and every tool call is a message
-//! to its main thread.
-//!
-//! That difference is the whole point. An agent's batch and a hand-drawn
-//! brush stroke land on **one** `CommandHistory`, so a human undoes an
-//! agent's step with the Ctrl+Z they already use and takes over
-//! mid-build without stopping anything. The checkpoint-plus-file-watch
-//! path this grew out of could never do that: two processes, two worlds,
-//! two undo stacks, and a `.vxlt` passed between them meant one writer
-//! at a time and a human whose only move was to stop the agent first.
-//!
-//! The tool set is deliberately smaller than the headless server's:
-//! editing and looking, no file operations. Someone is sitting at this
-//! document — where it saves is theirs to decide, and `new_project`
-//! would leave an agent's call parked behind the editor's
-//! unsaved-changes prompt waiting for a click nobody knows to make.
-//!
-//! Nothing here touches the world itself. The main thread owns it, this
-//! side owns the wire, and [`AgentRequest`] / [`Answer`] are the only
-//! vocabulary between them — which is also why the editor never has to
-//! build a `CallToolResult` and this module never has to know what a
-//! chunk is.
+//! An MCP server over the document a human has open. Seven tools,
+//! editing and looking only; the main thread owns the world and this
+//! side owns the wire.
 
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -40,27 +16,17 @@ use crate::view;
 
 use super::{answered, refused, RenderArgs, Rendered};
 
-/// Loopback port the editor offers by default.
-///
-/// Deliberately not the headless server's 8080: someone running
-/// `voxelith mcp --http` alongside the editor should not have to
-/// discover the clash by having one of them fail to start.
+/// Loopback port the editor offers by default. Not the headless
+/// server's 8080, so running both at once doesn't clash.
 pub const DEFAULT_PORT: u16 = 8737;
 
-/// Largest image edge this bridge will render.
-///
-/// Half the headless server's ceiling, for a reason that has nothing to
-/// do with the picture: these renders run on the editor's frame loop,
-/// so their cost is measured in seconds the window doesn't respond.
-/// The project's own measurement is ~480 ms for one 1024² view against
-/// a small model — seven of those is a program that looks hung. At 512
-/// a full sweep is a hitch; at the 256 default it is a frame.
+/// Largest image edge this bridge will render — half the headless
+/// server's ceiling, because these renders run on the editor's frame
+/// loop and cost seconds the window doesn't respond.
 pub const BRIDGE_MAX_SIZE: u32 = 512;
 
-/// What the server asks the editor's main thread to do.
-///
-/// One variant per tool, and no variant that writes a file: see the
-/// module note on why this set is smaller than the headless server's.
+/// What the server asks the editor's main thread to do. One variant per
+/// tool, and none that writes a file.
 #[derive(Debug)]
 pub enum AgentRequest {
     /// Boxed because an `OpsBatch` carries up to 256 ops and every other
@@ -76,17 +42,9 @@ pub enum AgentRequest {
     Redo,
 }
 
-/// How the editor treats a batch that arrives from an agent.
-///
-/// The default is [`Approval::Auto`]: the batch lands, the human watches
-/// it land, and their Ctrl+Z is right there if it was wrong. That is a
-/// better loop than gating every step, because an agent typically works
-/// in a run of batches and a human who has to approve each one is doing
-/// data entry rather than art direction.
-///
-/// [`Approval::Review`] is for when they'd rather see it first: the
-/// batch goes up as a translucent preview and the agent's call waits
-/// until they answer.
+/// How the editor treats a batch from an agent. [`Approval::Auto`] lands
+/// it with Ctrl+Z right there; [`Approval::Review`] puts it up as a
+/// translucent preview and makes the agent's call wait.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Approval {
@@ -139,9 +97,8 @@ pub struct Applied {
     pub status: BridgeStatus,
     pub report: ApplyReport,
     /// The same world the report counts, always — under `dry_run` both
-    /// come from the preview. Answering with a report of the world after
-    /// the batch beside a description of the world before it is the one
-    /// way to make "what would this do?" actively misleading.
+    /// come from the preview, or the answer would pair a report of the
+    /// world after with a description of the world before.
     pub description: Description,
     pub review: Reviewed,
 }
@@ -222,14 +179,9 @@ pub enum Answer {
 /// The editor's answer to one call.
 pub type AgentReply = Result<Answer, Refusal>;
 
-/// One call in flight: what was asked, and the line the answer goes back
-/// on.
-///
-/// The editor may hold on to a call rather than answering it at once —
-/// that is what [`Approval::Review`] is, a batch parked on screen until
-/// a human decides. Dropping it unparked still unblocks the agent, with
-/// "the editor went away", so a forgotten branch fails loudly instead of
-/// hanging the tool call forever.
+/// One call in flight: what was asked and the line the answer goes back
+/// on. Dropping it unanswered still unblocks the agent with "the editor
+/// went away", so a forgotten branch fails loudly rather than hangs.
 pub struct BridgeCall {
     pub request: AgentRequest,
     reply: oneshot::Sender<AgentReply>,
@@ -243,9 +195,8 @@ impl BridgeCall {
     }
 
     /// Whether anyone is still waiting for this answer. A parked call
-    /// whose agent has timed out should be cleaned off the screen rather
-    /// than left asking a human to approve something nobody will hear
-    /// the answer to.
+    /// whose agent timed out is cleaned off the screen rather than left
+    /// asking a human to approve something nobody will hear.
     pub fn abandoned(&self) -> bool {
         self.reply.is_closed()
     }
@@ -259,12 +210,9 @@ pub struct BridgeHandle {
 }
 
 impl BridgeHandle {
-    /// Ask the editor, and wait for its answer.
-    ///
-    /// Unbounded on the way in and one call per tool invocation on the
-    /// way out: the queue is a handful of messages that the main thread
-    /// drains every frame, and a bounded channel would only add a way
-    /// for the server to block on a rendering editor.
+    /// Ask the editor and wait for its answer. Unbounded on the way in:
+    /// the main thread drains the queue every frame, and a bound would
+    /// only add a way for the server to block on a rendering editor.
     async fn call(&self, request: AgentRequest) -> AgentReply {
         let (reply, answer) = oneshot::channel();
         self.calls
@@ -288,12 +236,9 @@ pub struct BridgeReceiver {
 }
 
 impl BridgeReceiver {
-    /// The next queued call, or `None` when there is nothing waiting.
-    ///
-    /// Never blocks — this runs inside the frame loop. A closed channel
-    /// reads as `None` for the same reason: the editor owns the server's
-    /// lifetime, so a channel with no senders means it already stopped
-    /// the thing on the other end.
+    /// The next queued call, or `None` when nothing is waiting. Never
+    /// blocks — this runs inside the frame loop, and a closed channel
+    /// reads as `None` because the editor owns the server's lifetime.
     pub fn try_recv(&mut self) -> Option<BridgeCall> {
         self.calls.try_recv().ok()
     }
@@ -441,13 +386,9 @@ impl BridgeMcp {
         Parameters(args): Parameters<RenderArgs>,
     ) -> Result<CallToolResult, McpError> {
         let size = args.size.unwrap_or(view::DEFAULT_SIZE);
-        // Lower than the headless server's ceiling, and refused rather
-        // than clamped like every other size in this protocol. The
-        // difference is whose thread this runs on: the editor renders
-        // in its frame loop, so the whole window stops responding for
-        // as long as it takes, and seven views at 1024² is more than
-        // three seconds of a program that looks hung. The same request
-        // to `voxelith mcp` is fine — nobody is sitting in front of it.
+        // Lower than the headless ceiling, and refused rather than
+        // clamped: the editor renders in its frame loop, so the window
+        // stops responding for as long as it takes.
         if size > BRIDGE_MAX_SIZE {
             return refused(&ExecError::new(
                 "invalid_size",
@@ -469,10 +410,9 @@ impl BridgeMcp {
             Err(refusal) => return refused(&refusal.into()),
         };
 
-        // One text block then one image per view, rather than a summary
-        // followed by a pile of pictures: the caption has to sit next to
-        // the image it describes, or six views come back as six images
-        // an agent has to count to identify.
+        // One text block then one image per view: the caption has to sit
+        // next to the image it describes, or six views come back as six
+        // pictures an agent has to count to identify.
         let mut blocks = Vec::with_capacity(rendered.views.len() * 2 + 1);
         blocks.push(ContentBlock::text(
             serde_json::to_string_pretty(&rendered.status).map_err(|e| {
@@ -522,13 +462,9 @@ struct Generators {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for BridgeMcp {
     fn get_info(&self) -> ServerInfo {
-        // Named apart from the headless server on purpose: this is the
-        // name a client shows its user, and the two differ in the one
-        // way that matters to whoever is picking — whether there is a
-        // human watching. (Spelled out rather than
-        // `Implementation::from_build_env()`, which reads the *rmcp*
-        // crate's build environment; see the same call on
-        // `VoxelithMcp`.)
+        // Named apart from the headless server: this is what a client
+        // shows its user, and the two differ in whether a human is
+        // watching. Spelled out — `from_build_env` reads rmcp's own.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new(
@@ -565,17 +501,9 @@ impl ServerHandler for BridgeMcp {
     }
 }
 
-/// Serve Streamable HTTP at `/mcp` on an already-bound socket.
-///
-/// The listener is bound by the caller, on the editor's own thread, so a
-/// port already in use is an error a human sees in the panel where they
-/// switched the bridge on — rather than a line in a log file from a task
-/// that quietly never started.
-///
-/// The handler factory hands out clones of one server for the reason
-/// spelled out on [`super::serve_http`]: under the 2026-07-28 spec each
-/// POST is its own MCP session, so a fresh server per request would give
-/// every call its own line to nowhere.
+/// Serve Streamable HTTP at `/mcp` on an already-bound socket, so a port
+/// clash surfaces in the panel rather than in a log. The factory hands
+/// out clones of one server — see [`super::serve_http`].
 #[cfg(feature = "mcp-http")]
 pub async fn serve_http_bridged(
     editor: BridgeHandle,
@@ -593,9 +521,8 @@ pub async fn serve_http_bridged(
         StreamableHttpServerConfig::default(),
     );
     // Loopback is not the access control here — see `guard`. The
-    // document on the other side of this socket is one a human has
-    // open, so "some process on this machine" is exactly the caller
-    // worth turning away.
+    // document behind this socket is one a human has open, so "some
+    // process on this machine" is exactly the caller worth refusing.
     let router =
         crate::mcp::guard::guarded(axum::Router::new().nest_service("/mcp", service), token);
     listener.set_nonblocking(true)?;
@@ -604,20 +531,14 @@ pub async fn serve_http_bridged(
     Ok(())
 }
 
-/// Held by the editor for as long as the bridge is on: the address it is
-/// listening on, and the task serving it.
-///
-/// Dropping this aborts the server task, which closes the socket. There
-/// is no graceful drain because there is nothing to drain — a call in
-/// flight is a call the editor is answering on its own thread, and one
-/// that never gets answered is exactly what [`BridgeCall`]'s dropped
-/// sender reports.
+/// Held while the bridge is on: the address and the task serving it.
+/// Dropping it aborts the task and closes the socket — nothing to drain,
+/// since an unanswered call is what [`BridgeCall`]'s dropped sender is.
 pub struct RunningBridge {
     pub address: std::net::SocketAddr,
-    /// The ready-to-paste client setup line, token and all. Kept as
-    /// text rather than as the token itself: the panel's job is to
-    /// hand a human something that works, and nothing in the editor
-    /// needs to inspect the secret afterwards.
+    /// The ready-to-paste client setup line, token and all. Kept as text
+    /// rather than as the token: nothing in the editor needs to inspect
+    /// the secret afterwards.
     client_command: String,
     task: tokio::task::JoinHandle<()>,
 }
@@ -702,10 +623,9 @@ mod tests {
         editor.await.expect("the editor side should not panic");
     }
 
-    /// An editor that goes away mid-call — the window closed, the bridge
-    /// switched off — has to unblock whoever was waiting. The failure
-    /// this rules out is a tool call that hangs until the client's own
-    /// timeout, with nothing in the answer saying why.
+    /// An editor that goes away mid-call has to unblock whoever was
+    /// waiting. The failure this rules out is a tool call that hangs
+    /// until the client's own timeout with nothing saying why.
     #[tokio::test]
     async fn a_dropped_call_unblocks_the_agent() {
         let (handle, mut receiver) = channel();

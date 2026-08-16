@@ -1,11 +1,6 @@
-//! Box selection: an axis-aligned region of cells the user has marked
-//! for batch operations (copy / cut / paste / delete / move).
-//!
-//! `Selection` is a closed AABB inclusive on both corners — a 1×1×1
-//! selection is a single cell. It deliberately does *not* track the
-//! actual voxel contents inside the box: copy / cut read the world at
-//! command-build time so they always see the latest state, and a
-//! selection survives unrelated edits without going stale.
+//! Box selection: a closed AABB of cells, inclusive on both corners.
+//! It tracks no voxel contents — copy and cut read the world when the
+//! command is built, so a selection never goes stale.
 
 /// Axis-aligned closed selection box in world cell coordinates.
 /// Inclusive on both corners.

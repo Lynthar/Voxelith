@@ -1,38 +1,6 @@
-//! Standard Marching Cubes lookup tables.
-//!
-//! These are the canonical Lorensen-Cline 1987 tables as published
-//! by Paul Bourke (http://paulbourke.net/geometry/polygonise/, public
-//! domain). Every Marching Cubes implementation worth its salt uses
-//! the same numbers — they're not negotiable, they're a property of
-//! the cube topology.
-//!
-//! ## Indexing
-//!
-//! The 8 corners of a unit cube are numbered:
-//!
-//! ```text
-//!    7 ────── 6           +Y
-//!   /│       /│            │
-//!  4 ────── 5 │            │
-//!  │ 3 ─────│─2            └── +X
-//!  │/       │/            ╱
-//!  0 ────── 1            +Z
-//! ```
-//!
-//! The 12 edges (each an undirected pair of corners):
-//!
-//! ```text
-//!   0: 0–1   4: 4–5   8: 0–4
-//!   1: 1–2   5: 5–6   9: 1–5
-//!   2: 2–3   6: 6–7  10: 2–6
-//!   3: 3–0   7: 7–4  11: 3–7
-//! ```
-//!
-//! `cube_index` is an 8-bit mask where bit `i` is set if corner `i`
-//! has density above the iso-level. `EDGE_TABLE[cube_index]` is the
-//! 12-bit mask of edges crossed by the surface; `TRI_TABLE[cube_index]`
-//! is the triangulation as a list of edge indices, three per triangle,
-//! terminated by `-1`.
+//! Marching Cubes lookup tables — the canonical Lorensen-Cline 1987
+//! numbers as published by Paul Bourke (public domain), whose corner
+//! and edge numbering these tables' indices follow.
 
 #[rustfmt::skip]
 pub static EDGE_TABLE: [u32; 256] = [

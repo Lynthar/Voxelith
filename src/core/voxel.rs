@@ -19,10 +19,7 @@ pub struct Voxel {
     pub b: u8,
     /// Alpha component (0-255, used for transparency effects)
     pub a: u8,
-    /// Additional flags for special properties
-    /// Bit 0: emissive
-    /// Bit 1: metallic
-    /// Bit 2-7: reserved
+    /// Bit 0 emissive, bit 1 metallic, bits 2-7 reserved.
     pub flags: u8,
     /// Reserved for future use (e.g., rotation, variant)
     pub _reserved: u8,
@@ -135,11 +132,9 @@ impl Voxel {
         }
     }
 
-    /// Tint zone for faction / team recoloring, stored in `_reserved`:
-    /// `TINT_ZONE_NONE` (0) / `PRIMARY` (1) / `SECONDARY` (2) /
-    /// `RESERVED` (3). Exported per-vertex as `_TINTZONE` so a downstream
-    /// uber-shader can multiply faction colors per zone at runtime
-    /// instead of baking a single color in. Independent of `flags`.
+    /// Faction recolor zone stored in `_reserved`: none / primary /
+    /// secondary / reserved. Exported per-vertex as `_TINTZONE` for a
+    /// downstream uber-shader. Independent of `flags`.
     #[inline]
     pub fn tint_zone(&self) -> u8 {
         self._reserved

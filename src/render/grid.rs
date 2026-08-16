@@ -44,18 +44,9 @@ pub struct GridMesh {
     pub vertex_count: u32,
 }
 
-/// Line vertices for a square grid on the XZ plane at y=0, spanning
-/// `±size * spacing` on both axes.
-///
-/// The extent must match the line *placement* range: lines sit at
-/// `i * spacing` for `i ∈ [-size, size]`, so they have to run the same
-/// distance to actually cross. Halving it (an old off-by-two) drew a
-/// correct grid only in the central quarter and left the outer ring as
-/// non-intersecting parallel stripes — visible in every screenshot as a
-/// "comb" around the scene.
-///
-/// Split out of `GridMesh::new` so the geometry is testable without a
-/// GPU device.
+/// Line vertices for a square grid on the XZ plane, spanning
+/// `±size * spacing`. The extent must match the placement range or the
+/// outer lines never cross. Split out to be testable without a GPU.
 fn grid_vertices(size: i32, spacing: f32) -> Vec<LineVertex> {
     let mut vertices = Vec::new();
     let half = size as f32 * spacing;

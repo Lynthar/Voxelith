@@ -1,23 +1,6 @@
-//! Wavefront OBJ export.
-//!
-//! Walks every chunk in the world, re-meshes it with the `GreedyMesher`
-//! (the same path used at render time), and writes the combined
-//! geometry to a single OBJ file. Vertex colors are emitted using the
-//! `v x y z r g b` extension that Blender / MeshLab / most modern
-//! voxel-aware tools recognize; tools that don't understand the
-//! trailing RGB just ignore it and produce an uncolored mesh.
-//!
-//! Y is up (matches Voxelith's world axis), so importers using the
-//! default OBJ axes get the orientation right out of the box. CCW
-//! winding from outside is preserved end-to-end (mesher → OBJ); no
-//! axis or winding flip needed.
-//!
-//! Geometry comes from `GreedyMesher`, so coplanar faces are already
-//! merged before they reach here. What the exporter does *not* do is
-//! deduplicate vertices across chunks: each chunk's vertices are
-//! emitted independently and its triangle indices are translated to
-//! global OBJ-1-indexed values. Cross-chunk dedup would only recover
-//! the seams between chunks — far less than the merging already done.
+//! Wavefront OBJ export: greedy-meshed geometry with per-vertex color
+//! through the `v x y z r g b` extension, Y up and CCW from outside.
+//! Vertices are not deduplicated across chunks.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -45,11 +28,9 @@ pub struct ObjStats {
     pub chunk_count: usize,
 }
 
-/// Export the current world to a Wavefront OBJ at `path`.
-///
-/// Returns counts of what was written. An empty world produces a valid
-/// OBJ with header + object name but no geometry — readers should
-/// import it as an empty mesh rather than choking.
+/// Export the world to a Wavefront OBJ, returning counts of what was
+/// written. An empty world still produces a valid file, with a header
+/// and an object name but no geometry.
 pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
     let mesher = GreedyMesher::new();
 
@@ -80,24 +61,18 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
     )?;
     writeln!(writer, "o Voxelith")?;
 
-    // Faces in OBJ are 1-indexed and reference global vertex / normal
-    // counters that span the whole file. We emit per-chunk: first the
-    // chunk's vertices, then its normals, then its faces translated
-    // into the running global index space. OBJ allows the v / vn / f
-    // sequence to interleave like this as long as referenced indices
-    // are defined earlier in the file, which they always are here.
+    // OBJ faces are 1-indexed against global counters, so each chunk
+    // emits vertices, then normals, then faces translated into the
+    // running index space — legal as long as indices precede their use.
     let mut base: usize = 1;
     for mesh in &chunk_meshes {
         let cp = mesh.chunk_pos;
         writeln!(writer, "g chunk_{}_{}_{}", cp.x, cp.y, cp.z)?;
 
         for v in &mesh.vertices {
-            // 4 decimal places on positions is exact for integer-aligned
-            // voxel corners (every coordinate is an integer); keeps the
-            // file parseable as plain text by humans inspecting it.
-            // Colors get 3 decimals — anything finer is below the input
-            // RGB-byte resolution so further precision is noise. AO is
-            // baked into the color here (see `Vertex::baked_color`).
+            // Four decimals is exact for integer-aligned voxel corners
+            // and keeps the file readable; colors get three, past which
+            // precision falls below RGB-byte resolution.
             let c = v.baked_color();
             writeln!(
                 writer,
@@ -127,24 +102,9 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
     Ok(stats)
 }
 
-/// Export the world to OBJ with Marching-Cubes smoothing applied.
-/// Walks the entire world as a single density field and runs MC to
-/// produce a continuous interpolated surface with per-vertex colors
-/// blended from neighboring solid voxels.
-///
-/// `blur` controls the smoothing strength:
-/// - `false` (light): MC runs directly on the raw 0/1 density. Output
-///   is "rounded cubes" — voxel surfaces with rounded edges.
-///   Preserves thin features (1-cell-wide tree branches, sparse
-///   detail) at the cost of less organic curvature.
-/// - `true` (heavy / clay): a 3×3×3 box blur is applied to the
-///   density field before MC. Output is clay-like blobs — great for
-///   terrain and large solid masses, but thin / isolated features
-///   dilute below the 0.5 isolevel and disappear.
-///
-/// Output structure: single `o Voxelith` object, single `g smoothed`
-/// group. Uses the same `v x y z r g b` vertex-color extension as
-/// the regular OBJ exporter.
+/// Export the world to OBJ with Marching-Cubes smoothing. `blur` false
+/// keeps thin features as rounded cubes; true blurs the density field
+/// into clay and dissolves 1-cell detail.
 pub fn export_obj_smoothed(world: &World, path: &Path, blur: bool) -> Result<ObjStats, ObjError> {
     let mesh = mesh_world_smoothed(world, blur)?;
     let stats = ObjStats {
@@ -169,10 +129,9 @@ pub fn export_obj_smoothed(world: &World, path: &Path, blur: bool) -> Result<Obj
     Ok(stats)
 }
 
-/// Write a single combined `ChunkMesh` to an OBJ writer in the same
-/// format `export_obj` uses per chunk: vertex positions with embedded
-/// colors, then per-vertex normals, then triangle face lines indexed
-/// 1-based as `f v//vn v//vn v//vn`.
+/// Write a combined `ChunkMesh` in the same format `export_obj` uses
+/// per chunk: positions with embedded colors, then normals, then
+/// 1-based `f v//vn` face lines.
 fn write_obj_combined_mesh<W: Write>(mesh: &ChunkMesh, writer: &mut W) -> Result<(), ObjError> {
     for v in &mesh.vertices {
         let c = v.baked_color();
@@ -268,11 +227,9 @@ mod tests {
 
     #[test]
     fn test_export_adjacent_voxels_cull_shared_face() {
-        // Two voxels sharing a face, *different colors*: the shared
-        // face is culled from both (10 visible faces) and greedy
-        // can't merge the same-axis pairs because colors differ →
-        // 10 quads × 2 tris = 20. Confirms color barriers prevent
-        // merging in the OBJ path the same way they do in render.
+        // Two voxels sharing a face in different colors: the shared face
+        // is culled from both and the color barrier blocks merging, so
+        // ten quads and twenty triangles.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(1, 0, 0, Voxel::from_rgb(0, 0, 255));
@@ -287,10 +244,9 @@ mod tests {
 
     #[test]
     fn test_export_adjacent_same_color_voxels_merge() {
-        // Two adjacent same-color voxels: greedy merges top, bottom,
-        // +Z, -Z into 2-wide quads (1 each); ±X stay 1×1 (1 each).
-        // 6 quads × 2 tris = 12. Confirms greedy is actually doing
-        // the merging in the OBJ output path (not just at render).
+        // Two adjacent same-color voxels: top, bottom and ±Z merge into
+        // 2-wide quads while ±X stay 1×1 — six quads, twelve triangles,
+        // so greedy is merging in the OBJ path too.
         let mut world = World::new();
         let c = Voxel::from_rgb(128, 128, 128);
         world.set_voxel(0, 0, 0, c);

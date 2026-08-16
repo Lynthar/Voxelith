@@ -1,16 +1,6 @@
-//! Hand-painted vector icons for the toolbar.
-//!
-//! Drawn with `egui::Painter` primitives instead of an icon font or
-//! bitmap assets: no new dependency, crisp at any scale factor, and
-//! the glyphs inherit whatever text color the widget state calls for
-//! (hover / selected / disabled) so they never fight the theme. The
-//! `match` is total over [`Tool`], so a new tool can't reach the
-//! toolbar without an icon — the letter-glyph era ended when the
-//! toolbar became the only place to pick one.
-//!
-//! Every glyph is authored in the unit square and mapped through
-//! `rect`, so the caller decides the size; the toolbar hands in its
-//! button rect minus padding.
+//! Hand-painted toolbar icons, drawn with `egui::Painter` primitives:
+//! no icon-font dependency, crisp at any scale, and colored by widget
+//! state. The `match` is total over [`Tool`]; glyphs use the unit square.
 
 use egui::{vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 

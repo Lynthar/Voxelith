@@ -1,25 +1,6 @@
-//! The wire format: what an agent sends, as serde types.
-//!
-//! Every type here is `deny_unknown_fields`. That is the opposite of
-//! the `#[serde(default)]` forward-compat discipline `prefs.ron` and
-//! `.vxlt` follow, and deliberately so: those formats read files an
-//! *older* build wrote, while this one reads a request a language
-//! model just invented. A hallucinated field that silently does
-//! nothing is the worst outcome available — the agent believes it set
-//! something, the world disagrees, and nothing in the report says why.
-//! Rejecting it names the mistake.
-//!
-//! Coordinates are world cell coordinates, Y up. Regions are inclusive
-//! on both ends (`min` and `max` are cells *in* the region), matching
-//! [`Selection`] and the drag-shape tools.
-//!
-//! With the `mcp` feature these types also derive `JsonSchema`, because
-//! an MCP client learns this format from the tool schema and nowhere
-//! else. Generating it from the types is the same discipline the
-//! generator registry follows — a hand-written copy is a second source
-//! of truth that starts drifting the day after it's written. Only
-//! [`VoxelSpec`] needs a hand-written schema, since it also needs a
-//! hand-written `Deserialize`; a test pins the two together.
+//! The wire format an agent sends, as serde types. Every type is
+//! `deny_unknown_fields`, coordinates are world cells with Y up, and
+//! regions are inclusive on both ends.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -83,12 +64,9 @@ impl From<Selection> for Aabb {
     }
 }
 
-/// World axis, lowercase on the wire (`"x"` / `"y"` / `"z"`).
-///
-/// A wire-format twin of [`Axis`] rather than serde derives on `Axis`
-/// itself: the JSON spelling is this protocol's business, and pinning
-/// it on the shared editor type would make every future serialization
-/// of an axis inherit this format.
+/// World axis, lowercase on the wire. A wire-format twin of [`Axis`]
+/// rather than serde derives on it: the JSON spelling is this
+/// protocol's business, not every future use of the editor type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
@@ -118,11 +96,9 @@ impl AxisSpec {
     }
 }
 
-/// Which cells a write is allowed to land on.
-///
-/// `only_solid` is how you repaint without changing the silhouette —
-/// there's no separate `paint` op because `box` + `only_solid` already
-/// is one.
+/// Which cells a write is allowed to land on. `only_solid` repaints
+/// without changing the silhouette, which is why there is no separate
+/// `paint` op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
@@ -150,10 +126,9 @@ pub enum VoxelSpec {
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SolidVoxel {
     pub rgb: [u8; 3],
-    /// Accepted only as `255`. Every voxel in the world is opaque — the
-    /// greedy mesher's "no visible face" sentinel and the flood fill
-    /// both depend on it — so the field exists to give an agent that
-    /// thinks in RGBA a real answer instead of an "unknown field".
+    /// Accepted only as `255` — every voxel in the world is opaque. The
+    /// field exists so an agent that thinks in RGBA gets a real answer
+    /// rather than "unknown field".
     #[serde(default)]
     pub a: Option<u8>,
     /// Material id, default 1 (what the editor's brush uses). 0 is air.
@@ -192,12 +167,8 @@ impl<'de> Deserialize<'de> for VoxelSpec {
 }
 
 /// Hand-written for the same reason [`Deserialize`] is: this type is
-/// two shapes, and no derive infers a schema for a custom deserializer.
-///
-/// It is the only written-by-hand schema in the protocol, so it's the
-/// only one that can drift from what the code accepts — hence the test
-/// below, and hence the object half being `SolidVoxel`'s own generated
-/// schema by reference rather than a transcription of it.
+/// two shapes, and no derive infers a schema for a custom
+/// deserializer. The test below pins the two together.
 #[cfg(feature = "mcp")]
 impl schemars::JsonSchema for VoxelSpec {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -258,20 +229,16 @@ impl VoxelSpec {
     }
 }
 
-/// One entry of a `set_voxels` op: `[x, y, z, voxel]`.
-///
-/// A positional array, not `{"pos": …, "voxel": …}`, because this op
-/// exists to carry thousands of them and every repeated key is tokens
-/// the agent pays for twice (writing them, then re-reading them).
+/// One entry of a `set_voxels` op: `[x, y, z, voxel]`. Positional
+/// because this op carries thousands of them, and every repeated key is
+/// tokens the agent pays for twice.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct VoxelEntry(pub i32, pub i32, pub i32, pub VoxelSpec);
 
-/// One operation. Tagged by `"op"`.
-///
-/// Every shape op takes a `voxel`, and `"air"` is a legal value — so
-/// `box` with `"air"` is "erase this region" and there is no separate
-/// erase op.
+/// One operation, tagged by `"op"`. Every shape op takes a `voxel` and
+/// `"air"` is legal, so `box` with `"air"` erases a region and there is
+/// no separate erase op.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
@@ -343,23 +310,8 @@ pub enum Op {
         write_mode: WriteMode,
     },
     /// Store a procedural pipeline graph on the document and write what
-    /// it produces.
-    ///
-    /// A graph is `{"nodes": [ … ]}`, one flat object per node:
-    /// `{"id": 0, "kind": "builtin.perlin_terrain", "width": 32}`,
-    /// `{"id": 1, "kind": "filter", "input": 0, "predicate": {"y_above": 4}}`,
-    /// `{"id": 2, "kind": "output", "input": 1}`. Source nodes are named
-    /// by generator id and take that generator's parameters directly —
-    /// only the ones you want to differ. Transform nodes are
-    /// `translate` / `filter` / `mask` / `combine`, and exactly one
-    /// `output` node marks what the pipeline emits. Call
-    /// `list_generators` for a ready-made graph to copy.
-    ///
-    /// The graph is kept with the project, so a human can open it in the
-    /// editor's Graph panel afterwards and keep tuning the parameters —
-    /// which is the point of sending one instead of voxels. Set
-    /// `apply: false` to store it without evaluating, for building a
-    /// graph up over several batches.
+    /// it produces. Call `list_generators` for a ready-made graph to
+    /// copy; `apply: false` stores it without evaluating.
     Graph {
         graph: serde_json::Value,
         #[serde(default = "yes")]
@@ -370,15 +322,9 @@ pub enum Op {
         #[serde(default)]
         write_mode: WriteMode,
     },
-    /// Change the graph the document already has, instead of resending
-    /// the whole thing.
-    ///
-    /// `describe` reports the current graph; these edits name nodes by
-    /// the ids it shows. The edits run in order against a copy, so a
-    /// batch that fails part-way leaves the graph exactly as it was —
-    /// a wire that would close a cycle is refused and nothing else in
-    /// the list has to be undone by hand. Same `apply` rule as `graph`:
-    /// on by default, `false` to edit without evaluating.
+    /// Change the graph the document already has instead of resending
+    /// it. Edits name nodes by the ids `describe` shows and run against
+    /// a copy, so a failure part-way leaves the graph as it was.
     GraphEdit {
         edits: Vec<GraphEdit>,
         #[serde(default = "yes")]
@@ -412,15 +358,9 @@ pub enum Op {
     /// symmetric model.
     MirrorCopy {
         axis: AxisSpec,
-        /// The mirror plane, given as the **seam between cell
-        /// `plane - 1` and cell `plane`** — cell `p` lands at
-        /// `2·plane − 1 − p`. Integer because a voxel is a cell
-        /// `[p, p+1)`, not a point: the seams are exactly the integers,
-        /// and a plane through a cell's *middle* would only map that
-        /// cell onto itself. Defaults to the seam just past the
-        /// region's `max` on `axis`, i.e. the copy sits flush against
-        /// the original. `0` mirrors across the world origin, matching
-        /// the editor's symmetry planes.
+        /// The mirror plane, as the seam between cell `plane - 1` and
+        /// cell `plane`: cell `p` lands at `2·plane − 1 − p`. Defaults
+        /// to the seam past the region's `max`; `0` is the world origin.
         #[serde(default)]
         plane: Option<i32>,
         #[serde(default)]
@@ -430,12 +370,9 @@ pub enum Op {
     },
 }
 
-/// One change to the document's pipeline graph.
-///
-/// Six verbs, each mapping to something `PipelineGraph` already does,
-/// which is why this is a vocabulary rather than a second graph API:
-/// the cycle check on `connect` is the editor's own, so an agent and a
-/// human dragging a wire are refused by the same code.
+/// One change to the document's pipeline graph. Six verbs, each mapping
+/// to something `PipelineGraph` already does — the cycle check on
+/// `connect` is the same one a human dragging a wire hits.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "edit", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
@@ -496,10 +433,9 @@ mod tests {
 
     #[test]
     fn a_misspelled_field_is_named_rather_than_ignored() {
-        // The reason every type here denies unknown fields: an agent
-        // that writes `filed` believes it asked for a shell, and a
-        // silently ignored key would hand it a solid block with a
-        // report saying everything went fine.
+        // Why every type denies unknown fields: an agent that writes
+        // `filed` believes it asked for a shell, and a silently ignored
+        // key hands it a solid block with a report saying it went fine.
         let error =
             parse_op(r#"{"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":"air","filed":false}"#)
                 .expect_err("unknown field must be refused");

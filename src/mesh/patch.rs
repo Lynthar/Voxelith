@@ -1,7 +1,5 @@
-//! Convert a sparse voxel list (typically from `procgen::VoxelPatch`)
-//! into a renderable mesh, with face culling between voxels in the
-//! input. Used for the procgen preview overlay so we can show the
-//! generator's output without writing to the world.
+//! Render a sparse voxel list — typically a `procgen::VoxelPatch` — as
+//! a mesh with internal face culling, for the preview overlay.
 
 use std::collections::HashMap;
 
@@ -9,15 +7,9 @@ use crate::core::{ChunkPos, Voxel};
 
 use super::{apply_face_shading, face_quad_vertices, ChunkMesh, Face};
 
-/// Build a mesh from a flat voxel list.
-///
-/// `alpha` is baked into every vertex's color alpha so the same shader
-/// can render the result transparently when the caller pairs it with
-/// an alpha-blending pipeline.
-///
-/// The list may contain duplicate positions; later entries win
-/// (consistent with `HashMap` insertion). Air voxels are skipped.
-/// Faces between two solid voxels in the list are culled.
+/// Build a mesh from a flat voxel list. `alpha` is baked into every
+/// vertex color for alpha-blended rendering. Later duplicates win, air
+/// is skipped, and faces between two solid entries are culled.
 pub fn patch_to_mesh(voxels: &[((i32, i32, i32), Voxel)], alpha: f32) -> ChunkMesh {
     // Index for O(1) neighbor lookup. `chunk_pos: ChunkPos::ZERO` is a
     // placeholder — the preview path doesn't go through Renderer's

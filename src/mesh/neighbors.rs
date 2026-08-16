@@ -1,15 +1,6 @@
-//! 26-neighbor lock + voxel query helpers for AO sampling.
-//!
-//! Per-vertex AO samples cells in a 2×2 footprint on the face's
-//! "outside" layer. For voxels at chunk corners these samples can
-//! cross **diagonal** chunk boundaries — i.e. require reads from
-//! up to 3 axes' worth of neighbor chunks at once. The 6-face
-//! `NeighborGuards` used by `is_face_visible` isn't enough; we need
-//! the full 26 neighbors (3³ - 1).
-//!
-//! Lock once at meshing-start, deref through `voxel_at_local` for
-//! each AO sample. Missing neighbor chunks (unloaded) → AIR, same
-//! convention as the face-culling path.
+//! 26-neighbor locking and voxel queries for AO sampling. Lock once at
+//! meshing start, then read through [`voxel_at_local`]; an unloaded
+//! neighbor reads as AIR, as in the face-culling path.
 
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::sync::Arc;
@@ -61,48 +52,19 @@ pub(crate) fn neighbor_arcs(world: &World, chunk_pos: ChunkPos) -> NeighborArcs 
     out
 }
 
-/// Read-lock all 26 neighbor chunks. Returns `None` per slot for
-/// missing chunks. Caller must keep `arcs` alive for the guards'
-/// borrow.
+/// Read-lock all 26 neighbor chunks; `None` per missing chunk.
+/// Caller keeps `arcs` alive for the guards' borrow.
 ///
-/// # Every chunk write must stay on the thread that drives meshing
-///
-/// This is hold-and-wait across 27 locks in no global order: the caller
-/// already holds the center chunk's read guard, and these 26 are taken
-/// on top of it while meshers run in parallel on the rayon pool.
-///
-/// That is safe today for one reason only — the sole writer is the
-/// thread that calls `App::rebuild_all_meshes`, and its
-/// `par_iter().collect()` blocks until every worker has finished, so no
-/// write can be *queued* while any of these guards is alive.
-///
-/// It matters because `parking_lot::RwLock` is writer-preferring:
-/// "readers trying to acquire the lock will block even if the lock is
-/// unlocked when there are writers waiting". Move a write path off this
-/// thread — a background autosave, an agent patch applied outside the
-/// frame loop — and the hold-and-wait becomes deadlock-capable:
-///
-/// - two workers meshing chunks that are Moore-neighbors of each other,
-///   each holding its own center read guard and blocking on the other's
-///   behind a queued writer; or
-/// - one writer holding chunk A's write guard while reaching for B,
-///   against a worker holding B and reaching for A.
-///
-/// Neither needs a writer to be doing anything unusual. `World::set_voxel`
-/// happens to hold only one write guard at a time (both are statement-
-/// level temporaries), which is what rules out the second shape *for the
-/// current writer* — not a property anything enforces.
+/// # Safety
+/// Chunk writes must stay on the thread driving `rebuild_all_meshes`
+/// while these guards live, or the 27 locks can deadlock.
 pub(crate) fn lock_neighbors<'a>(arcs: &'a NeighborArcs) -> NeighborGuards<'a> {
     std::array::from_fn(|i| arcs[i].as_ref().map(|a| a.read()))
 }
 
-/// Read voxel at chunk-local coordinate `(x, y, z)`. Coordinates
-/// outside `[0, CHUNK_SIZE)` route through the corresponding
-/// neighbor chunk. Missing neighbor → AIR.
-///
-/// Each axis can deviate by at most one chunk (the AO sampler only
-/// looks one cell out), so we don't need to handle 2-or-more-chunk
-/// jumps.
+/// Read a voxel at chunk-local `(x, y, z)`. Coordinates outside
+/// `[0, CHUNK_SIZE)` route to the neighbor one chunk away — the only
+/// distance AO samples reach. A missing neighbor reads as AIR.
 #[inline]
 pub(crate) fn voxel_at_local(
     chunk: &Chunk,

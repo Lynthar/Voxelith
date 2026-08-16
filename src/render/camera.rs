@@ -90,17 +90,9 @@ impl Camera {
         self.forward().cross(self.up).normalize()
     }
 
-    /// Distance from an AABB's center at which a bounding sphere
-    /// enclosing the box just fills the view, scaled by `margin`
-    /// (`1.0` = sphere touches the frame edge, `1.15` ≈ 15% padding).
-    ///
-    /// `extent` is the AABB's world-space size (each axis ≥ 0). A
-    /// bounding sphere is used so the fit holds at any viewing angle
-    /// (rotation-invariant) — `frame_camera_on_aabb` keeps the current
-    /// orbit direction, so we don't know which face we'll look at. The
-    /// binding constraint is the *tighter* of the vertical / horizontal
-    /// half-FOV: a wide viewport is limited by its height, a tall one by
-    /// its width.
+    /// Distance from an AABB's center at which its bounding sphere just
+    /// fills the view, scaled by `margin`. A sphere, so the fit holds at
+    /// any angle; the tighter half-FOV is the binding constraint.
     pub fn fit_distance(&self, extent: Vec3, margin: f32) -> f32 {
         let radius = extent.length() * 0.5;
         let half_v = self.fov * 0.5;
@@ -160,42 +152,32 @@ impl CameraController {
         }
     }
 
-    /// Forget all currently-held keys. Called on window focus loss so a
-    /// key whose release was delivered to another window (alt-tab, a
-    /// modal file dialog) can't leave the fly-camera drifting when focus
-    /// returns.
+    /// Forget all held keys. Called on focus loss, so a key whose
+    /// release went to another window can't leave the fly camera
+    /// drifting when focus returns.
     pub fn clear_keys(&mut self) {
         self.pressed_keys.clear();
     }
 
-    /// Whether camera input is live right now — a movement key held, or
-    /// a mouse button driving orbit / pan. The frame scheduler keeps
-    /// rendering at full rate while this is true: flying is continuous
-    /// motion the camera integrates per frame, so it must not depend on
-    /// the OS delivering key-repeat events to stay smooth.
+    /// Whether camera input is live: a movement key held, or a button
+    /// driving orbit or pan. The frame scheduler renders at full rate
+    /// while it is, since flying is integrated per frame.
     pub fn is_navigating(&self) -> bool {
         !self.pressed_keys.is_empty() || self.right_mouse_pressed || self.middle_mouse_pressed
     }
 
-    /// Forget any in-progress mouse drag (middle-orbit / right-pan).
-    /// Called on window focus loss alongside `clear_keys` so a button
-    /// whose release is delivered to another window can't leave orbit or
-    /// pan latched on when focus returns. `last_mouse_pos = None` also
-    /// forces the next motion to re-seed its delta instead of jumping.
+    /// Forget any in-progress drag, so a button whose release went to
+    /// another window can't leave orbit or pan latched. Clearing
+    /// `last_mouse_pos` also re-seeds the next delta instead of jumping.
     pub fn clear_mouse_buttons(&mut self) {
         self.middle_mouse_pressed = false;
         self.right_mouse_pressed = false;
         self.last_mouse_pos = None;
     }
 
-    /// Handle mouse button input.
-    ///
-    /// Takes `&mut Camera` so middle-press can sync orbit state from
-    /// the camera's current position before any orbit motion runs.
-    /// Without this sync, anything that wrote `target` / yaw / pitch /
-    /// distance without also writing `camera.position` (Reset Camera,
-    /// Set Camera View) would cause the next orbit drag to snap the
-    /// camera to a stale spherical position — visible teleport.
+    /// Handle mouse button input. Takes `&mut Camera` so middle-press
+    /// can sync orbit state from the current position first, or the next
+    /// drag snaps the camera to a stale spherical pose.
     pub fn process_mouse_button(
         &mut self,
         button: MouseButton,
@@ -219,29 +201,13 @@ impl CameraController {
         }
     }
 
-    /// Re-derive `yaw` / `pitch` / `distance` from the current
-    /// `camera.position - camera.target` vector. Treats the camera's
-    /// actual position as the source of truth; the controller's
-    /// stored angles are just a cache used to apply orbit deltas.
+    /// Re-derive `yaw` / `pitch` / `distance` from the camera's actual
+    /// pose, which is the source of truth — the stored angles are a
+    /// cache for applying orbit deltas.
     ///
-    /// Call sites — anywhere `camera.target` or `camera.position` is
-    /// written without going through `update_camera_position`. Adding
-    /// such a write means adding a sync right after it:
-    /// - `Renderer::new` — match controller defaults to the initial pose.
-    /// - `process_mouse_button` middle-press — middle-orbit drag below
-    ///   reads the controller; sync once at press time so the user's
-    ///   non-orbit navigation since the last sync is reflected.
-    /// - `App::frame_camera_on_aabb` (F key, Frame All / Selected /
-    ///   Generated) — writes both target and position.
-    /// - `App::recenter_camera_on_scene` (Reset Camera, Generate*,
-    ///   initial scene, `.vox` import) — writes target.
-    /// - `App::do_open_project` and `App::recover_from_autosave` —
-    ///   restore a saved camera pose verbatim.
-    ///
-    /// `process_scroll` (zoom-to-cursor), pan, and WASD don't need a
-    /// sync: they translate / scale `position` and `target` uniformly,
-    /// so the cached `yaw` / `pitch` remain valid (direction unchanged)
-    /// and `distance` is updated explicitly inside `process_scroll`.
+    /// # Safety
+    /// Every write to `camera.target` or `camera.position` that skips
+    /// `update_camera_position` must be followed by a call to this.
     pub fn sync_orbit_state_from_camera(&mut self, camera: &Camera) {
         let to_camera = camera.position - camera.target;
         // Floor avoids `to_camera / 0` when camera sits exactly at
@@ -255,12 +221,9 @@ impl CameraController {
         self.pitch = dir.y.asin().clamp(-1.5, 1.5);
     }
 
-    /// Apply an orbit delta in raw pixels around the current target,
-    /// using the shared `sensitivity`. This is the single orbit
-    /// implementation for BOTH the windowed `process_mouse_motion` path
-    /// and the raw `DeviceEvent::MouseMotion` path; the event handler
-    /// must drive exactly one per frame (raw while the cursor is
-    /// captured) or the two accumulate and orbit runs at 2× speed.
+    /// Apply an orbit delta in raw pixels around the current target.
+    /// The single orbit implementation for both the windowed and raw
+    /// motion paths — driving both per frame orbits at double speed.
     pub fn orbit_by(&mut self, dx: f32, dy: f32, camera: &mut Camera) {
         self.yaw += dx * self.sensitivity;
         self.pitch += dy * self.sensitivity;
@@ -276,31 +239,18 @@ impl CameraController {
             let dy = y - last_y;
 
             if self.middle_mouse_pressed {
-                // Orbit: drag-the-scene direction. Dragging down rolls
-                // the camera up (you see more of the top), dragging
-                // right swings the camera around to view the right
-                // side of the scene. Inverted from the camera-relative
-                // convention where dragging moves the camera itself.
-                // Shared with the raw-motion path via `orbit_by`.
+                // Orbit in the drag-the-scene direction: dragging down
+                // rolls the camera up. Inverted from the camera-relative
+                // convention, and shared with raw motion via `orbit_by`.
                 self.orbit_by(dx, dy, camera);
             } else if self.right_mouse_pressed {
-                // Pan camera. Both position and target shift by the same
-                // offset so the view direction and the camera-to-target
-                // vector both stay fixed — orbit angles derived from
-                // that vector remain valid, so the next orbit gesture
-                // continues to rotate around the new (panned-to) target
-                // without any discontinuity.
+                // Pan: position and target shift by the same offset, so
+                // the camera-to-target vector is unchanged and the
+                // cached orbit angles stay valid.
                 let right = camera.right();
-                // Screen-space up, not world up. Panning is a
-                // drag-the-scene gesture, so the drag must move the
-                // view by what the user sees, in every pose. Against
-                // world `up` the visible vertical motion scales with
-                // cos(pitch): at the pitch clamp (±1.5 rad ≈ 86°, the
-                // ordinary top-down voxel-editing pose) that's ≈0.07,
-                // so ~93% of a vertical drag became a dolly along the
-                // view axis and the picture barely moved. `right` and
-                // `forward` are orthonormal, so their cross is already
-                // unit length.
+                // Screen-space up, not world up: against world `up` the
+                // visible motion scales with cos(pitch), so near the
+                // clamp most of a vertical drag became a dolly.
                 let up = right.cross(camera.forward());
                 let pan_speed = self.distance * 0.002;
 
@@ -313,34 +263,18 @@ impl CameraController {
         self.last_mouse_pos = Some((x, y));
     }
 
-    /// Handle mouse scroll (zoom-to-cursor).
-    ///
-    /// Uniformly scales `camera.position` and `camera.target` around
-    /// `anchor` (a 3D world point — typically derived from the cursor's
-    /// raycast hit, with a fallback to the projection of the cursor
-    /// ray onto the plane through `target` perpendicular to the view
-    /// direction). This keeps `anchor` fixed on screen as the camera
-    /// approaches / recedes, so users zoom INTO whatever they're
-    /// pointing at — and `target` migrates with the zoom so subsequent
-    /// middle-mouse orbit pivots around the zoomed-in feature instead
-    /// of the original (now off-screen) point.
-    ///
-    /// Direction `(position - target)` is preserved by the uniform
-    /// scale, so the controller's cached `yaw` / `pitch` remain valid
-    /// without further sync — only `distance` updates.
+    /// Zoom to cursor: scale position and target uniformly around
+    /// `anchor`, so it stays fixed on screen and the target migrates to
+    /// the zoomed-in feature. The view direction is preserved.
     pub fn process_scroll(&mut self, delta: MouseScrollDelta, camera: &mut Camera, anchor: Vec3) {
         let scroll = match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
             MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
         };
 
-        // Intended scale factor: scroll>0 (wheel up) → f<1 (zoom in).
-        // Clamped so one huge event can't swallow the whole zoom range:
-        // a precision touchpad reports `PixelDelta`, and a fast flick
-        // arrives as a single ≥100 px event, which unclamped drives f to
-        // zero or below and snaps the camera straight to the minimum
-        // distance. Ordinary wheel notches (`LineDelta` ±1..3) give
-        // f ∈ [0.7, 1.3] and are unaffected.
+        // Wheel up zooms in. Clamped so one huge event can't swallow the
+        // range: a touchpad flick arrives as a single ≥100 px event,
+        // which unclamped snaps straight to the minimum distance.
         let f = (1.0 - scroll * 0.1).clamp(0.2, 5.0);
         let new_distance = (self.distance * f).clamp(1.0, 500.0);
         // After clamp the actual factor may differ from `f`; use the
@@ -353,12 +287,9 @@ impl CameraController {
         self.distance = new_distance;
     }
 
-    /// Write `camera.position` from the controller's current
-    /// `yaw` / `pitch` / `distance` (relative to `camera.target`).
-    /// Public so callers that change those fields directly (e.g.
-    /// Reset Camera, Set Camera View) can apply the change immediately
-    /// instead of leaving `camera.position` desynced until the next
-    /// orbit drag.
+    /// Write `camera.position` from the controller's current angles and
+    /// distance. Public so callers that set those directly can apply the
+    /// change immediately rather than leaving the pose desynced.
     pub fn update_camera_position(&self, camera: &mut Camera) {
         let x = self.distance * self.yaw.cos() * self.pitch.cos();
         let y = self.distance * self.pitch.sin();
@@ -377,19 +308,9 @@ impl CameraController {
         c
     }
 
-    /// Update camera based on keyboard input (called each frame).
-    ///
-    /// **FPS-ground style**: W/A/S/D move on the world horizontal plane
-    /// regardless of pitch — `forward_xz` and `right_xz` are derived
-    /// from `self.yaw` (the camera's azimuth around world Y), so a
-    /// straight-down view doesn't collapse W/S into duplicates of Q/E.
-    /// Q/E remain unconditional ±Y for explicit vertical motion.
-    ///
-    /// `self.yaw` is kept consistent with the camera-target direction
-    /// by `sync_orbit_state_from_camera` (called on middle-press) and
-    /// is preserved by every other navigation path that translates
-    /// position+target uniformly (pan, WASD itself, scroll-zoom). So
-    /// the cached angle is always a valid horizontal forward source.
+    /// Apply keyboard navigation for one frame. WASD moves on the world
+    /// horizontal plane whatever the pitch, so a straight-down view
+    /// doesn't collapse W/S into Q/E; Q/E stay unconditional ±Y.
     pub fn update(&mut self, camera: &mut Camera, dt: f32) {
         let mut movement = Vec3::ZERO;
         // Horizontal forward from yaw — independent of pitch, so
@@ -418,11 +339,9 @@ impl CameraController {
         }
 
         if movement != Vec3::ZERO {
-            // Hold Shift to fly 3× faster (FPS convention). Sprint moved
-            // off Ctrl: Ctrl is the editor's command modifier (Ctrl+S,
-            // Ctrl+A, …) and the window handler now drops Ctrl-chord key
-            // presses before they reach the controller, so a Ctrl-based
-            // sprint could never fire anyway.
+            // Shift flies 3× faster. Not Ctrl: that is the command
+            // modifier, and the handler drops Ctrl chords before they
+            // reach the controller.
             let sprint = self.pressed_keys.contains(&KeyCode::ShiftLeft)
                 || self.pressed_keys.contains(&KeyCode::ShiftRight);
             let speed = if sprint { self.speed * 3.0 } else { self.speed };
@@ -440,13 +359,9 @@ mod tests {
 
     #[test]
     fn sync_then_update_position_round_trips() {
-        // Bug 1 regression: with a freshly-constructed CameraController
-        // whose default yaw / pitch / distance don't match the camera's
-        // actual pose, calling update_camera_position would teleport
-        // the camera to the spherical-from-defaults position. After
-        // sync_orbit_state_from_camera, the cached state matches the
-        // camera, so a sync → update_camera_position round-trip should
-        // leave the camera position unchanged (within fp tolerance).
+        // With a controller whose defaults don't match the camera's
+        // pose, `update_camera_position` teleports. After a sync the
+        // round trip must leave the position unchanged.
         let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
         let original = camera.position;
         let mut controller = CameraController::new(0.5, 0.003);
@@ -487,11 +402,9 @@ mod tests {
 
     #[test]
     fn post_sync_update_preserves_view_direction() {
-        // Bug 1 regression: any path that calls update_camera_position
-        // (Reset Camera, Set Camera View) must use sync'd controller
-        // state, otherwise a stale yaw/pitch teleports the camera.
-        // Verify that after sync, manually adjusting distance and
-        // calling update_camera_position keeps the view direction.
+        // Any path calling `update_camera_position` must use synced
+        // state, or a stale yaw/pitch teleports the camera. After a
+        // sync, changing distance must keep the view direction.
         let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
         let mut controller = CameraController::new_synced_for_test(&camera);
         let original_dir = (camera.position - camera.target).normalize();
@@ -511,12 +424,9 @@ mod tests {
 
     #[test]
     fn pre_sync_update_would_teleport_demonstrating_bug_1() {
-        // Confirms WHY the sync at construction was needed. Without
-        // sync, CameraController's defaults (yaw=0 / pitch=0.5 /
-        // distance=40) don't match the initial camera pose, so
-        // update_camera_position writes a position along the WRONG
-        // direction. Pinned so a regression that "removes the sync"
-        // gets caught.
+        // Why the sync at construction is needed: the controller's
+        // defaults don't match the initial camera pose, so
+        // `update_camera_position` would write the wrong direction.
         let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
         let original_dir = (camera.position - camera.target).normalize();
         let controller = CameraController::new(0.5, 0.003); // NOT synced
@@ -573,11 +483,9 @@ mod tests {
 
     #[test]
     fn zoom_in_keeps_anchor_fixed_relative_to_camera_direction() {
-        // The defining property of zoom-to-cursor: after zoom, the
-        // cursor's 3D anchor should appear at the SAME screen
-        // direction from the camera. We verify this geometrically:
-        // (anchor - new_camera) should be a positive scalar multiple
-        // of (anchor - old_camera).
+        // The defining property of zoom-to-cursor: the anchor keeps the
+        // same screen direction, so `anchor - new_camera` is a positive
+        // multiple of `anchor - old_camera`.
         let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
         let mut controller = CameraController::new_synced_for_test(&camera);
         let anchor = Vec3::new(5.0, 8.0, 5.0); // somewhere off-axis
@@ -605,10 +513,9 @@ mod tests {
 
     #[test]
     fn zoom_preserves_camera_target_direction_so_yaw_pitch_stay_valid() {
-        // Uniform scale around an arbitrary anchor preserves the
-        // direction `position - target` (only its length changes).
-        // This is what lets process_scroll skip a sync — the
-        // controller's cached yaw/pitch remain consistent.
+        // A uniform scale around any anchor preserves the direction
+        // `position - target`, which is what lets `process_scroll` skip
+        // a sync.
         let mut camera = Camera::new(Vec3::new(0.0, 20.0, 40.0), Vec3::ZERO, 1.0);
         let mut controller = CameraController::new_synced_for_test(&camera);
         let anchor = Vec3::new(7.0, -3.0, 12.0);
@@ -664,10 +571,9 @@ mod tests {
 
     #[test]
     fn wasd_top_down_view_does_not_collapse_w_to_y() {
-        // Camera looking straight down (pitch ≈ +π/2 clamped). Pre-fix,
-        // `camera.forward()` returns ~(0, -1, 0) and pressing W moved
-        // the camera along -Y, identical to E. Post-fix: W moves on
-        // the X-Z plane (no Y component) regardless of pitch.
+        // Looking straight down, `camera.forward()` is ~(0, -1, 0), so
+        // driving W off it would duplicate E. W must move on the X-Z
+        // plane whatever the pitch.
         let mut camera = Camera::new(Vec3::new(0.0, 50.0, 0.001), Vec3::ZERO, 1.0);
         let mut controller = CameraController::new_synced_for_test(&camera);
         let pre_pos_y = camera.position.y;
@@ -845,12 +751,9 @@ mod tests {
 
     #[test]
     fn vertical_pan_stays_effective_at_the_pitch_clamp() {
-        // The reason pan uses screen-space up: near-top-down is the
-        // ordinary voxel-editing pose, and against world up the visible
-        // part of a vertical drag scales with cos(pitch) — ~0.07 at the
-        // ±1.5 rad clamp, i.e. the picture barely moves. Screen-space up
-        // is perpendicular to the view axis by construction, so the
-        // whole drag stays visible however steep the camera is.
+        // Why pan uses screen-space up: against world up the visible
+        // part of a vertical drag scales with cos(pitch), which is
+        // ~0.07 at the clamp — the ordinary top-down editing pose.
         let mut camera = Camera::new(Vec3::new(0.0, 40.0, 3.0), Vec3::ZERO, 1.0);
         let forward = camera.forward();
         let offset = pan_offset(&mut camera, (100.0, 100.0), (100.0, 140.0));

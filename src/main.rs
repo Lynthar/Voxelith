@@ -1,10 +1,5 @@
-//! Voxelith - Procedural-first voxel asset creation tool
-//!
-//! Entry point. With no subcommand this launches the interactive editor
-//! (the `app` module). Every subcommand is headless — no window, no GPU:
-//! `bake` batch-exports from a spec file ([`crate::bake`]), while `exec` /
-//! `inspect` / `generators` drive the editing primitives from JSON
-//! ([`crate::exec`]).
+//! Entry point. No subcommand launches the interactive editor; every
+//! subcommand is headless, with no window and no GPU.
 
 #[cfg(feature = "gui")]
 mod app;
@@ -26,9 +21,7 @@ struct Cli {
     command: Option<Commands>,
 
     /// Start the editor with its agent bridge already listening on this
-    /// loopback port, instead of waiting for the Agent panel's Start
-    /// button. `0` asks the OS for a free port. Editor only — it has no
-    /// meaning alongside a subcommand.
+    /// loopback port; `0` asks the OS for a free one. Editor only.
     #[cfg(feature = "gui")]
     #[arg(long, value_name = "PORT")]
     agent_port: Option<u16>,
@@ -90,15 +83,13 @@ enum Commands {
         #[arg(long)]
         http: Option<String>,
         /// Bearer token HTTP clients must send. Generated and logged at
-        /// startup when omitted; supply one when a client's config has
-        /// to be written down before the server runs. Ignored on stdio,
-        /// where the client is the process that launched this one.
+        /// startup when omitted. Ignored on stdio, where the client is
+        /// the process that launched this one.
         #[arg(long, env = "VOXELITH_MCP_TOKEN")]
         token: Option<String>,
         /// Write the document back to its file after every edit, so the
-        /// editor — which reloads a project that changed on disk — shows
-        /// each step. One writer at a time: don't hand-edit the same
-        /// file while an agent is running.
+        /// editor shows each step. One writer at a time: don't hand-edit
+        /// the same file while an agent is running.
         #[arg(long)]
         checkpoint: bool,
     },
@@ -268,10 +259,9 @@ fn run_render(project: PathBuf, views: &str, size: u32, out: Option<PathBuf>) {
     }
 }
 
-/// Serve the MCP tool set until the client goes away.
-///
-/// Logs go to stderr and nothing here prints to stdout: on the stdio
-/// transport stdout *is* the protocol stream.
+/// Serve the MCP tool set until the client goes away. Logs go to
+/// stderr and nothing prints to stdout — on stdio that is the protocol
+/// stream.
 #[cfg(feature = "mcp")]
 fn run_mcp(root: Option<PathBuf>, http: Option<String>, token: Option<String>, checkpoint: bool) {
     use voxelith::mcp::Checkpoint;
@@ -314,10 +304,9 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>, token: Option<String>, c
         match http {
             Some(address) => serve_http(root, &address, token, checkpoint).await,
             None => {
-                // Say so rather than letting someone believe stdio is
-                // token-protected: there is no request to authenticate
-                // here, the client is the process that launched this
-                // one, and the OS already decided it may.
+                // Say so rather than let someone believe stdio is
+                // token-protected: there is no request to authenticate,
+                // and the OS already decided the launcher may.
                 if token.is_some() {
                     log::warn!("--token / VOXELITH_MCP_TOKEN is ignored on stdio");
                 }
@@ -395,19 +384,14 @@ fn run_gui() {
     std::process::exit(2);
 }
 
-/// Launch the interactive winit + egui editor (the default).
-///
-/// `agent_port` starts the in-editor MCP bridge as the window comes up.
-/// The panel can do the same thing with a button, but an agent workflow
-/// starts the editor *in order to* be edited, and having to click first
-/// puts a human step in the middle of something meant to run on its own.
+/// Launch the interactive winit + egui editor. `agent_port` starts the
+/// in-editor bridge as the window comes up, so an agent workflow needs
+/// no click in the middle of it.
 #[cfg(feature = "gui")]
 fn run_gui(agent_port: Option<u16>) {
-    // Voxelith's own logs at info; the GPU stack quieted to warnings.
-    // wgpu logs device maintenance at info *per frame* — roughly seven
-    // thousand lines per idle minute — which buries anything the app
-    // says and makes the terminal the app was launched from useless.
-    // An explicit RUST_LOG still overrides all of this.
+    // Voxelith's own logs at info, the GPU stack at warn: wgpu logs
+    // device maintenance per frame, which buries everything else. An
+    // explicit RUST_LOG still overrides this.
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
     )
@@ -417,10 +401,9 @@ fn run_gui(agent_port: Option<u16>) {
     log::info!("Starting Voxelith...");
 
     let event_loop = EventLoop::new().unwrap();
-    // A placeholder only: `about_to_wait` re-arms the flow every turn
-    // with `WaitUntil(next_frame_at)` — full rate while the user is
-    // active, an idle heartbeat otherwise. `Poll` here would burn a
-    // core busy-spinning between frames.
+    // A placeholder: `about_to_wait` re-arms the flow every turn with
+    // `WaitUntil(next_frame_at)`. `Poll` here would burn a core
+    // busy-spinning between frames.
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = app::App::new();

@@ -1,7 +1,5 @@
-//! Chunk: A fixed-size 3D grid of voxels.
-//!
-//! Chunks are the basic unit of voxel storage and rendering.
-//! They provide efficient spatial access and modification of voxels.
+//! Chunk: a fixed-size 3D grid of voxels, the unit of voxel storage
+//! and rendering.
 
 use super::Voxel;
 use serde::{Deserialize, Serialize};
@@ -105,10 +103,8 @@ impl LocalPos {
     }
 }
 
-/// A chunk containing a 3D grid of voxels.
-///
-/// Voxels are stored in a flat array for cache efficiency.
-/// Layout: x + y*SIZE + z*SIZE*SIZE (x varies fastest)
+/// A 3D grid of voxels in a flat array for cache efficiency.
+/// Layout: `x + y*SIZE + z*SIZE*SIZE`, x varying fastest.
 #[derive(Clone)]
 pub struct Chunk {
     /// Flat array of voxels (using Vec for serde compatibility)

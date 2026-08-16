@@ -15,10 +15,9 @@ use voxelith::{
 
 use super::App;
 
-/// How often `tick_disk_reload` stats the open project file. One
-/// `metadata` call, so the cost is negligible either way; half a second
-/// is short enough that an agent's step shows up as it happens and long
-/// enough that a burst of them doesn't re-mesh the scene per frame.
+/// How often `tick_disk_reload` stats the open project file. Short
+/// enough that an agent's step shows up as it happens, long enough that
+/// a burst doesn't re-mesh the scene per frame.
 const DISK_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// What a poll of the open project file should lead to.
@@ -33,14 +32,9 @@ pub(super) enum DiskPoll {
     WarnStale,
 }
 
-/// Decide what a poll found. Split out from `tick_disk_reload` because
-/// the interesting part is this table, and the rest is a clock and an
-/// `fs::metadata` call.
-///
-/// An unreadable file is deliberately *not* news: a save elsewhere is a
-/// write-temp-then-rename, and a poll landing in that window sees the
-/// target briefly missing. Treating that as a change would reload from
-/// a file that is about to be replaced anyway.
+/// Decide what a poll found. An unreadable file is deliberately not
+/// news: a save elsewhere is a temp-then-rename, and a poll landing in
+/// that window sees the target briefly missing.
 pub(super) fn classify_disk_poll(
     watched: Option<SystemTime>,
     on_disk: Option<SystemTime>,
@@ -61,16 +55,9 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// The camera pose a project carries, or `None` if it isn't one the
-/// viewport can be pointed with.
-///
-/// A position equal to its target is a degenerate look-at: the view
-/// matrix collapses and the viewport goes blank — no scene, no grid —
-/// while the orbit controller derives yaw / pitch from a zero vector.
-/// `EditorState::default()` no longer produces that, but projects
-/// written before it stopped are on disk already, and a `.vxlt` is an
-/// external file that can hold anything. Non-finite coordinates are
-/// rejected on the same grounds.
+/// The camera pose a project carries, or `None` when it isn't one the
+/// viewport can use. A position equal to its target is a degenerate
+/// look-at that opens blank; non-finite coordinates are refused too.
 pub(super) fn camera_from_state(state: &io::EditorState) -> Option<(glam::Vec3, glam::Vec3)> {
     let position = glam::Vec3::from_array(state.camera_position);
     let target = glam::Vec3::from_array(state.camera_target);
@@ -90,20 +77,9 @@ fn sockets_from_state(state: &io::EditorState) -> Vec<Socket> {
         .collect()
 }
 
-/// Take the pipeline graph out of a loaded `EditorState`, ready for the
-/// Graph panel.
-///
-/// `normalize` because the file is an external input — its `next_id` is
-/// whatever wrote it, and a stale one hands the next added node an id
-/// that is already taken. The re-layout covers the two writers that
-/// have no business inventing panel coordinates: a build older than
-/// `position`, and an agent, which sends nodes with no layout at all.
-/// Loading keeps whatever the file holds, including a graph that can't
-/// be evaluated: dropping one here would delete the recipe a model was
-/// built from to protect a run nobody asked for yet. What makes
-/// evaluation safe is checked where evaluation happens — `run_graph`
-/// and the preview tick, both of which call `agent_ops::check_graph`
-/// first.
+/// Take the pipeline graph out of a loaded `EditorState`, normalized and
+/// laid out. Loading keeps whatever the file holds, evaluable or not —
+/// dropping a graph here would delete the recipe to protect a run.
 fn graph_from_state(state: &io::EditorState) -> PipelineGraph {
     let mut graph = state.graph.clone();
     graph.normalize();
@@ -114,19 +90,8 @@ fn graph_from_state(state: &io::EditorState) -> PipelineGraph {
 }
 
 /// How much of a loaded `EditorState` to apply — the one place the
-/// difference between the restore paths is written down.
-///
-/// The state splits into three groups by *meaning*, not by layout (the
-/// serialized form doesn't change):
-/// - **document state** (sockets, pipeline graph): part of the model,
-///   restored by every kind — an agent that rewrote the recipe means
-///   for the human to see the new one;
-/// - **view state** (camera): restored on open, left alone on reload —
-///   applying it there would yank the view back to the last save every
-///   time an agent finished a batch;
-/// - **workspace echo** (brush, palette, tool): the file carries the
-///   workspace as a convenience; open restores it, reload keeps the
-///   user's hands where they are.
+/// restore paths differ. Document state is always restored; the camera
+/// and workspace echo only on open, never on a reload under the user.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum LoadKind {
     /// Open / crash recovery: the user asked for this file, so
@@ -152,16 +117,9 @@ pub(super) enum DialogStart {
 impl App {
     /// Build a native file dialog owned by the main window.
     ///
-    /// `set_parent` is load-bearing, not cosmetic. An ownerless
-    /// `IFileDialog` on Windows is an independent top-level window with
-    /// no guarantee of sitting above ours, and it regularly opened
-    /// *behind* the main window. Because the dialog runs its own modal
-    /// message loop, the app stops rendering and ignores input while
-    /// it's up — so what the user saw was a frozen program with no
-    /// dialog anywhere on screen, indistinguishable from a hang, with
-    /// force-quit (and every unsaved edit) as the obvious next step.
-    /// Every dialog goes through here so a new call site can't
-    /// reintroduce it.
+    /// # Safety
+    /// Every dialog must come from here. An ownerless one can open
+    /// behind the app, whose modal loop then reads as a hang.
     pub(super) fn file_dialog(&self, start: DialogStart) -> rfd::FileDialog {
         let mut dialog = rfd::FileDialog::new();
         if let Some(window) = &self.window {
@@ -198,10 +156,9 @@ impl App {
         self.ui.set_status("New project created");
     }
 
-    /// Snapshot the camera + brush / palette / tool into an
-    /// `io::EditorState` for embedding in a saved or autosaved project.
-    /// Falls back to defaults before the renderer exists. Shared by
-    /// `do_save_project` and `App::tick_autosave`.
+    /// Snapshot the camera, brush, palette and tool into an
+    /// `io::EditorState` for a save or autosave. Falls back to defaults
+    /// before the renderer exists.
     pub(super) fn current_editor_state(&self) -> io::EditorState {
         let Some(renderer) = &self.renderer else {
             return io::EditorState::default();
@@ -267,10 +224,9 @@ impl App {
             .collect()
     }
 
-    /// Apply a loaded `EditorState` per `kind` — the single place that
-    /// says which restore path takes which fields (see [`LoadKind`]).
-    /// Returns whether a usable camera was applied, so the caller can
-    /// frame the scene after its mesh rebuild when there wasn't one.
+    /// Apply a loaded `EditorState` per [`LoadKind`]. Returns whether a
+    /// usable camera was applied, so the caller can frame the scene
+    /// after its rebuild when there wasn't one.
     pub(super) fn apply_editor_state(&mut self, state: &io::EditorState, kind: LoadKind) -> bool {
         // Document state — every kind.
         self.document.sockets = sockets_from_state(state);
@@ -317,20 +273,15 @@ impl App {
             return;
         };
         if self.recover_from_autosave(&path) {
-            // Recovered work has no file of its own (`project_path`
-            // stays None), so relative to anything on disk it *is*
-            // unsaved — say so, or the guard would wave a clean exit
-            // through and the exit would then delete the autosave that
-            // held the only copy.
+            // Recovered work has no file of its own, so it is unsaved
+            // relative to anything on disk — otherwise a clean exit
+            // sails through and deletes the autosave holding it.
             self.document.mark_recovered();
             self.last_autosave = std::time::Instant::now();
         } else {
-            // Corrupt / unreadable: set it aside rather than delete it.
-            // This file may be the only copy of the crashed session's
-            // work, and "unreadable to this loader today" is not
-            // "unrecoverable" — a partial RLE stream can still hold
-            // most of a model for a hand salvage. Deleting destroyed
-            // the evidence to tidy up.
+            // Corrupt: set it aside rather than delete it. This may be
+            // the only copy of the crashed session, and unreadable to
+            // this loader is not unrecoverable by hand.
             let quarantine = path.with_extension("vxlt.corrupt");
             match std::fs::rename(&path, &quarantine) {
                 Ok(()) => {
@@ -355,12 +306,9 @@ impl App {
         }
     }
 
-    /// Load a crash-recovery autosave into the editor. Mirrors
-    /// `do_open_project`'s restore, but leaves `project_path` None (the
-    /// recovery copy isn't the user's real file, so the next Save prompts
-    /// for a location) and doesn't touch the recent-files MRU. Returns
-    /// false — caller falls back to the default scene — if the file is
-    /// unreadable.
+    /// Load a crash-recovery autosave. Mirrors an open, but leaves
+    /// `project_path` None — the recovery copy isn't the user's file —
+    /// and skips the MRU. False means the caller should use the default.
     pub(super) fn recover_from_autosave(&mut self, path: &Path) -> bool {
         let (world, editor_state, metadata) = match io::load_world_with_state(path) {
             Ok(v) => v,
@@ -457,10 +405,9 @@ impl App {
 
                 let had_camera = self.apply_editor_state(&editor_state, LoadKind::Open);
                 self.rebuild_all_meshes();
-                // A project with no usable camera of its own — one an
-                // agent built headless — keeps the viewport where it is
-                // and aims it at what was just loaded, rather than
-                // opening on a blank screen.
+                // A project with no usable camera — one built headless —
+                // keeps the viewport where it is and aims it at what
+                // just loaded, rather than opening blank.
                 if !had_camera {
                     self.recenter_camera_on_scene();
                 }
@@ -499,24 +446,15 @@ impl App {
                     self.document.world = world;
                     self.reset_scene_session_state();
                     self.document.metadata = voxelith::io::ProjectMetadata::default();
-                    // Detach from any previously-open .vxlt: the imported
-                    // model is a new document, so a later Save must prompt
-                    // for a location instead of silently overwriting the
-                    // project that was open before the import (#7). The
-                    // source .vox stays on disk, so — like open/new — the
-                    // import settles the marks (`mark_saved` below, once
-                    // the rebuild's bump has landed) and the first edit
-                    // after it is what arms both the guard and autosave.
+                    // Detach from any open `.vxlt`: the imported model is
+                    // a new document, so a later Save must prompt rather
+                    // than overwrite the project that was open before.
                     self.project_path = None;
                     self.note_project_mtime();
                     self.rebuild_all_meshes();
-                    // Imported world replaces everything; the previous
-                    // camera target is now meaningless. Anchor orbit
-                    // pivot on the imported scene so middle-orbit
-                    // immediately circles the new model. (`do_open_project`
-                    // doesn't do this because it restores the saved
-                    // camera pose verbatim — but .vox files don't carry
-                    // camera state.)
+                    // The imported world replaces everything, so anchor
+                    // the orbit pivot on it. An open restores the saved
+                    // pose instead, but `.vox` carries no camera.
                     self.recenter_camera_on_scene();
                     self.document.mark_saved();
                     // Imports seed the next import dialog rather than
@@ -546,16 +484,9 @@ impl App {
         }
     }
 
-    /// Import a `.glb` / `.gltf` by voxelizing its mesh.
-    ///
-    /// Unlike `.vox` import this **adds to** the open document instead of
-    /// replacing it, and lands as one undoable `SetVoxels` — the same
-    /// path a generator's patch takes. That's why it needs no unsaved-
-    /// changes guard: nothing is thrown away, and Ctrl+Z puts it back.
-    ///
-    /// The file is untrusted the way any opened file is, so this goes
-    /// through `io::voxelize_glb`, which bounds what a GLB can make it
-    /// allocate (see that module).
+    /// Import a `.glb` by voxelizing its mesh. Unlike `.vox` import this
+    /// **adds to** the document as one undoable command, which is why it
+    /// needs no unsaved-changes guard — Ctrl+Z puts it back.
     pub(super) fn import_glb(&mut self) {
         let resolution = self.ui.import_resolution;
         let dialog = self
@@ -567,12 +498,9 @@ impl App {
             return;
         };
 
-        // Size gate before the whole-file read: everything downstream
-        // is budgeted (textures, triangle counts), but the read itself
-        // wasn't, so a mispicked multi-gigabyte file was swallowed into
-        // memory before the first budget could speak. 512 MiB matches
-        // the texture budget's scale and dwarfs any real asset headed
-        // for a ≤256³ voxelization.
+        // Size gate before the whole-file read: everything downstream is
+        // budgeted, but the read itself wasn't, so a mispicked
+        // multi-gigabyte file landed in memory before anything spoke.
         const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
         match std::fs::metadata(&path) {
             Ok(meta) if meta.len() > MAX_IMPORT_BYTES => {
@@ -611,11 +539,9 @@ impl App {
             Ok(patch) => patch,
             Err(e) => {
                 log::error!("Failed to voxelize {:?}: {:#}", path, e);
-                // A `.gltf` that keeps its buffers and images in
-                // sidecar files is the textbook export, and it is
-                // exactly what this importer refuses: it reads no file
-                // but the one the user picked, on purpose. Saying so
-                // beats "Reading GLB buffers" and a shrug.
+                // A `.gltf` with sidecar buffers is the textbook export
+                // and exactly what this refuses — it reads no file but
+                // the one picked. Saying so beats a generic error.
                 let sidecars = path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
@@ -669,11 +595,12 @@ impl App {
         self.invalidate_preview();
     }
 
-    /// Remember the open project file's modification time, so the disk
-    /// poll can tell somebody else's write from our own. Called wherever
-    /// `project_path` changes or we write that file ourselves; with no
-    /// project open it clears the mark, which is what stops a poll from
-    /// firing against a path we no longer hold.
+    /// Remember the project file's modification time, so the disk poll
+    /// can tell somebody else's write from our own.
+    ///
+    /// # Safety
+    /// Every write to the open project file must call this, or the poll
+    /// reads the editor's own save as a foreign one and reloads it.
     pub(super) fn note_project_mtime(&mut self) {
         self.watched_mtime = self.project_path.as_deref().and_then(file_mtime);
         // Saving, opening or starting a new project all settle whatever
@@ -682,17 +609,9 @@ impl App {
         self.ui.state.disk_conflict = None;
     }
 
-    /// Per-frame check for the open project changing underneath us.
-    ///
-    /// This is the human's half of agent editing: an agent working
-    /// through `voxelith mcp --checkpoint` (or a shell loop running
-    /// `voxelith exec --out`) writes the same `.vxlt` the editor has
-    /// open, and the editor follows along step by step instead of
-    /// showing a world that stopped being true several batches ago.
-    ///
-    /// One writer at a time, though. If the user has their own unsaved
-    /// edits, theirs win and the reload is refused — this can tell that
-    /// the file moved, not how to merge two versions of it.
+    /// Per-frame check for the open project changing underneath us — the
+    /// human's half of headless agent editing. One writer at a time: the
+    /// user's unsaved edits win and the reload is refused.
     pub(super) fn tick_disk_reload(&mut self) {
         let Some(path) = self.project_path.clone() else {
             return;
@@ -704,14 +623,9 @@ impl App {
 
         let on_disk = file_mtime(&path);
         let verdict = classify_disk_poll(self.watched_mtime, on_disk, self.document.unsaved());
-        // Take the new time when this poll is settled — a refused
-        // reload warns once rather than on every poll from here on. A
-        // reload that *failed* is not settled: the file is still one
-        // this editor hasn't read, and recording its time would retire
-        // that version for good, so a lock held for one poll interval
-        // (a virus scanner or an indexer between rename and close) would
-        // cost the user an agent's whole batch, announced by one status
-        // line that scrolls away.
+        // Take the new time once this poll is settled, so a refused
+        // reload warns once. A *failed* one isn't settled — recording it
+        // would retire a version the editor never read.
         let settled = match verdict {
             DiskPoll::Reload => self.reload_from_disk(&path),
             _ => true,
@@ -735,31 +649,16 @@ impl App {
         }
     }
 
-    /// Re-read the open project from disk, keeping the user where they
-    /// were.
-    ///
-    /// Unlike `do_open_project` this restores **only** the world and its
-    /// sockets: camera, brush, palette and tool stay as the user left
-    /// them. The file carries all of those, but applying them here would
-    /// yank the camera back to wherever it was pointing when the project
-    /// was last saved — every time an agent finished a batch, which is
-    /// the whole reason this path exists.
-    ///
-    /// The scene *is* replaced, so this goes through
-    /// `reset_scene_session_state` like every other path that throws one
-    /// away: a selection or an undo entry left over from the old world
-    /// addresses cells that may no longer be there.
-    ///
-    /// Returns whether the file was actually read, so the caller knows
-    /// whether this version has been dealt with.
+    /// Re-read the open project, restoring **only** the document — the
+    /// camera and workspace stay where the user left them. Returns
+    /// whether the file was actually read.
     fn reload_from_disk(&mut self, path: &Path) -> bool {
         let (world, state, metadata) = match io::load_world_with_state(path) {
             Ok(loaded) => loaded,
             Err(e) => {
-                // Saves are write-temp-then-rename, so a torn read
-                // shouldn't be possible — but a project truncated by
-                // something else must not turn the editor's copy into an
-                // empty scene without a word.
+                // Saves are temp-then-rename, so a torn read shouldn't
+                // happen — but a project truncated by something else
+                // must not silently empty the editor's copy.
                 log::warn!("Reload of {} failed: {}", path.display(), e);
                 self.ui.set_status(format!(
                     "{} changed on disk but couldn't be read — showing the last \
@@ -794,18 +693,16 @@ impl App {
             return;
         };
         if self.reload_from_disk(&path) {
-            // The poll's mark, brought up to date by hand: this editor
-            // has now read that version, so the next poll has nothing
-            // to report. A failed read leaves the mark alone on purpose
-            // — see `tick_disk_reload`.
+            // The poll's mark, brought up to date by hand: this version
+            // has now been read. A failed read leaves it alone on
+            // purpose — see `tick_disk_reload`.
             self.note_project_mtime();
         }
     }
 
     /// Run one export request. The dialog, the io call and the report
-    /// all key off `kind`, so a new format (or surface) is one arm here
-    /// instead of a fourth near-copy of a hundred-line function — and
-    /// `.vox`-with-smoothing isn't a case anyone can even ask for.
+    /// all key off `kind`, so a new format is one arm here — and an
+    /// illegal pairing can't be written down.
     pub(super) fn do_export(&mut self, kind: ExportKind) {
         let dialog = self
             .file_dialog(DialogStart::Export)
@@ -1076,12 +973,9 @@ fn file_label(path: &Path) -> String {
 }
 
 impl App {
-    /// Raise the in-app error dialog for a failed file operation. This is
-    /// an egui window (see `Ui::show`), NOT a native `rfd::MessageDialog`
-    /// — the latter exits the process on this winit + wgpu setup, which
-    /// would turn every save/open/import error into a hard crash exactly
-    /// when the user most needs the message. The `detail` carries the
-    /// "why + recovery action"; callers also set a status-bar one-liner.
+    /// Raise the in-app error dialog for a failed file operation — an
+    /// egui window, never an `rfd::MessageDialog`, which exits the
+    /// process here. `detail` carries the why and the recovery action.
     pub(super) fn show_error_dialog(&mut self, title: &str, detail: &str) {
         self.ui.state.error_dialog = Some((title.to_string(), detail.to_string()));
     }
@@ -1097,12 +991,9 @@ impl App {
         err: &dyn std::fmt::Display,
         writable_hint_applies: bool,
     ) {
-        // The recovery hint is about the filesystem, so only offer it
-        // for filesystem failures. Exports can also fail for reasons
-        // that have nothing to do with the disk — a scene too spread
-        // out to smooth, a mesh past GLB's 4 GiB ceiling — and those
-        // errors already say what to do; telling the user to check
-        // their permissions on top of that just misleads.
+        // The recovery hint is about the filesystem, so offer it only
+        // for filesystem failures. A scene too spread out to smooth
+        // already says what to do; adding "check permissions" misleads.
         let detail = if writable_hint_applies {
             format!(
                 "Couldn't {} \"{}\" — {}.\n\nCheck you have write permission and \
@@ -1118,10 +1009,8 @@ impl App {
     }
 
     /// Stash an [`ExportReport`] for the post-export dialog, filling in
-    /// the bits every caller shares: the file name and the on-disk size
-    /// (read back so it reflects what's actually on disk). Callers pass
-    /// the format-specific fields and leave `filename` / `file_size` at
-    /// their `Default` via `..Default::default()`.
+    /// the file name and the on-disk size. Callers pass the
+    /// format-specific fields and leave those two at their defaults.
     pub(super) fn set_export_report(&mut self, path: &Path, mut report: ExportReport) {
         report.filename = file_label(path);
         report.file_size = std::fs::metadata(path).ok().map(|m| m.len());

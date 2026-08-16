@@ -1,9 +1,5 @@
-//! Project save/load functionality.
-//!
-//! Projects are saved as compressed binary files containing:
-//! - Project metadata (name, description, version)
-//! - World data (chunks with voxel data)
-//! - Editor state (camera position, tool settings, palette)
+//! Project save/load: a gzip container holding metadata, world chunks
+//! and editor state.
 
 use crate::core::{Chunk, ChunkPos, Voxel, World, CHUNK_SIZE, CHUNK_VOLUME};
 use crate::procgen::PipelineGraph;
@@ -16,31 +12,22 @@ use thiserror::Error;
 
 /// Project file magic bytes
 const PROJECT_MAGIC: [u8; 4] = *b"VXLT";
-/// Current project format version. Has been 1 since the very first
-/// commit that could write a `.vxlt`, which is why the loader rejects
-/// version 0 outright: no build ever wrote one, so a zero here is file
-/// damage, not an old file.
+/// Current project format version. Version 0 was never written by any
+/// build, so a zero here is damage rather than an old file.
 const PROJECT_VERSION: u32 = 1;
-/// Cap for the chunk-vector capacity *hint* read from the file header.
-/// `chunk_count` is untrusted; the hint is only a preallocation
-/// optimization, so bounding it stops a corrupt file from requesting a
-/// giant eager allocation. The read loop still consumes the full
-/// declared count and errors cleanly if the stream is short. 4096 chunks
-/// covers a 512³ world; larger ones just grow the Vec a few times.
+/// Cap for the chunk-vector capacity hint read from the header.
+/// `chunk_count` is untrusted; the read loop still consumes the full
+/// declared count and errors cleanly if the stream runs short.
 const MAX_CHUNK_HINT: usize = 4096;
 
-/// Ceiling on the whole decompressed gzip stream. gzip expands up to
-/// ~1000:1, so without this a `.vxlt` of a few megabytes can declare
-/// gigabytes of data and the loader faithfully allocates them. 1 GiB is
-/// ~100 million voxels of worst-case (run-length-1) RLE — far past any
-/// project the in-memory chunk store could hold anyway. Hitting the cap
-/// surfaces as `UnexpectedEof` from the capped reader.
+/// Ceiling on the whole decompressed stream. gzip expands up to
+/// ~1000:1, so without it a file of a few megabytes can declare
+/// gigabytes. Hitting the cap surfaces as `UnexpectedEof`.
 const MAX_DECOMPRESSED_BYTES: u64 = 1 << 30;
 
-/// Ceiling on the JSON header (metadata + editor state). Real headers
-/// are kilobytes — a palette, a handful of sockets, a ≤64-node graph —
-/// so 64 MiB is three orders of magnitude of headroom, while still
-/// refusing a header that IS the decompression bomb.
+/// Ceiling on the JSON header. Real headers are kilobytes, so this
+/// leaves three orders of headroom while still refusing a header that
+/// is itself the decompression bomb.
 const MAX_HEADER_BYTES: usize = 64 << 20;
 
 /// Ceiling on one chunk's RLE payload: a run is 10 bytes and can cover
@@ -48,12 +35,9 @@ const MAX_HEADER_BYTES: usize = 64 << 20;
 /// per cell.
 const MAX_RLE_BYTES: usize = CHUNK_VOLUME * 10;
 
-/// Ceiling on chunk coordinates read from a file, per axis. Cell
-/// coordinates derived from a chunk position are `chunk * 32 + 0..=31`;
-/// an unchecked chunk coordinate near `i32::MAX` overflows that multiply
-/// in the mesher and every AABB after it. ±2^24 chunks is ±2^29 cells —
-/// 512× beyond the agent layer's own coordinate ceiling, and still
-/// leaving two bits of headroom before any derived cell math can wrap.
+/// Ceiling on chunk coordinates read from a file, per axis. Cells are
+/// `chunk * 32 + 0..=31`, which overflows near `i32::MAX`; ±2^24 chunks
+/// leaves headroom for every AABB derived from one.
 const MAX_CHUNK_COORD: i32 = 1 << 24;
 
 /// Errors that can occur when reading/writing project files
@@ -130,61 +114,37 @@ pub struct EditorState {
     pub palette: Vec<[u8; 4]>,
     /// Selected tool index
     pub selected_tool: usize,
-    /// Named attachment points (sockets) placed in the scene. `#[serde
-    /// (default)]` so `.vxlt` files written before sockets existed still
-    /// load (missing field → no sockets); the project format version
-    /// doesn't need a bump because the addition is purely additive.
+    /// Named attachment points placed in the scene. `#[serde(default)]`
+    /// so files written before sockets existed still load.
     #[serde(default)]
     pub sockets: Vec<SocketData>,
-    /// Brush material flags (`Voxel::flags`: bit0 emissive / bit1
-    /// metallic) captured at save time. `#[serde(default)]` so older
-    /// `.vxlt` files (which never stored this) still load — missing → 0,
-    /// a plain brush. Round-tripping it is what stops open / crash-
-    /// recovery from silently clearing the brush's emissive / metallic
-    /// mode: the load path rebuilds `brush_color` via `Voxel::from_rgba`,
-    /// which zeroes `flags`.
+    /// Brush material flags (bit 0 emissive, bit 1 metallic) at save
+    /// time. `#[serde(default)]`; round-tripping it is what stops a load
+    /// from clearing the mode, since `from_rgba` zeroes `flags`.
     #[serde(default)]
     pub brush_flags: u8,
-    /// Brush tint zone (`Voxel::tint_zone`, stored in `_reserved`:
-    /// 0 none / 1 primary / 2 secondary / 3 reserved) captured at save
-    /// time. Same `#[serde(default)]` forward-compat + anti-zeroing
-    /// contract as `brush_flags`.
+    /// Brush tint zone at save time, under the same `#[serde(default)]`
+    /// forward-compat contract as `brush_flags`.
     #[serde(default)]
     pub brush_tint_zone: u8,
-    /// The procedural pipeline graph, if this project has one.
-    ///
-    /// It lives with the project rather than in the editor's prefs
-    /// because it is *how this model was made* — document data, like
-    /// sockets, not workspace state like the camera. That distinction
-    /// is what makes an agent's graph reachable at all: the headless
-    /// half (`voxelith exec`, the MCP server) has no prefs file, so a
-    /// graph stored there could never be handed back to a human to keep
-    /// tuning. `#[serde(default)]` for the usual reason — projects
-    /// written before graphs lived here still load, with an empty one.
+    /// The procedural pipeline graph, if this project has one. Document
+    /// data — how the model was made — so it travels with the project
+    /// rather than the machine. `#[serde(default)]`.
     #[serde(default)]
     pub graph: PipelineGraph,
 }
 
 /// Where the editor's camera starts on a new scene, so a project built
-/// without one still opens looking at something.
-///
-/// It lives here, below the `gui` feature, because the headless half is
-/// what writes projects that have no camera to save. `Renderer::new`
-/// starts its own camera from this same constant rather than a second
-/// copy of the numbers — the two can't drift.
+/// headless still opens looking at something. `Renderer::new` starts
+/// from this same constant, so the two cannot drift.
 pub const DEFAULT_CAMERA_POSITION: [f32; 3] = [0.0, 20.0, 40.0];
 
 impl Default for EditorState {
     fn default() -> Self {
         Self {
-            // Not `[0.0; 3]`. A headless tool — `exec` on an empty world,
-            // the MCP server's `new_project` — has no camera of its own
-            // to save, and all-zeros is not "no camera": position equal
-            // to target is a degenerate look-at, which opens in the
-            // editor as a blank viewport with no scene and no grid, and
-            // leaves the orbit controls deriving yaw / pitch from a zero
-            // vector. A project an agent built has to open like any
-            // other.
+            // Not `[0.0; 3]`: position equal to target is a degenerate
+            // look-at, which opens as a blank viewport and leaves the
+            // orbit controls deriving yaw and pitch from a zero vector.
             camera_position: DEFAULT_CAMERA_POSITION,
             camera_target: [0.0; 3],
             brush_color: Default::default(),
@@ -198,10 +158,9 @@ impl Default for EditorState {
     }
 }
 
-/// Serializable form of an `editor::Socket` (name + position + outward
-/// normal). Kept as plain data here so the `io` layer doesn't depend on
-/// `editor`; `app::file_ops` converts to/from `editor::Socket` at the
-/// boundary, exactly like camera / brush / palette.
+/// Serializable form of an `editor::Socket`. Plain data here so `io`
+/// doesn't depend on `editor`; `app::file_ops` converts at the
+/// boundary, like camera / brush / palette.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SocketData {
     pub name: String,
@@ -250,12 +209,9 @@ impl Project {
         let mut project = Self::new();
         project.editor_state = editor_state;
 
-        // Deterministic chunk order so the same content serializes to
-        // the same *structure* regardless of insertion order (HashMap
-        // iteration is per-process random) (#11). Whole-file bytes still
-        // move between saves — `modified_at` in the header does exactly
-        // that on purpose — so this is order-independence, not
-        // byte-for-byte reproducibility across time.
+        // Deterministic chunk order, so identical content serializes to
+        // the same structure whatever the insertion order. Whole-file
+        // bytes still move — `modified_at` does that on purpose.
         for pos in world.sorted_chunk_positions() {
             let Some(chunk_lock) = world.get_chunk(pos) else {
                 continue;
@@ -270,13 +226,9 @@ impl Project {
         project
     }
 
-    /// Convert project to world.
-    ///
-    /// A chunk that doesn't decode is an error, not a gap: this used to
-    /// `if let Some` past decode failures, silently loading a world with
-    /// pieces of the model missing — the one outcome worse than refusing
-    /// the file, because nothing tells the user their save is short a
-    /// wall until they notice the hole themselves.
+    /// Convert project to world. A chunk that doesn't decode is an
+    /// error, not a gap: loading past one leaves the model silently
+    /// short a wall.
     pub fn to_world(&self) -> Result<World, ProjectError> {
         let mut world = World::new();
 
@@ -322,17 +274,9 @@ impl Project {
         Ok(())
     }
 
-    /// Load project from reader.
-    ///
-    /// Strict about what it accepts: a `.vxlt` is an external file, and
-    /// the writer half of this module has produced exactly one shape of
-    /// stream since the format existed, so anything outside that shape
-    /// is damage to refuse rather than tolerance to extend. Every
-    /// declared size is capped, chunk coordinates are bounded, and the
-    /// stream is drained to gzip EOF at the end — which is the only
-    /// point flate2 verifies the CRC-32 and length trailer, so a loader
-    /// that stopped at the last chunk (as this one used to) reported a
-    /// truncated file as loading cleanly.
+    /// Load a project. Strict by design: every declared size is capped,
+    /// chunk coordinates are bounded, and the stream drains to gzip EOF
+    /// so the CRC trailer is verified.
     pub fn load<R: Read>(reader: &mut R) -> Result<Self, ProjectError> {
         // Read and verify magic
         let mut magic = [0u8; 4];
@@ -371,10 +315,9 @@ impl Project {
         decoder.read_exact(&mut len_buf)?;
         let chunk_count = u32::from_le_bytes(len_buf) as usize;
 
-        // Read chunks. Cap the capacity hint so a bogus chunk_count from
-        // a corrupt file can't request a huge eager allocation; the loop
-        // below still reads the full count and fails via read_exact if
-        // the data runs short.
+        // Cap the capacity hint so a bogus count can't request a huge
+        // eager allocation; the loop still reads the full declared count
+        // and fails via read_exact if the data runs short.
         let mut chunks = Vec::with_capacity(chunk_count.min(MAX_CHUNK_HINT));
         let mut seen = std::collections::HashSet::with_capacity(chunk_count.min(MAX_CHUNK_HINT));
         for _ in 0..chunk_count {
@@ -405,10 +348,9 @@ impl Project {
             if rle_len > MAX_RLE_BYTES {
                 return Err(ProjectError::LimitExceeded("chunk RLE size"));
             }
-            // Runs are 10 bytes each; a length that isn't a whole
-            // number of runs is refused here at the structural level —
-            // `rle_decode_chunk` re-checks when the payload is decoded,
-            // but a `Project` should not hold data it will later refuse.
+            // Runs are 10 bytes each. Refused structurally here as well
+            // as in `rle_decode_chunk`, so a `Project` never holds data
+            // it will later refuse.
             if !rle_len.is_multiple_of(10) {
                 return Err(ProjectError::InvalidChunkData);
             }
@@ -420,17 +362,7 @@ impl Project {
             });
         }
 
-        // Drain to gzip EOF. Two verifications ride on this read: any
-        // decompressed byte past the last declared chunk means the
-        // stream and the length fields disagree, and reaching true EOF
-        // is when flate2 checks the gzip CRC-32/ISIZE trailer — a file
-        // with its tail cut off errors here instead of "loading".
-        let mut tail = [0u8; 64];
-        match decoder.read(&mut tail) {
-            Ok(0) => {}
-            Ok(_) => return Err(ProjectError::TrailingData),
-            Err(e) => return Err(e.into()),
-        }
+        drain_to_eof(&mut decoder)?;
 
         Ok(Self {
             metadata,
@@ -451,6 +383,24 @@ impl Project {
 impl Default for Project {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Read past the last declared chunk, which is where flate2 verifies the
+/// gzip CRC-32 and length trailer. Any byte still there means the stream
+/// and the length fields disagree.
+///
+/// # Errors
+/// `LimitExceeded` on a spent budget, `TrailingData` on leftover bytes.
+fn drain_to_eof<R: Read>(reader: &mut io::Take<R>) -> Result<(), ProjectError> {
+    let mut tail = [0u8; 64];
+    match reader.read(&mut tail) {
+        // A spent `Take` budget answers `Ok(0)` without ever reaching
+        // the decoder, so the trailer would go unverified.
+        Ok(0) if reader.limit() == 0 => Err(ProjectError::LimitExceeded("decompressed size")),
+        Ok(0) => Ok(()),
+        Ok(_) => Err(ProjectError::TrailingData),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -491,14 +441,9 @@ fn write_rle_run(buf: &mut Vec<u8>, voxel: Voxel, count: u16) {
     buf.extend_from_slice(bytemuck::bytes_of(&voxel));
 }
 
-/// Run-length decode chunk voxels.
-///
-/// Strict on every axis the encoder is exact about: the payload is a
-/// whole number of 10-byte runs, no run is empty, and the runs sum to
-/// exactly one chunk's 32³ cells. The lenient version of this — pad
-/// short data with air, truncate long data, skip trailing fragments —
-/// turned every one of those corruptions into a silently wrong model
-/// instead of a refused file.
+/// Run-length decode chunk voxels. Strict on every axis the encoder is
+/// exact about: whole 10-byte runs, no empty run, summing to exactly
+/// 32³ cells. Padding or truncating instead hides a corrupt file.
 fn rle_decode_chunk(data: &[u8]) -> Result<Chunk, ProjectError> {
     if !data.len().is_multiple_of(10) {
         return Err(ProjectError::InvalidChunkData);
@@ -522,14 +467,9 @@ fn rle_decode_chunk(data: &[u8]) -> Result<Chunk, ProjectError> {
             .map_err(|_| ProjectError::InvalidChunkData)?;
         let mut voxel: Voxel = *bytemuck::from_bytes(&voxel_bytes);
         offset += 8;
-        // Every voxel that reaches the world is opaque. `.vox` import
-        // and GLB voxelization both normalize on the way in; the native
-        // format used to be the one door that didn't, and these bytes
-        // are as external as either — bytemuck hands back whatever the
-        // file said. A solid voxel whose `color()` is `[0, 0, 0, 0]` is
-        // the greedy mesher's "no visible face" sentinel and is
-        // indistinguishable from air to the flood fill, so it would be
-        // solid to every count and invisible to every picture.
+        // Every voxel that reaches the world is opaque — bytemuck hands
+        // back whatever the file said, and a solid voxel with a zero
+        // color is the mesher's "no visible face" sentinel.
         if voxel.is_solid() {
             voxel.a = 255;
         }
@@ -563,17 +503,9 @@ fn rle_decode_chunk(data: &[u8]) -> Result<Chunk, ProjectError> {
     Ok(chunk)
 }
 
-/// Save world + editor state + metadata to file path (atomic + durable
-/// — see [`write_project_atomic`]).
-///
-/// The metadata comes from the caller — every host holds its document's
-/// identity now (the editor's `Document`, an `AgentSession`) and passes
-/// it through explicitly, load to save. The previous scheme read the
-/// replaced file's header back at save time, which kept identity on a
-/// plain open → save but made Save As onto an unrelated file *inherit
-/// that file's* name and author. `modified_at` moves to now here, which
-/// is that field's whole job; `created_at` and the rest are the
-/// caller's to keep.
+/// Save world, editor state and metadata atomically and durably. The
+/// metadata comes from the caller, which keeps identity stable across a
+/// round trip; `modified_at` moves to now here.
 pub fn save_world_with_state(
     world: &World,
     editor_state: EditorState,
@@ -586,35 +518,9 @@ pub fn save_world_with_state(
     write_project_atomic(&project, path)
 }
 
-/// Serialize a project to `path` **atomically and durably**.
-///
-/// Writes to a sibling `<path>.tmp`, forces it to disk, then renames it
-/// over the target. This closes two data-loss holes the plain
-/// `File::create` + `BufWriter` path had:
-///
-/// - **Silent truncation on a flush error (#5).** `BufWriter`'s `Drop`
-///   flushes but *ignores* any error, so a small project whose whole
-///   gzip stream still sat in the 8 KiB buffer could report `Ok` having
-///   written nothing to disk. `into_inner()` performs the final flush and
-///   surfaces its error; `sync_all()` then forces the bytes to physical
-///   storage before we treat the save as done.
-/// - **A half-written target (#6).** `File::create` truncates the
-///   destination up front, so a crash mid-write would destroy the
-///   previous good save. Writing a temp then `fs::rename`-ing it over the
-///   target (which replaces an existing file on Windows via `MoveFileExW`
-///   as on POSIX; same directory ⇒ same volume) means the target is only
-///   ever the complete old file or the complete new one.
-///
-/// On any failure the partial temp is removed rather than left behind.
-///
-/// The temp name carries the process id: two Voxeliths saving the same
-/// project (the editor's Ctrl+S racing an MCP checkpoint) used to share
-/// one `<path>.tmp`, each truncating and interleaving into the other's
-/// half-written file — whichever rename landed second installed the
-/// mixture as the save. With per-process temps the last rename wins
-/// with a *complete* file, which is the most "two writers, no lock" can
-/// promise. The same process reuses its one name, so temps don't
-/// accumulate across saves.
+/// Serialize a project to `path` atomically and durably: write a
+/// per-process sibling temp, fsync it, then rename it over the target.
+/// A failure removes the temp rather than leaving it behind.
 fn write_project_atomic(project: &Project, path: &std::path::Path) -> Result<(), ProjectError> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp{}", std::process::id()));
@@ -633,12 +539,8 @@ fn write_project_atomic(project: &Project, path: &std::path::Path) -> Result<(),
         return Err(e.into());
     }
 
-    // Phase 3 (POSIX): fsync the parent directory, which is where the
-    // rename itself lives. Without it a power cut can roll the
-    // directory back to the old entry even though the save reported
-    // success — the old *complete* file, so atomicity holds either way;
-    // this closes the durability half of the promise. Best-effort: a
-    // directory that can't be opened or synced (exotic filesystems)
+    // Phase 3 (POSIX): fsync the parent directory, where the rename
+    // itself lives. Best-effort — a directory that can't be synced
     // doesn't fail a save whose bytes are already safe.
     #[cfg(unix)]
     if let Some(dir) = path.parent() {
@@ -650,9 +552,8 @@ fn write_project_atomic(project: &Project, path: &std::path::Path) -> Result<(),
 }
 
 /// Write `project` to `tmp`, flush it (surfacing the error `BufWriter`'s
-/// `Drop` would swallow), and fsync it to physical disk. Split out so
-/// [`write_project_atomic`] has a single `?`-using body with one cleanup
-/// path for every early return.
+/// `Drop` would swallow) and fsync it. Split out so the caller has one
+/// cleanup path for every early return.
 fn write_temp_then_sync(project: &Project, tmp: &std::path::Path) -> Result<(), ProjectError> {
     let file = std::fs::File::create(tmp)?;
     let mut writer = std::io::BufWriter::new(file);
@@ -672,9 +573,8 @@ pub fn load_world(path: &std::path::Path) -> Result<World, ProjectError> {
     project.to_world()
 }
 
-/// Load world + editor state + metadata from file path. The metadata
-/// travels out so the host can hold the project's identity and hand it
-/// back to [`save_world_with_state`] — that round trip is what keeps
+/// Load world, editor state and metadata. The metadata travels out so
+/// the host can hand it back to [`save_world_with_state`], which keeps
 /// `name` / `author` / `created_at` stable across open → save.
 pub fn load_world_with_state(
     path: &std::path::Path,
@@ -688,6 +588,33 @@ pub fn load_world_with_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decompression cap and a real end-of-stream both surface as
+    /// `Ok(0)`, and only the second one means flate2 checked the CRC
+    /// trailer. Told apart by the budget rather than run at 1 GiB.
+    #[test]
+    fn a_spent_decompression_budget_is_not_a_clean_eof() {
+        let data = [0u8; 100];
+
+        let mut spent = Read::take(&data[..], 0);
+        assert!(
+            matches!(
+                drain_to_eof(&mut spent),
+                Err(ProjectError::LimitExceeded("decompressed size"))
+            ),
+            "a spent budget must be refused, not read as a verified trailer"
+        );
+
+        let empty: &[u8] = &[];
+        let mut clean = Read::take(empty, 64);
+        assert!(drain_to_eof(&mut clean).is_ok(), "a real EOF still passes");
+
+        let mut leftover = Read::take(&data[..], 64);
+        assert!(matches!(
+            drain_to_eof(&mut leftover),
+            Err(ProjectError::TrailingData)
+        ));
+    }
 
     #[test]
     fn test_project_roundtrip() {
@@ -748,12 +675,9 @@ mod tests {
 
     #[test]
     fn save_bytes_are_chunk_order_independent() {
-        // The chunk store is a HashMap (per-instance, per-process random
-        // iteration order), so two worlds with identical content built in
-        // different orders could serialize to different bytes if the writer
-        // didn't sort chunks. `sorted_chunk_positions` guarantees a
-        // byte-identical `.vxlt` regardless of insertion order (#11 —
-        // matters for backup dedup / content-addressing).
+        // The chunk store is a HashMap with per-process iteration order,
+        // so two worlds with identical content could serialize
+        // differently if the writer didn't sort chunks.
         let cells: Vec<(i32, i32, i32)> = (0..8)
             .map(|i| (i * 40 - 120, (i % 3) * 5, (i % 5) * 40 - 80))
             .collect();
@@ -777,12 +701,9 @@ mod tests {
 
     #[test]
     fn test_roundtrip_preserves_editor_state_and_cross_chunk_voxels() {
-        // `test_project_roundtrip` checks a couple of voxels in one chunk.
-        // This pins the two things most likely to regress if RLE / chunk-
-        // index / header handling drifts: (a) full EditorState equality,
-        // and (b) exact voxel round-trip across negative coordinates and
-        // several chunks. Alpha is the one field that does *not* survive
-        // verbatim — see `a_solid_voxel_arrives_opaque_whatever_the_file_said`.
+        // Pins full EditorState equality and exact voxel round-trip
+        // across negative coordinates and several chunks. Alpha is the
+        // one field that does not survive verbatim.
         let mut world = World::new();
         let samples = [
             ((0, 0, 0), Voxel::from_rgb(255, 0, 0)),
@@ -847,13 +768,9 @@ mod tests {
         }
     }
 
-    /// The native format was the last ingest door that took a file's
-    /// alpha at its word. A *solid* voxel whose `color()` is
-    /// `[0, 0, 0, 0]` is the greedy mesher's "no visible face" sentinel
-    /// and reads as air to the flood fill — solid to every count and
-    /// every export, invisible in every picture. `.vox` import and GLB
-    /// voxelization have always normalized on the way in; a `.vxlt` is
-    /// no less external than either.
+    /// A solid voxel whose color is `[0, 0, 0, 0]` is the mesher's "no
+    /// visible face" sentinel and reads as air to the flood fill. A
+    /// `.vxlt` is no less external than a `.vox`.
     #[test]
     fn a_solid_voxel_arrives_opaque_whatever_the_file_said() {
         let dir = std::env::temp_dir().join("voxelith_alpha_normalize");
@@ -879,10 +796,9 @@ mod tests {
 
     #[test]
     fn editor_state_without_sockets_field_still_loads() {
-        // A `.vxlt` written before sockets existed has no `sockets` key
-        // in its EditorState JSON. `#[serde(default)]` must fill it with
-        // an empty Vec rather than failing the whole header parse —
-        // otherwise the addition would silently brick every old project.
+        // A file written before sockets existed has no `sockets` key.
+        // `#[serde(default)]` must fill it rather than failing the whole
+        // header parse, which would brick every old project.
         let json = r#"{
             "camera_position": [0.0, 0.0, 0.0],
             "camera_target": [0.0, 0.0, 0.0],
@@ -901,10 +817,9 @@ mod tests {
 
     #[test]
     fn load_truncated_never_panics() {
-        // A crash (or force-kill) mid-write can leave a `.vxlt` truncated
-        // at any offset. Loading ANY prefix of a valid file must return
-        // Ok or Err — never panic — so a damaged autosave falls back to
-        // the default scene instead of bricking startup.
+        // A crash mid-write can truncate a `.vxlt` at any offset.
+        // Loading any prefix must return Ok or Err — never panic — so a
+        // damaged autosave can't brick startup.
         let mut world = World::new();
         for i in 0..40 {
             world.set_voxel(
@@ -940,13 +855,9 @@ mod tests {
 
     #[test]
     fn save_world_with_state_writes_loadable_file_atomically() {
-        // The roundtrip tests above serialize into an in-memory `Vec`, so
-        // they never exercised the real File + BufWriter path where the #5
-        // flush bug lived, nor the #6 temp-then-rename. This drives
-        // `save_world_with_state` against an actual file: it must produce a
-        // file that loads back (incl. brush flags/zone through the header),
-        // atomically REPLACE an existing file on a second save, and leave
-        // no `.tmp` behind.
+        // The roundtrip tests serialize into memory, so they never
+        // exercise the real file path. This drives it: load back,
+        // replace an existing file, and leave no `.tmp` behind.
         let dir = std::env::temp_dir().join("voxelith_atomic_save");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1039,10 +950,9 @@ mod tests {
 
     #[test]
     fn a_file_with_its_gzip_trailer_cut_off_is_refused() {
-        // The exact corruption a crash mid-copy (or a truncating
-        // transfer) produces: everything present but the final CRC-32 +
-        // length trailer. The old loader stopped reading at the last
-        // chunk and reported this file as loading cleanly.
+        // The exact corruption a crash mid-copy produces: everything
+        // present but the final CRC-32 and length trailer. A loader that
+        // stops at the last chunk reports this as loading cleanly.
         let bytes = raw_project(&[((0, 0, 0), full_chunk_rle())]);
         let truncated = &bytes[..bytes.len() - 8];
         assert!(
@@ -1130,10 +1040,9 @@ mod tests {
 
     #[test]
     fn saving_over_a_project_keeps_its_metadata() {
-        // Open → save must not reset the project's identity: `name`,
-        // `author` and `created_at` used to be rebuilt from defaults on
-        // every save, silently. The host loads the metadata, holds it,
-        // and hands it back — `modified_at` alone moves.
+        // Open → save must not reset identity. The host loads the
+        // metadata, holds it, and hands it back; `modified_at` alone
+        // moves.
         let dir = std::env::temp_dir().join("voxelith_metadata_carry");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

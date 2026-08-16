@@ -1,36 +1,11 @@
-//! Per-vertex Ambient Occlusion for voxel meshes.
-//!
-//! Implements the classic Minecraft / 0fps AO formula: each face
-//! vertex samples 3 cells in the 2×2 neighborhood on the face's
-//! "outside" layer (one step along the face normal) and computes a
-//! 0–3 occlusion integer.
-//!
-//! Formula reference: <https://0fps.net/2013/07/03/ambient-occlusion-for-minecraft-like-worlds/>
-//!
-//! ### Greedy compatibility
-//!
-//! Adjacent cells with different 4-corner AO sets cannot merge —
-//! otherwise the larger quad's bilinear-interpolated AO would
-//! disagree with the per-cell AO at internal edges. AO is one field
-//! of the greedy mesher's mask key (`tint_zone | packed_rgba |
-//! packed_ao`, see `greedy`'s "Mask key" section); only cells
-//! matching on the whole key merge. In open areas (all 4
-//! corners = 3) merging is unaffected; near walls / stairs / pits
-//! the merge is finer-grained, but still well above naive.
-//!
-//! ### Diagonal flip
-//!
-//! When the 4 corner AOs are non-uniform, the quad's two-triangle
-//! split has a visible fold along whichever diagonal is chosen.
-//! `should_flip_diagonal` picks the diagonal that connects the two
-//! darker corners — minimizing the visual fold. The standard
-//! 0fps rule: flip iff `ao[0] + ao[2] > ao[1] + ao[3]`.
+//! Per-vertex ambient occlusion. Each face vertex samples three cells
+//! in the 2×2 neighborhood one step along the face normal and yields a
+//! 0–3 occlusion value.
 
 use super::Face;
 
-/// 0fps AO formula. Returns 0–3 (0 = fully occluded, 3 = no
-/// occlusion). The L-shape (`side1 && side2`) short-circuits to 0
-/// because the corner is fully shadowed regardless of `corner`.
+/// AO for one vertex: 0 fully occluded, 3 unoccluded. Two solid sides
+/// short-circuit to 0 — the corner is shadowed whatever `corner` holds.
 #[inline]
 pub fn vertex_ao(side1: bool, side2: bool, corner: bool) -> u8 {
     if side1 && side2 {
@@ -39,17 +14,16 @@ pub fn vertex_ao(side1: bool, side2: bool, corner: bool) -> u8 {
     3 - (side1 as u8 + side2 as u8 + corner as u8)
 }
 
-/// Convert a 0–3 AO integer to its `f32` shading factor in `[0, 1]`.
-/// Fragment shader maps this to `ambient_min + (1 - ambient_min) * ao`
-/// so the user never sees absolute black at fully-occluded corners.
+/// A 0–3 AO integer as an `f32` factor in `[0, 1]`. The fragment shader
+/// remaps it to `ambient_min + (1 - ambient_min) * ao`.
 #[inline]
 pub fn ao_to_f32(ao: u8) -> f32 {
     ao as f32 / 3.0
 }
 
-/// Per-face axis triple `(N, U, V)`. N is the outward face normal;
-/// U / V span the face plane. Per-face vertex orientation lives in
-/// `face_vertex_signs` so we don't need U×V to equal N here.
+/// Per-face `(N, U, V)`: outward normal plus the two axes spanning the
+/// face plane. U×V need not equal N — orientation lives in
+/// [`face_vertex_signs`].
 #[inline]
 pub fn face_axes(face: Face) -> ([i32; 3], [i32; 3], [i32; 3]) {
     match face {
@@ -62,10 +36,9 @@ pub fn face_axes(face: Face) -> ([i32; 3], [i32; 3], [i32; 3]) {
     }
 }
 
-/// `(du, dv) ∈ {-1, +1}²` for each of the 4 vertices in
-/// `face_quad_vertices_sized` order. Vertex 0 and 2 are always on
-/// the "main" diagonal, vertex 1 and 3 on the anti-diagonal —
-/// exploited by `should_flip_diagonal`.
+/// `(du, dv) ∈ {-1, +1}²` per vertex, in `face_quad_vertices_sized`
+/// order. Vertices 0/2 sit on the main diagonal and 1/3 on the
+/// anti-diagonal — the pairs the diagonal flip picks between.
 #[inline]
 pub fn face_vertex_signs(face: Face) -> [(i32, i32); 4] {
     match face {
@@ -78,11 +51,9 @@ pub fn face_vertex_signs(face: Face) -> [(i32, i32); 4] {
     }
 }
 
-/// 4-corner AO for the given face of cell at `voxel_pos`. For each
-/// vertex, samples 3 cells (`side1` along U, `side2` along V,
-/// `corner` along U+V) all in the layer one step along the face
-/// normal. `is_solid` is the caller's voxel query — typically wraps
-/// the 26-neighbor lock helpers in `mesh::neighbors`.
+/// Four corner AO values for `face` of the cell at `voxel_pos`. Each
+/// vertex samples along U, along V and along U+V, one step out on the
+/// normal; `is_solid` is the caller's voxel query.
 pub fn compute_face_ao(
     voxel_pos: (i32, i32, i32),
     face: Face,
@@ -130,15 +101,9 @@ pub fn unpack_ao(packed: u8) -> [u8; 4] {
     ]
 }
 
-/// 0fps diagonal flip rule: when the 0-2 diagonal (vertices 0 and
-/// 2) is brighter than the 1-3 diagonal, flip the triangle split
-/// to the 1-3 diagonal so the dark-fold runs through the dark
-/// corner pair (visually less jarring than splitting bright-dark
-/// across the same triangle).
-///
-/// Currently only used as a reference/sanity-check by the unit
-/// tests — `ChunkMesh::add_quad_with_ao_flip` does the same
-/// comparison directly on `f32` AO values, no integer round-trip.
+/// Flip the triangle split to the 1-3 diagonal when the 0-2 pair is
+/// brighter, so the fold runs through the darker corners. Reference
+/// only — `add_quad_with_ao_flip` compares the `f32` values directly.
 #[allow(dead_code)]
 #[inline]
 pub fn should_flip_diagonal(ao: [u8; 4]) -> bool {
@@ -223,16 +188,9 @@ mod tests {
 
     #[test]
     fn face_vertex_signs_walk_all_four_corners_with_opposite_diagonals() {
-        // Two properties, both load-bearing and neither obvious from
-        // reading six rows of sign pairs:
-        //
-        // 1. every face visits all four corners of {-1,+1}² — a typo
-        //    that repeats one corner silently drops a quad corner onto
-        //    another, which reads as a sliver rather than an error;
-        // 2. vertices 0/2 and 1/3 are opposite corners. That is the
-        //    diagonal `should_flip_diagonal` picks between, so if it
-        //    stopped holding the AO flip would choose the wrong split
-        //    and interpolate occlusion across the wrong pair.
+        // Every face must visit all four corners of {-1,+1}², and
+        // vertices 0/2 and 1/3 must be opposite pairs — the diagonal
+        // the AO flip picks between.
         for face in Face::ALL {
             let signs = face_vertex_signs(face);
             let mut corners = signs;

@@ -1,15 +1,6 @@
-//! Naive meshing: Generate one quad per visible voxel face.
-//!
-//! Boundary faces are culled against the six face-neighbor chunks, so
-//! adjacent loaded chunks won't produce duplicate faces along their
-//! shared planes. If a neighbor chunk isn't loaded the boundary face
-//! is rendered (treated as facing air).
-//!
-//! Per-vertex AO is computed for each emitted quad — the 4 corners
-//! sample 3 cells each in the face's outside layer (12 samples per
-//! face) via `mesh::neighbors::voxel_at_local`, which routes through
-//! the 26-neighbor lock array. AO 0–3 maps to a brightness factor in
-//! the fragment shader.
+//! Naive meshing: one quad per visible face. Boundary faces cull
+//! against the six face neighbors — an unloaded one counts as air —
+//! and each quad carries AO sampled from the 26-neighbor array.
 
 use super::neighbors::{
     lock_neighbors, neighbor_arcs, voxel_at_local, NeighborArcs, NeighborGuards,
@@ -29,9 +20,8 @@ impl NaiveMesher {
     }
 
     /// Whether the cell at chunk-local `(x, y, z)` exposes a face in
-    /// the given direction. Routes the neighbor lookup through
-    /// `voxel_at_local` so face-edge and corner-edge cells use the
-    /// same 26-neighbor lock array as AO sampling.
+    /// this direction. Routes through `voxel_at_local`, so edge cells
+    /// use the same 26-neighbor array AO sampling does.
     fn is_face_visible(
         chunk: &Chunk,
         neighbors: &NeighborGuards,
@@ -169,14 +159,8 @@ mod tests {
 
     #[test]
     fn test_corner_neighbor_darkens_face_corner() {
-        // Two voxels:
-        //   (0, 0, 0) — the cell whose PosY face we'll inspect
-        //   (1, 1, 0) — solid neighbor at side1 of vertices 1 & 2
-        // For PosY of (0, 0, 0):
-        //   vertex 0 (du=-1, dv=-1) → AO = 3 (no occlusion)
-        //   vertex 1 (du=+1, dv=-1) → AO = 2 (side1 occluded)
-        //   vertex 2 (du=+1, dv=+1) → AO = 2 (side1 occluded)
-        //   vertex 3 (du=-1, dv=+1) → AO = 3
+        // (1, 1, 0) sits at side1 for vertices 1 and 2 of the PosY face
+        // of (0, 0, 0), so those darken to 2 and the others stay at 3.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(1, 1, 0, Voxel::from_rgb(0, 255, 0));

@@ -1,41 +1,6 @@
-//! glTF 2.0 binary (.glb) export.
-//!
-//! Walks every chunk via the `GreedyMesher` (same path as render and
-//! OBJ export), accumulates one combined mesh, and writes a single
-//! .glb file containing both the JSON scene description and the
-//! binary vertex/index buffers. Output is a valid glTF 2.0 file
-//! that imports directly into Unity, Unreal, Godot, Blender, and
-//! every model viewer that handles the standard.
-//!
-//! Each primitive emits POSITION (vec3 f32), NORMAL (vec3 f32),
-//! COLOR_0 (vec4 f32, with AO baked in), the custom `_TINTZONE`
-//! (scalar f32 faction zone), and TEXCOORD_0 (vec2 f32 — the same
-//! zone in `.x`, so Unity glTFast, which drops custom attributes,
-//! can still read it). All deinterleaved so JSON descriptors stay
-//! simple (no `byteStride` annotations needed). Indices are u32 so
-//! large worlds aren't capped at 64k vertices. A worked consumer of
-//! every attribute below ships at `docs/reference/VoxelithUberURP.shader`.
-//!
-//! ### File structure (per glTF 2.0 spec, §3.4 GLB)
-//!
-//! ```text
-//! +----------------+
-//! | Header (12 B)  |  magic "glTF" + version=2 + total length
-//! +----------------+
-//! | JSON chunk hdr |  length + type "JSON"
-//! +----------------+
-//! | JSON payload   |  scene description, padded to 4-byte align with 0x20
-//! +----------------+
-//! | BIN chunk hdr  |  length + type "BIN\0"   (omitted for empty world)
-//! +----------------+
-//! | BIN payload    |  per group, back to back: positions | normals |
-//! |                |  colors | tintzones | texcoords | indices,
-//! |                |  padded to 4-byte align with 0x00
-//! +----------------+
-//! ```
-//!
-//! Both chunks must be 4-byte aligned per spec; JSON pads with
-//! ASCII space (0x20), BIN pads with zero.
+//! glTF 2.0 binary (.glb) export: greedy-meshed geometry grouped by
+//! material, written as one file. The consumer contract for every
+//! attribute is `docs/reference/VoxelithUberURP.shader`.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -71,12 +36,9 @@ pub struct GlbStats {
     pub byte_size: usize,
 }
 
-/// Where to move the asset's local origin before export, so a consumer
-/// can place it at a world position predictably. `BaseCenter` puts the
-/// XZ center of the footprint with the bottom (min Y) at the origin —
-/// buildings sit on the ground; `feet` (a spec alias for `BaseCenter`)
-/// is the same point for characters; `Center` centers all axes; `Origin`
-/// leaves model space untouched.
+/// Where to move the asset's local origin before export. `BaseCenter`
+/// (spec alias `feet`) puts the footprint's XZ center at min Y,
+/// `Center` centers every axis, `Origin` leaves model space untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pivot {
     /// Keep model-space coordinates as-is (identity).
@@ -96,11 +58,9 @@ pub enum UpAxis {
     Z,
 }
 
-/// Deterministic placement applied at export as a single root node that
-/// wraps the mesh + socket nodes: pivot → translation, up-axis →
-/// rotation, unit scale → scale. The default is the identity (`Origin` /
-/// `Y` / `1.0`) and produces byte-identical output to the plain
-/// `export_glb`, so a minimal bake reproduces the interactive export.
+/// Deterministic placement applied as a single root node: pivot →
+/// translation, up-axis → rotation, unit scale → scale. The identity
+/// default produces byte-identical output to plain `export_glb`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExportTransform {
     pub pivot: Pivot,
@@ -128,14 +88,9 @@ impl ExportTransform {
     }
 }
 
-/// A named attachment point to emit as an empty glTF node (no mesh).
-///
-/// `translation` is the socket's world position and `rotation` is a
-/// unit quaternion in glTF `[x, y, z, w]` order. Callers
-/// (`app::file_ops` for interactive export, `bake` for the headless
-/// path) build these from `editor::Socket` — deriving the rotation via
-/// `Socket::rotation` — so the orientation convention lives in one
-/// place and this module stays free of math + `editor` dependencies.
+/// A named attachment point emitted as an empty glTF node.
+/// `translation` is the world position and `rotation` a unit quaternion
+/// in glTF `[x, y, z, w]` order, built by the caller from `Socket`.
 #[derive(Debug, Clone)]
 pub struct SocketNode {
     pub name: String,
@@ -180,12 +135,9 @@ fn material_name(group_id: u8) -> &'static str {
     }
 }
 
-/// Build the glTF material for a group. The glTF *default* material is
-/// metallic (`metallicFactor` defaults to 1.0), so even plain voxels get
-/// an explicit `metallicFactor = 0` to render as matte colored surfaces;
-/// metallic voxels get `metallicFactor = 1` + a lower roughness; emissive
-/// voxels get a constant white `emissiveFactor` (core glTF can't express
-/// per-vertex emissive color — vertex color only multiplies base color).
+/// Build the glTF material for a group. glTF's default material is
+/// metallic, so plain voxels need an explicit `metallicFactor = 0`;
+/// emissive ones get a constant white `emissiveFactor`.
 fn material_json(group_id: u8) -> serde_json::Value {
     let metallic = group_id & 0b10 != 0;
     let emissive = group_id & 0b01 != 0;
@@ -202,15 +154,9 @@ fn material_json(group_id: u8) -> serde_json::Value {
     m
 }
 
-/// Export the current world as a binary glTF 2.0 file at `path`,
-/// grouping geometry by material flag (plain / emissive / metallic /
-/// both). Each present group becomes its own primitive + material, so
-/// emissive and metallic voxels carry real glTF PBR materials. Plain
-/// voxels get an explicit non-metallic material (the glTF default
-/// material is metallic, which would otherwise render them as metal).
-///
-/// `sockets` are emitted as empty nodes alongside the mesh node (see
-/// [`SocketNode`]); pass `&[]` for none.
+/// Export the world as a binary glTF file, grouping geometry by
+/// material flag so emissive and metallic voxels carry real PBR
+/// materials. `sockets` become empty nodes; pass `&[]` for none.
 pub fn export_glb(
     world: &World,
     sockets: &[SocketNode],
@@ -219,12 +165,9 @@ pub fn export_glb(
     export_glb_with_transform(world, sockets, path, ExportTransform::default())
 }
 
-/// Like [`export_glb`] but applies a deterministic placement
-/// [`ExportTransform`] (pivot / up-axis / uniform scale) as a single
-/// root node wrapping the mesh and socket nodes. The default transform
-/// is the identity and yields byte-identical output to [`export_glb`];
-/// the headless bake ([`crate::bake`]) uses this to emit assets with a
-/// consistent pivot + scale for the game engine (see [`Pivot`]).
+/// Like [`export_glb`] but applies a deterministic [`ExportTransform`]
+/// as a single root node wrapping mesh and sockets. The identity
+/// default yields byte-identical output to [`export_glb`].
 pub fn export_glb_with_transform(
     world: &World,
     sockets: &[SocketNode],
@@ -253,20 +196,9 @@ pub fn export_glb_with_transform(
     write_glb_groups(&groups, sockets, chunk_count, path, transform)
 }
 
-/// Export the world as a glTF Binary with Marching-Cubes smoothing.
-/// Counterpart to `export_obj_smoothed`: walks the entire world as a
-/// single density field and runs MC to produce a continuous
-/// interpolated surface. Per-vertex colors and gradient-based
-/// normals carry through to the GLB unchanged from MC's output.
-/// `chunk_count` is reported as 1 (single combined mesh).
-///
-/// `blur` matches `export_obj_smoothed`: `false` keeps thin features
-/// at the cost of less organic curvature ("rounded cubes"); `true`
-/// applies a 3×3×3 blur for clay-like terrain output but dissolves
-/// sparse / 1-cell-wide detail.
-///
-/// `sockets` export identically to the non-smoothed path — they're
-/// independent of the mesh source.
+/// Export the world as glTF Binary with Marching-Cubes smoothing.
+/// `blur` false keeps thin features; true gives clay-like output but
+/// dissolves 1-cell detail. Sockets export as on the blocky path.
 pub fn export_glb_smoothed(
     world: &World,
     sockets: &[SocketNode],
@@ -300,14 +232,9 @@ pub fn export_glb_smoothed_with_transform(
     write_glb_groups(&groups, sockets, chunk_count, path, transform)
 }
 
-/// Write one or more material groups to a binary glTF 2.0 file. Each
-/// group becomes a primitive (POSITION / NORMAL / COLOR_0 / _TINTZONE /
-/// TEXCOORD_0 / indices) plus a material; the BIN payload lays the groups
-/// out back to back. An empty
-/// `groups` slice produces a valid geometry-free glTF (no BIN chunk) —
-/// which `sockets` can still populate with empty nodes. `chunk_count` is
-/// passed through to the returned stats. Per-vertex AO is baked into the
-/// exported color (see `Vertex::baked_color`).
+/// Write material groups to a binary glTF file — one primitive plus
+/// material each, laid out back to back in the BIN payload. An empty
+/// slice still produces a valid geometry-free glTF with its sockets.
 fn write_glb_groups(
     groups: &[GroupBuffers],
     sockets: &[SocketNode],
@@ -359,13 +286,9 @@ fn write_glb_groups(
         }
         let tintzone_len = bin.len() - tintzone_offset;
 
-        // Tint zone ALSO as TEXCOORD_0 = vec2(zone, 0). Unity glTFast has no
-        // support for custom vertex attributes (so it can't read `_TINTZONE`)
-        // but does import UV sets, so this is the channel a stock-Unity
-        // uber-shader reads — `docs/reference/VoxelithUberURP.shader` is one.
-        // Unverified end to end: whether a UV set no material samples survives
-        // a stock glTFast import isn't documented either way, and confirming
-        // it needs a running Unity + glTFast rather than a unit test.
+        // The zone also as TEXCOORD_0 = vec2(zone, 0): glTFast can't
+        // read custom attributes but does import UV sets. Whether it
+        // keeps a UV set no material samples is unverified end to end.
         let texcoord_offset = bin.len();
         for v in &g.vertices {
             bin.extend_from_slice(bytemuck::bytes_of(&[v.tint_zone, 0.0f32]));
@@ -409,10 +332,9 @@ fn write_glb_groups(
         bin.push(0);
     }
 
-    // Build per-group geometry descriptors (empty when there's no
-    // geometry): one primitive + material + 6 accessors / bufferViews
-    // per group (POSITION, NORMAL, COLOR_0, _TINTZONE, TEXCOORD_0,
-    // indices), all sharing buffer 0.
+    // Per-group descriptors: one primitive, one material and six
+    // accessors / bufferViews each, all sharing buffer 0. Empty when
+    // there is no geometry.
     let mut accessors = Vec::with_capacity(groups.len() * 6);
     let mut buffer_views = Vec::with_capacity(groups.len() * 6);
     let mut primitives = Vec::with_capacity(groups.len());
@@ -481,11 +403,9 @@ fn write_glb_groups(
         materials.push(material_json(g.group_id));
     }
 
-    // Assemble the scene's node list: the mesh node (node 0) when there
-    // is geometry, then one empty node per socket — `name` +
-    // `translation` + `rotation`, no `mesh` — which is the standard
-    // glTF representation of an attachment point. Sockets export even
-    // for an empty world (a sockets-only glTF is valid).
+    // The scene's node list: the mesh node when there is geometry, then
+    // one empty node per socket. Sockets export even for an empty world
+    // — a sockets-only glTF is valid.
     let mut nodes: Vec<serde_json::Value> = Vec::new();
     let mut scene_nodes: Vec<usize> = Vec::new();
     if !groups.is_empty() {
@@ -501,12 +421,9 @@ fn write_glb_groups(
         }));
     }
 
-    // Deterministic placement: for a non-identity transform, wrap
-    // every scene root (mesh + sockets) under one parent node carrying the
-    // pivot offset, up-axis rotation, and uniform scale, so geometry and
-    // sockets move together and the asset's local origin becomes the chosen
-    // pivot. An identity transform adds nothing, leaving the output
-    // byte-for-byte identical to the plain export.
+    // Wrap every scene root under one parent carrying the pivot offset,
+    // axis rotation and scale, so geometry and sockets move together.
+    // An identity transform adds nothing.
     if !transform.is_identity() && !scene_nodes.is_empty() {
         let bounds = sections
             .iter()
@@ -525,12 +442,9 @@ fn write_glb_groups(
         nodes.push(root);
     }
 
-    // Base document; geometry-only keys (meshes/materials/accessors/
-    // bufferViews/buffers) are attached only when groups exist, and
-    // `nodes` only when there's at least one node (mesh or socket).
-    // glTF `scene.nodes` has minItems:1 when present, so omit the key
-    // entirely for a geometry-and-socket-free scene rather than writing an
-    // empty array (which fails the Khronos validator) (#20).
+    // Geometry-only keys are attached only when groups exist, and
+    // `nodes` only when there is at least one. `scene.nodes` has
+    // minItems 1, so an empty array fails the Khronos validator.
     let scene = if scene_nodes.is_empty() {
         json!({})
     } else {
@@ -561,14 +475,9 @@ fn write_glb_groups(
     // Emit BIN chunk only when there's actual geometry.
     let has_bin = !bin.is_empty() && !groups.is_empty();
 
-    // Total file length: header (12) + JSON chunk (8 + json_bytes) +
-    // optional BIN chunk (8 + bin).
-    // Every length in a GLB is a `uint32`, so 4 GiB is the format's
-    // hard ceiling. Casting past it used to wrap silently and write a
-    // header claiming a length the file doesn't have — a corrupt asset
-    // reported as a successful export. Checked before `File::create` so
-    // a refused export leaves nothing behind. Once the total fits, both
-    // chunk lengths (which are smaller) convert losslessly.
+    // Every length in a GLB is a `uint32`, so 4 GiB is the format's hard
+    // ceiling. Checked before `File::create`, so a refused export leaves
+    // nothing behind; once the total fits, the chunk lengths do too.
     let total = glb_total_len(json_bytes.len(), bin.len(), has_bin)?;
 
     let file = File::create(path)?;
@@ -601,24 +510,17 @@ fn write_glb_groups(
     })
 }
 
-/// Total GLB length: 12-byte header + JSON chunk (8-byte header +
-/// payload) + optional BIN chunk (same shape).
-///
-/// Separated out so the 4 GiB boundary is testable — a mesh that large
-/// can't be built in a unit test, and the failure mode it guards
-/// against (a silently wrapped `as u32`) is invisible in the output.
+/// Total GLB length: header plus the JSON chunk plus an optional BIN
+/// chunk. Separated out so the 4 GiB boundary is testable — a mesh that
+/// large can't be built in a unit test.
 fn glb_total_len(json_len: usize, bin_len: usize, has_bin: bool) -> Result<u32, GlbError> {
     let total = 12 + 8 + json_len + if has_bin { 8 + bin_len } else { 0 };
     u32::try_from(total).map_err(|_| GlbError::TooLarge(total))
 }
 
-/// Build the parent node that applies an [`ExportTransform`] to all
-/// `children` (the existing scene roots). Translation places the chosen
-/// pivot at the local origin (after scale + rotation), rotation is the
-/// up-axis conversion, and scale is uniform. `bounds` is the geometry
-/// AABB in mesh space, or `None` for a geometry-free scene (pivot then
-/// falls back to the origin). Vertex data is never touched — placement
-/// lives entirely in this node, so the export stays lossless.
+/// Build the parent node applying an [`ExportTransform`] to all
+/// `children`: pivot to the origin, up-axis rotation, uniform scale.
+/// Vertex data is untouched, so placement stays lossless.
 fn root_transform_node(
     children: &[usize],
     bounds: Option<([f32; 3], [f32; 3])>,
@@ -792,10 +694,9 @@ mod tests {
 
     #[test]
     fn test_export_position_min_max_match_geometry() {
-        // Place voxels at known positions; bounding box in JSON's
-        // POSITION accessor should match the cells' world extents
-        // (lower corner of the lowest cell to upper corner of the
-        // highest cell).
+        // The POSITION accessor's bounding box must match the cells'
+        // world extents — the low corner of the lowest cell to the high
+        // corner of the highest.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(2, 1, 3, Voxel::from_rgb(0, 255, 0));
@@ -878,10 +779,9 @@ mod tests {
 
     #[test]
     fn test_export_bakes_ao_into_colors() {
-        // A floor (y=0) and a wall (x=0) meet at a concave right-angle
-        // seam, which produces per-vertex AO < 1 along the inside corner.
-        // The exporter must darken those vertices' RGB below the source
-        // 1.0 — if AO weren't baked, every R would be exactly 1.0.
+        // A floor and a wall meeting at a concave seam produce AO < 1
+        // along the inside corner, so those vertices' RGB must come out
+        // below 1.0 — unbaked AO leaves every R exactly 1.0.
         let mut world = World::new();
         for a in 0..4 {
             for b in 0..4 {
@@ -1175,10 +1075,9 @@ mod tests {
 
     #[test]
     fn test_base_center_pivot_wraps_root_node() {
-        // A base-center pivot wraps the mesh node under a "Voxelith_root"
-        // node whose translation centers the footprint in XZ and puts the
-        // bottom (min Y) at the origin. POSITION accessor data is unchanged
-        // (lossless — placement lives entirely in the node transform).
+        // A base-center pivot wraps the mesh under a root node centering
+        // the footprint in XZ with min Y at the origin. The POSITION
+        // data is unchanged — placement lives in the node transform.
         let mut world = World::new();
         // Cells (0..2, 0, 0..2): mesh spans x,z ∈ [0,2], y ∈ [0,1].
         // Base-center pivot = (1, 0, 1).

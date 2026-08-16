@@ -1,10 +1,6 @@
-//! Clipboard for box selection: copy / cut / paste of voxel groups.
-//!
-//! `Clipboard` holds **non-air** voxels extracted from a `Selection`,
-//! storing positions relative to the selection's `min` corner. Paste
-//! composites onto the destination world (Goxel `MODE_OVER` / vengi
-//! `mergeVolumes` semantics) — air cells in the source aren't stored,
-//! so paste doesn't punch holes in the destination.
+//! Copy / cut / paste for box selections. Only non-air voxels are
+//! stored, positioned relative to the selection's `min`, so paste
+//! composites over the destination rather than punching holes in it.
 
 use crate::core::{Voxel, World};
 
@@ -17,11 +13,9 @@ pub struct Clipboard {
     /// Non-air voxels at positions relative to the source selection's
     /// `min` corner. `(0, 0, 0)` is the cell at `selection.min`.
     pub voxels: Vec<((i32, i32, i32), Voxel)>,
-    /// Footprint `(W, H, D)` of the source selection. Preserved
-    /// separately so paste's auto-select-after lands on the *full*
-    /// AABB of the source — not just the bounding box of its non-air
-    /// cells (which would shrink the selection if the source had air
-    /// gaps at its corners).
+    /// Footprint of the source selection, kept separately so paste's
+    /// auto-select lands on the full AABB rather than the bounding box
+    /// of the non-air cells alone.
     pub size: (i32, i32, i32),
 }
 
@@ -39,10 +33,9 @@ impl Clipboard {
     }
 }
 
-/// Extract non-air voxels from `world` that lie inside `selection`,
-/// storing positions relative to `selection.min`. Air cells are
-/// skipped — paste should composite over the destination, not erase
-/// existing voxels in the AABB.
+/// Extract non-air voxels inside `selection`, positioned relative to
+/// `selection.min`. Air is skipped so paste composites over the
+/// destination rather than erasing it.
 pub fn copy_selection_to_clipboard(world: &World, selection: Selection) -> Clipboard {
     let mut voxels = Vec::new();
     for (x, y, z) in selection.iter_cells() {
@@ -64,11 +57,9 @@ pub fn copy_selection_to_clipboard(world: &World, selection: Selection) -> Clipb
     }
 }
 
-/// Build the `VoxelChange` list to paste `clipboard` so its local
-/// origin lands at world-space `dest`. Identity writes (destination
-/// already holds the same voxel) are dropped so an in-place
-/// Copy → Paste doesn't bloat the undo history with a no-op command.
-/// Caller wraps the returned changes in `Command::set_voxels`.
+/// The `VoxelChange` list to paste `clipboard` with its local origin at
+/// `dest`. Identity writes are dropped, so an in-place Copy → Paste
+/// doesn't push a no-op onto the undo history.
 pub fn build_paste_changes(
     world: &World,
     clipboard: &Clipboard,
@@ -111,20 +102,9 @@ pub fn build_clear_changes(world: &World, selection: Selection) -> Vec<VoxelChan
     changes
 }
 
-/// Build the `VoxelChange` list to translate `selection`'s non-air
-/// voxels by `delta`. Source cells become air; destination cells
-/// receive the moved voxel. When source and destination overlap
-/// (`delta` smaller than the selection's extent on some axis), the
-/// destination value wins on `new_voxel`, but `old_voxel` always
-/// reflects the world's true pre-move state — so undo restores
-/// exactly.
-///
-/// Caller wraps the result in `Command::set_voxels` for undo support
-/// and updates `editor.selection = Some(selection.translated(delta))`
-/// after executing.
-///
-/// Implemented as a delta-mapping over [`build_remap_changes`], which
-/// shares the overlap bookkeeping with rotate / mirror.
+/// The `VoxelChange` list to translate `selection`'s non-air voxels by
+/// `delta`. Where source and destination overlap the destination wins
+/// on `new_voxel`, but `old_voxel` is always the true pre-move state.
 pub fn build_move_changes(
     world: &World,
     selection: Selection,
@@ -292,11 +272,9 @@ mod tests {
 
     #[test]
     fn move_overlapping_keeps_world_old_for_overlap_cells() {
-        // 3-wide selection moved by +1: cells (1) and (2) are in
-        // both the source and the destination. Their `old_voxel`
-        // must be the world's pre-move value (so undo restores
-        // exactly), not the AIR that the source-clear pass would
-        // try to overwrite.
+        // A 3-wide selection moved by +1 leaves two cells in both the
+        // source and the destination. Their `old_voxel` must be the
+        // pre-move value, not the AIR the source-clear pass writes.
         let mut world = World::new();
         let r = voxel(255, 0, 0);
         let g = voxel(0, 255, 0);

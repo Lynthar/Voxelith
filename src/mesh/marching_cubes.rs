@@ -1,26 +1,6 @@
-//! Marching Cubes mesher for export-time geometry smoothing.
-//!
-//! Used by the "smoothed" variants of the OBJ / GLB exporters. The
-//! editor's render path keeps the chunky greedy mesher; this module
-//! is a separate code path invoked only when the user picks
-//! "Wavefront OBJ - smoothed (.obj)..." (or the GLB equivalent).
-//! It walks the entire world, samples a density field at voxel
-//! centers, applies a 3×3×3 smoothing pass, then runs the classic
-//! Paul Bourke / Lorensen-Cline Marching Cubes algorithm on the
-//! resulting field to produce a continuous interpolated surface.
-//!
-//! Per-vertex output:
-//! - **Position**: linear interpolation along the cube edge between
-//!   the two density samples spanning the 0.5 isolevel.
-//! - **Normal**: gradient of the density field at the vertex,
-//!   normalized — gives smooth (non-faceted) shading.
-//! - **Color**: average of the solid voxels at the edge's two
-//!   endpoints, so color boundaries (e.g. grass next to stone) blend
-//!   over a 1-cell band.
-//!
-//! Output is one combined `ChunkMesh` for the whole world, ready
-//! for the same OBJ / GLB writer code paths the regular exporters
-//! use.
+//! Marching Cubes for export-time smoothing. Samples a density field
+//! at voxel centers, optionally blurs it, and marches it into one
+//! world-space mesh. Export only — never on the render path.
 
 mod tables;
 
@@ -32,9 +12,8 @@ use thiserror::Error;
 use crate::core::{Voxel, World};
 use crate::mesh::{ChunkMesh, Vertex};
 
-/// Cap on the dense density field, in samples. 64 Mi cells is a
-/// ~400³ bounding box — far past any real asset (MagicaVoxel tops out
-/// at 256³) — and holds the field itself to 256 MiB, or 512 MiB while
+/// Cap on the dense density field, in samples. 64 Mi cells is roughly
+/// a 400³ bounding box and holds the field to 256 MiB — 512 MiB while
 /// the blur's second buffer is alive.
 const MAX_DENSITY_CELLS: usize = 64 * 1024 * 1024;
 
@@ -53,37 +32,27 @@ pub enum SmoothMeshError {
     },
 }
 
-/// Density value above which a sample is considered "inside" the
-/// surface. With voxel-centered density (1.0 for solid, 0.0 for air,
-/// optionally smoothed) this naturally places the surface midway
-/// between solid and air voxels.
+/// Density above which a sample counts as inside the surface. With
+/// voxel-centered density this puts the surface midway between a solid
+/// voxel and an air one.
 const ISO_LEVEL: f32 = 0.5;
 
-/// Build a Marching-Cubes mesh of the entire world. Returns a single
-/// `ChunkMesh` (the chunk position field is unused — it's a flat
-/// world-space mesh, not chunked). For empty worlds returns an
-/// empty mesh; for a scene whose bounding box is too big to hold a
-/// dense density field, returns [`SmoothMeshError::SceneTooLarge`].
+/// Marching-Cubes mesh of the whole world as one flat `ChunkMesh`.
+/// `smooth` adds a 3×3×3 blur first: without it surfaces are rounded
+/// cubes, with it clay — thin features shrink or vanish.
 ///
-/// The `smooth` flag toggles a 3×3×3 box-blur over the density field
-/// before marching. Without smoothing, MC over 0/1 voxel data
-/// produces "rounded cubes" — softer than greedy but still recognizably
-/// blocky. With smoothing, surfaces become clay-like — small features
-/// shrink and isolated voxels may disappear into the smoothed
-/// background. The smoothed mode is what the user gets from the
-/// "smoothed" export menu entries.
+/// # Errors
+/// [`SmoothMeshError::SceneTooLarge`] when the scene's bounding box
+/// would need more than `MAX_DENSITY_CELLS` samples.
 pub fn mesh_world_smoothed(world: &World, smooth: bool) -> Result<ChunkMesh, SmoothMeshError> {
     use crate::core::ChunkPos;
     let Some((bbox_min, bbox_max)) = world.scene_aabb() else {
         return Ok(ChunkMesh::new(ChunkPos::ZERO));
     };
 
-    // Density field is sampled at every integer position in
-    // [bbox.min, bbox.max + 1] inclusive, i.e. one extra layer past
-    // the voxel bbox so MC cubes at the boundary still see a 0
-    // density gradient toward the outside. The smoothing kernel
-    // additionally needs `(±1)` padding on every side, so the
-    // allocated field is (bbox extent + 3) per axis.
+    // Sampled at every integer position in [min, max + 1] so boundary
+    // cubes see a zero gradient outside, plus ±1 padding for the blur
+    // kernel — hence extent + 3 per axis.
     let pad = 1;
     let min = (bbox_min.0 - pad, bbox_min.1 - pad, bbox_min.2 - pad);
     let max = (
@@ -96,13 +65,9 @@ pub fn mesh_world_smoothed(world: &World, smooth: bool) -> Result<ChunkMesh, Smo
         (max.1 - min.1 + 1) as usize,
         (max.2 - min.2 + 1) as usize,
     );
-    // The field is dense over the scene's *bounding box*, so cost is
-    // driven by how far apart the voxels are, not how many there are.
-    // Two voxels 1300 cells apart on each axis want ~8.8 GB — and the
-    // blur below allocates a second field of the same size. A failed
-    // `vec!` allocation aborts the process outright (no unwind, no
-    // dialog), so this has to be refused up front. `u128` because the
-    // product itself can wrap a `usize` at extreme coordinates.
+    // Cost follows the bounding box, not the voxel count. A failed
+    // `vec!` aborts the process, so refuse up front; `u128` because the
+    // product can wrap a `usize` at extreme coordinates.
     let cells = size.0 as u128 * size.1 as u128 * size.2 as u128;
     if cells > MAX_DENSITY_CELLS as u128 {
         return Err(SmoothMeshError::SceneTooLarge {
@@ -178,16 +143,9 @@ fn march_one_cube(
     mesh: &mut ChunkMesh,
     shared: &mut HashMap<EdgeKey, u32>,
 ) {
-    // Corner numbering follows Paul Bourke's convention so the
-    // EDGE_TABLE / TRI_TABLE indices line up:
-    //   0: (gx,   gy,   gz)
-    //   1: (gx+1, gy,   gz)
-    //   2: (gx+1, gy,   gz+1)
-    //   3: (gx,   gy,   gz+1)
-    //   4: (gx,   gy+1, gz)
-    //   5: (gx+1, gy+1, gz)
-    //   6: (gx+1, gy+1, gz+1)
-    //   7: (gx,   gy+1, gz+1)
+    // Corner numbering follows Bourke's convention so the EDGE_TABLE
+    // and TRI_TABLE indices line up: 0-3 walk the y=gy face as
+    // (x,z) = (0,0) (1,0) (1,1) (0,1), and 4-7 repeat it at gy+1.
     let corners_local: [(usize, usize, usize); 8] = [
         (gx, gy, gz),
         (gx + 1, gy, gz),
@@ -267,10 +225,9 @@ fn march_one_cube(
         ],
     ];
 
-    // Compute the 12 potential edge vertex positions (only the ones
-    // flagged in `edges` are actually used; we lazily fill them).
-    // Edge i connects EDGE_VERTEX_PAIRS[i].0 → EDGE_VERTEX_PAIRS[i].1.
-    // (position, normal, color) plus a "filled" flag, per cube edge.
+    // The 12 potential edge vertices, filled lazily — only those
+    // flagged in `edges` are used. Edge i connects the corner pair at
+    // EDGE_VERTEX_PAIRS[i].
     type EdgeVertex = (([f32; 3], [f32; 3], [f32; 4]), bool);
     let mut edge_vertices: [EdgeVertex; 12] = [(([0.0; 3], [0.0; 3], [0.0; 4]), false); 12];
     // Field-global identity of each edge, so neighbouring cubes reuse
@@ -288,13 +245,9 @@ fn march_one_cube(
             densities[a],
             densities[b],
         );
-        // Shift the emitted surface +0.5 on every axis so MC's voxel-
-        // CENTERED surface (a voxel at integer n spans [n-0.5, n+0.5])
-        // lands on the same [n, n+1] cell that the greedy mesher, the voxel
-        // world, and socket placement all use — otherwise the smoothed
-        // export sits half a cell off from its sockets (#12). `edge_color`
-        // below keeps the UN-shifted corner coords so it still samples the
-        // correct voxels.
+        // Shift +0.5 on every axis: MC's surface is voxel-centered, so
+        // this lands it on the same [n, n+1] cell the greedy mesher and
+        // socket placement use. `edge_color` keeps the unshifted coords.
         let pos = [pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5];
         let normal = density_gradient(
             density,
@@ -310,24 +263,9 @@ fn march_one_cube(
         edge_vertices[e] = ((pos, normal, color), true);
     }
 
-    // Emit triangles. TRI_TABLE rows are -1-terminated lists of
-    // edge indices, three at a time.
-    //
-    // **Winding correction**: the standard Lorensen-Cline TRI_TABLE
-    // produces *mostly* CCW-from-outside triangles, but a few corner-
-    // cell configurations come out with reversed winding. Without
-    // correction, exported smoothed OBJ / GLB meshes import into
-    // Blender / Unity with sporadic "inside-out" facets visible as
-    // dark holes when back-face culling is on.
-    //
-    // Fix at runtime: for each emitted triangle compute the face
-    // cross product `(v1-v0) × (v2-v0)` and dot it against the v0
-    // vertex normal (which is already outward-facing — see
-    // `density_gradient` line ~275). If the dot is negative the
-    // triangle was wound CW from outside; we swap v1 and v2 to flip
-    // the winding to CCW. Triangles where the dot is exactly zero
-    // (or near-zero) are face-edge cases that look the same either
-    // way, so we leave them as-is.
+    // TRI_TABLE rows are -1-terminated triples of edge indices. A few
+    // configurations come out wound CW from outside, so every triangle
+    // is checked against the outward normal below and flipped if so.
     let row = TRI_TABLE[cube_index];
     let mut i = 0;
     while i < row.len() && row[i] != -1 {
@@ -372,10 +310,8 @@ fn march_one_cube(
         let i1 = intern_edge_vertex(mesh, shared, edge_keys[e1], v1);
         let i2 = intern_edge_vertex(mesh, shared, edge_keys[e2], v2);
         if dot < 0.0 {
-            // Swap v1 / v2 so the cross product comes out parallel to
-            // the outward normal (CCW from outside). With shared
-            // vertices the swap is on the *indices* — the vertices
-            // themselves belong to other triangles too.
+            // Swap the indices, not the vertices — those belong to
+            // other triangles too.
             mesh.indices.extend_from_slice(&[i0, i2, i1]);
         } else {
             mesh.indices.extend_from_slice(&[i0, i1, i2]);
@@ -400,18 +336,9 @@ fn edge_key(a: (usize, usize, usize), b: (usize, usize, usize)) -> EdgeKey {
     ((a.0.min(b.0), a.1.min(b.1), a.2.min(b.2)), axis)
 }
 
-/// Return the index of the vertex for `key`, creating it if this is the
-/// first cube to reach that edge.
-///
-/// Every attribute of an MC vertex is a property of the edge alone —
-/// the position interpolates the two corner densities, the normal is
-/// the density gradient at those same corners, and the color samples
-/// the same two voxels — so sharing is lossless. Emitting three fresh
-/// vertices per triangle instead pinned the vertex count at exactly
-/// 3 × triangles and roughly tripled every smoothed `.obj` / `.glb`.
-/// It also left cubes disagreeing by an ULP on the shared position,
-/// depending on which end they interpolated from; now the first writer
-/// fixes it for everyone.
+/// The vertex index for `key`, creating it on first use. Every MC
+/// vertex attribute is a property of the edge alone, so sharing is
+/// lossless — and the first writer fixes the position for everyone.
 fn intern_edge_vertex(
     mesh: &mut ChunkMesh,
     shared: &mut HashMap<EdgeKey, u32>,
@@ -427,11 +354,9 @@ fn intern_edge_vertex(
     index
 }
 
-/// Linear interpolation of an edge crossing point. With density
-/// values `da` and `db` at the two endpoints, the surface at
-/// `ISO_LEVEL` lives at parameter `t = (ISO_LEVEL - da) / (db - da)`.
-/// Degenerate case (da ≈ db) falls back to the midpoint to avoid
-/// division by zero.
+/// Linear interpolation of an edge crossing: the surface sits at
+/// `t = (ISO_LEVEL - da) / (db - da)`. Two densities too close to
+/// divide by fall back to the midpoint.
 fn interp_edge(a: [f32; 3], b: [f32; 3], da: f32, db: f32) -> [f32; 3] {
     let denom = db - da;
     let t = if denom.abs() < 1e-6 {
@@ -473,14 +398,9 @@ fn density_gradient(
     let nz = g_a[2] + t * (g_b[2] - g_a[2]);
     let len = (nx * nx + ny * ny + nz * nz).sqrt();
     if len < 1e-6 {
-        // Degenerate: both endpoint gradients vanished (e.g. a 1-cell-
-        // thick wall beside a 1-cell gap — every central-difference sample
-        // is symmetric). Derive the outward normal from the edge itself,
-        // pointing from the solid endpoint (higher density) toward the air
-        // one (lower). That's the true outward direction for a face lying
-        // on this edge — and unlike the old arbitrary +Y it's rarely
-        // perpendicular to the surface, so the `dot < 0` winding correction
-        // (which never fires on a dot of exactly 0) still works (#25).
+        // Both endpoint gradients vanished. Derive the outward normal
+        // from the edge instead — solid endpoint toward air — which is
+        // a real direction, so the winding check still fires on it.
         let (ca, cb) = (corners_local[a], corners_local[b]);
         let edge = [
             cb.0 as f32 - ca.0 as f32,
@@ -505,10 +425,8 @@ fn density_gradient(
     }
 }
 
-/// Central-difference gradient of the density field at a sample
-/// point. Out-of-range neighbors are treated as 0 (air outside the
-/// field) — the padding layer already reserves at least one cell on
-/// each side, so this fallback rarely fires in practice.
+/// Central-difference gradient of the density field at a sample point.
+/// Out-of-range neighbors read as 0, which the padding layer makes rare.
 fn sample_gradient(
     density: &[f32],
     size: (usize, usize, usize),
@@ -537,28 +455,9 @@ fn sample_gradient(
     [dx, dy, dz]
 }
 
-/// Color for a vertex on the cube edge between world-space corners
-/// `a` and `b`: the average of whichever of the two endpoint voxels
-/// are solid.
-///
-/// The density field is **voxel-centered** — the sample at integer
-/// point `p` *is* the voxel at `p` — so the two voxels this edge
-/// crosses between are exactly `a` and `b`, and a surface-crossing
-/// edge has at least one of them solid by construction.
-///
-/// The old code instead took a 2×2 ring around the edge's midpoint,
-/// which is the corner-based convention: every offset was on the edge's
-/// low-coordinate side, so it never included the high endpoint. Faces
-/// pointing −X/−Y/−Z therefore sampled the wrong cells entirely —
-/// locally convex ones (a flat floor's underside, an outer wall)
-/// sampled four air cells and fell through to the white default, and
-/// concave ones picked up whatever unrelated geometry happened to sit
-/// in the ring.
-///
-/// The fallback chain past the endpoints only matters after the
-/// smoothing blur, which can put an iso-crossing between two cells that
-/// are both empty; there we widen to the 2×2×2 block around the edge
-/// before giving up on white.
+/// Color for a vertex on the edge between corners `a` and `b`: the
+/// average of whichever endpoint voxels are solid. After blurring both
+/// can be empty, so the search widens to the 2×2×2 block before white.
 fn edge_color(world: &World, a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
     let ai = (
         a[0].round() as i32,
@@ -609,14 +508,9 @@ fn average_solid(
     Some([sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n])
 }
 
-/// 3×3×3 box blur over a density field. Used for the "smoothed"
-/// export mode — turns 0/1 voxel densities into a continuous field
-/// where surfaces become rounded blobs instead of rounded cubes.
-/// Boundary cells are blurred against zero: the sum of in-bounds
-/// neighbors is always divided by the full 27, so out-of-bounds samples
-/// act as 0. (Dividing by the in-bounds count instead would renormalize
-/// boundary cells upward and dissolve the model's bottom face — see the
-/// note at the division site.)
+/// 3×3×3 box blur over a density field, turning 0/1 densities into a
+/// continuous one. Boundary cells blur against zero: the in-bounds sum
+/// is always divided by the full 27.
 fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
     let idx =
         |dx: usize, dy: usize, dz: usize| -> usize { dx + dy * size.0 + dz * size.0 * size.1 };
@@ -644,11 +538,8 @@ fn box_blur_3x3x3(input: &[f32], size: (usize, usize, usize)) -> Vec<f32> {
                     }
                 }
                 // Always divide by the full 27, treating out-of-bounds
-                // neighbors as 0 (blur AGAINST the zero padding). Dividing
-                // by the in-bounds count instead renormalizes boundary
-                // cells upward: a bottom-pad cell would read 9/18 = 0.5 ≥
-                // ISO_LEVEL, classify as "inside", and erase the model's
-                // bottom face (no inside→outside transition → open mesh).
+                // neighbors as 0. The in-bounds count instead lets a
+                // bottom-pad cell read 0.5 and erases the bottom face.
                 out[idx(x, y, z)] = sum / 27.0;
             }
         }
@@ -688,11 +579,9 @@ mod tests {
 
     #[test]
     fn test_single_voxel_produces_geometry() {
-        // With raw 0/1 density (smooth=false), a single solid voxel
-        // surrounded by air has 8 corners-as-density-samples each
-        // at 1.0, with neighbors at 0.0. MC produces a closed
-        // surface around the voxel — at minimum 12 triangles
-        // (the standard rounded-cube case).
+        // On raw 0/1 density a lone voxel has eight corner samples at
+        // 1.0 against neighbors at 0.0, so MC closes a surface around
+        // it — at least 12 triangles, the rounded-cube case.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.clear_dirty_flags();
@@ -734,34 +623,18 @@ mod tests {
 
     #[test]
     fn test_winding_outward_for_isolated_voxel() {
-        // MC's TRI_TABLE (standard Lorensen-Cline) emits triangles
-        // CCW-from-outside when density is positive inside the
-        // surface — same convention as the cube mesher. We verify
-        // by building an isolated solid voxel, running MC, and
-        // asserting every triangle's cross product points AWAY
-        // from the voxel center.
-        //
-        // If MC ever gets a flipped table (or someone swaps two
-        // edge indices), exported `.obj` / `.glb` smoothed meshes
-        // would import inside-out into Blender / Unity. This test
-        // catches that even though MC is render-disabled.
+        // A flipped table or two swapped edge indices would export
+        // inside-out into Blender or Unity. Build an isolated voxel and
+        // assert every triangle's cross product points outward.
         let mut world = World::new();
         world.set_voxel(5, 5, 5, Voxel::from_rgb(200, 100, 50));
         world.clear_dirty_flags();
         let mesh = mesh_world_smoothed(&world, false).expect("scene is small");
         assert!(!mesh.is_empty(), "expected MC mesh for isolated voxel");
 
-        // Ground truth for "outward" is each triangle's vertex
-        // normals (computed from the density gradient, already
-        // outward-facing per `density_gradient` impl). The voxel-
-        // center proxy I used in earlier iterations was wrong:
-        // for triangles near a corner, the voxel-outward direction
-        // and the surface-outward normal differ by significant
-        // angles (one is along the diagonal, the other along an
-        // edge of the cell), so a triangle can be correctly wound
-        // for the surface yet seem "inward" relative to the cell
-        // center. The cross-vs-vertex-normal test catches the
-        // actual winding bug without false positives.
+        // Ground truth is each triangle's vertex normals, not the voxel
+        // center: near a corner the cell-outward direction and the
+        // surface normal differ enough to report a false positive.
         let mut outward_count = 0;
         let mut inward_count = 0;
         let mut zero_count = 0;
@@ -845,11 +718,9 @@ mod tests {
 
     #[test]
     fn test_mc_mesh_uses_cell_convention_not_voxel_centered() {
-        // A single solid voxel at integer (2,2,2). After the +0.5 emit
-        // shift (#12), its MC surface must span the CELL [2,3]³ — the same
-        // "voxel n occupies [n, n+1)" convention the greedy mesher, the
-        // voxel world, and socket placement use — so its center sits at
-        // 2.5, NOT the un-shifted voxel-centered 2.0.
+        // A voxel at integer (2,2,2) must span the cell [2,3]³ after the
+        // +0.5 shift — the "voxel n occupies [n, n+1)" convention the
+        // rest of the app uses — so its center sits at 2.5, not 2.0.
         let mut world = World::new();
         world.set_voxel(2, 2, 2, Voxel::from_rgb(200, 100, 50));
         world.clear_dirty_flags();
@@ -876,12 +747,9 @@ mod tests {
 
     #[test]
     fn test_thin_wall_normals_stay_finite_and_unit() {
-        // Two parallel 1-cell-thick walls with a 1-cell gap between them is
-        // the geometry where both endpoint density gradients can vanish
-        // (symmetric central-difference samples). The zero-gradient
-        // fallback (#25) must still produce finite, unit-length normals —
-        // it derives them from the edge direction now, not an arbitrary +Y
-        // that also defeated the winding correction.
+        // Two 1-cell walls with a 1-cell gap is where both endpoint
+        // gradients vanish. The fallback must still give finite,
+        // unit-length normals derived from the edge direction.
         let mut world = World::new();
         for y in 0..4 {
             for z in 0..4 {
@@ -912,12 +780,9 @@ mod tests {
 
     #[test]
     fn test_box_blur_divides_by_27_against_zero_padding() {
-        // The blur ALWAYS divides by the full 3×3×3 = 27, treating
-        // out-of-bounds neighbors as 0 (blur against the caller's zero
-        // padding). This is load-bearing: dividing by the in-bounds count
-        // instead lets a boundary pad cell read 9/18 = 0.5 ≥ ISO_LEVEL —
-        // "inside" — which dissolves the model's bottom face into an open
-        // mesh. Pin the exact fractions on a uniform all-ones field.
+        // The blur always divides by the full 27, treating out-of-bounds
+        // neighbors as 0. Dividing by the in-bounds count instead lets a
+        // pad cell read 0.5 and dissolves the model's bottom face.
         let size = (5, 5, 5);
         let input = vec![1.0_f32; 125];
         let out = box_blur_3x3x3(&input, size);
@@ -942,10 +807,8 @@ mod tests {
         let i = |x: usize, y: usize, z: usize| -> usize { x + y * size.0 + z * size.0 * size.1 };
         input[i(2, 2, 2)] = 1.0;
         let out = box_blur_3x3x3(&input, size);
-        // The cell at (2, 2, 2) averages 27 cells with 1 center 1 →
-        // 1/27. The neighbor at (1, 2, 2) also includes the center
-        // → 1/27. The cell at (0, 2, 2) doesn't reach the center →
-        // 0.
+        // (2,2,2) and (1,2,2) both include the lone center → 1/27 each;
+        // (0,2,2) doesn't reach it → 0.
         assert!(out[i(2, 2, 2)] > 0.0 && out[i(2, 2, 2)] < 1.0);
         assert!(out[i(1, 2, 2)] > 0.0);
         assert_eq!(out[i(0, 2, 2)], 0.0);
@@ -953,13 +816,9 @@ mod tests {
 
     #[test]
     fn test_vertex_color_comes_from_the_voxel_the_surface_belongs_to() {
-        // Two adjacent voxels of very different colors. On the raw
-        // (unblurred) field every surface-crossing edge runs from one
-        // solid voxel to air, so each vertex takes that voxel's color
-        // exactly — a vertex on the red voxel's shell is red, one on
-        // the blue voxel's shell is blue, and nothing invents a third
-        // color. (The 2×2×2 widening in `edge_color` is only reached
-        // once the blur has moved a crossing between two empty cells.)
+        // On the raw field every crossing edge runs from one solid voxel
+        // to air, so each vertex takes that voxel's color exactly and
+        // nothing invents a third one.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(1, 0, 0, Voxel::from_rgb(0, 0, 255));
@@ -985,13 +844,9 @@ mod tests {
 
     #[test]
     fn test_isolated_voxel_surface_is_entirely_its_own_color() {
-        // Regression for the sampler that took a 2×2 ring on the
-        // edge's *low-coordinate* side. That ring never contained the
-        // high endpoint, so −X/−Y/−Z-facing surfaces of a locally
-        // convex shape — the underside of a floor, the outer face of a
-        // wall — sampled four air cells and fell through to the white
-        // default. On a lone voxel that's a white bottom on an
-        // otherwise orange blob.
+        // Regression: a sampler reading only the edge's low-coordinate
+        // side never contains the high endpoint, so −X/−Y/−Z faces of a
+        // convex shape sample air and fall through to white.
         let mut world = World::new();
         world.set_voxel(5, 5, 5, Voxel::from_rgb(200, 100, 50));
         world.clear_dirty_flags();
@@ -1014,11 +869,9 @@ mod tests {
 
     #[test]
     fn test_smoothed_mesh_shares_vertices_between_triangles() {
-        // Every MC vertex belongs to a cube edge, and all of its
-        // attributes are properties of that edge — so cubes sharing an
-        // edge must share the vertex. Emitting three fresh vertices per
-        // triangle pinned the count at 3× triangles and tripled every
-        // smoothed export.
+        // Every MC vertex belongs to a cube edge and all its attributes
+        // are properties of that edge, so cubes sharing an edge must
+        // share the vertex rather than emit three per triangle.
         let mut world = World::new();
         for x in 0..4 {
             for y in 0..4 {
@@ -1051,10 +904,9 @@ mod tests {
 
     #[test]
     fn test_far_apart_voxels_error_instead_of_aborting() {
-        // The density field is dense over the scene's bounding box, so
-        // two stray voxels far apart ask for gigabytes. A failed
-        // allocation aborts the process, so this has to be a clean
-        // error the exporter can report.
+        // The field is dense over the bounding box, so two stray voxels
+        // far apart ask for gigabytes. A failed allocation aborts the
+        // process, so this must be a clean error instead.
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
         world.set_voxel(2000, 2000, 2000, Voxel::from_rgb(1, 2, 3));

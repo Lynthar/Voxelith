@@ -1,11 +1,6 @@
-//! The generator table — what an agent can name in a `generate` op.
-//!
-//! Parameters are not described by a hand-written JSON Schema. Each
-//! entry serializes its generator's `Default` and hands *that* over as
-//! the template: it is the real parameter set by construction, it can't
-//! drift from the struct, and an agent can copy it, change two fields,
-//! and send it back. Partial params are merged over the defaults, so a
-//! request only names what it wants to differ.
+//! The generator table an agent names in a `generate` op. Parameters
+//! are advertised as each generator's `Default` serialized, so the
+//! template can't drift; partial params merge over the defaults.
 
 use std::sync::OnceLock;
 
@@ -20,10 +15,9 @@ use crate::procgen::{
 
 use super::{ErrorCode, OpsError, MAX_BATCH_CELLS, MAX_COORD, MAX_GRAPH_SOURCES};
 
-/// Ceiling on `width × depth × height-span` for terrain. Not a taste
-/// judgment — `PerlinTerrain` sizes its patch buffer from these three
-/// numbers, so `width: 100000` is an out-of-memory abort before any
-/// budget downstream gets a look.
+/// Ceiling on `width × depth × height-span` for terrain.
+/// `PerlinTerrain` sizes its patch buffer from these three numbers, so
+/// `width: 100000` aborts before any downstream budget sees it.
 const MAX_TERRAIN_CELLS: i64 = 4_194_304;
 
 /// Ceiling on WFC grid area, in tiles (each tile is 4³ voxels). Same
@@ -36,11 +30,9 @@ pub(super) struct GeneratorEntry {
     pub build: fn(&Value) -> Result<Box<dyn VoxelGenerator>, OpsError>,
 }
 
-/// The registered generators.
-///
-/// Built once at first use rather than declared as a `static` table so
-/// each entry's metadata comes from the generator's own `metadata()` —
-/// one source of truth for ids, which is what `generate` dispatches on.
+/// The registered generators. Built once at first use rather than
+/// declared statically, so each entry's metadata comes from the
+/// generator's own `metadata()` — one source of truth for ids.
 pub(super) fn registry() -> &'static [GeneratorEntry] {
     static REGISTRY: OnceLock<Vec<GeneratorEntry>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -113,19 +105,9 @@ fn defaults<T: Default + Serialize>() -> Value {
     serde_json::to_value(T::default()).expect("generator params must serialize to JSON")
 }
 
-/// A small working pipeline, for an agent to copy and change.
-///
-/// Built from the real types and serialized, for the same reason the
-/// parameter templates above are: a hand-written example is a second
-/// source of truth that starts drifting the day it's written, and this
-/// one is what an agent learns the graph format *from* — the tool schema
-/// deliberately doesn't spell the format out, because doing so costs
-/// every turn of every conversation about nine more definitions than the
-/// format is worth.
-///
-/// The bookkeeping is stripped back out. `next_id`, `output_node` and
-/// per-node `position` all default, and leaving them in a template
-/// teaches an agent to send fields it should never have to think about.
+/// A small working pipeline for an agent to copy. Built from the real
+/// types, since this is where the graph format is learned — the tool
+/// schema keeps it opaque. Bookkeeping fields are stripped back out.
 pub fn graph_template() -> Value {
     let mut graph = PipelineGraph::default();
     let terrain = graph.add(NodeKind::Terrain(PerlinTerrain {
@@ -157,17 +139,9 @@ pub fn graph_template() -> Value {
     value
 }
 
-/// Merge `params` over `T::default()` and deserialize.
-///
-/// Unknown keys are rejected *here* rather than with
-/// `#[serde(deny_unknown_fields)]` on the generator structs: those same
-/// structs are embedded in `prefs.ron` and `.vxlt`, whose forward
-/// compatibility depends on unknown fields being ignored. The strict
-/// check belongs to this protocol, not to the storage format.
-///
-/// Only top-level keys are checked, which covers every generator today
-/// (their params are flat — nested values are arrays and enum strings,
-/// not objects).
+/// Merge `params` over `T::default()` and deserialize. Unknown keys are
+/// rejected here rather than on the generator structs, which stay
+/// lenient for the storage formats. Only top-level keys are checked.
 fn from_partial<T: Default + Serialize + DeserializeOwned>(params: &Value) -> Result<T, OpsError> {
     let mut merged = match serde_json::to_value(T::default()) {
         Ok(Value::Object(map)) => map,
@@ -213,10 +187,9 @@ pub(super) fn terrain_cells(terrain: &PerlinTerrain) -> i64 {
     terrain.width as i64 * terrain.depth as i64 * span
 }
 
-/// The size ceiling, separated from [`build_terrain`] because a graph
-/// node holds an already-built `PerlinTerrain` and would otherwise walk
-/// straight past it — the generator allocates from these numbers before
-/// any budget downstream gets a look.
+/// The size ceiling, separate from [`build_terrain`] because a graph
+/// node holds an already-built `PerlinTerrain` and would walk straight
+/// past it — the generator allocates before any budget sees it.
 pub(super) fn check_terrain(terrain: &PerlinTerrain) -> Result<(), OpsError> {
     let cells = terrain_cells(terrain);
     if cells > MAX_TERRAIN_CELLS {
@@ -241,24 +214,16 @@ fn build_tree(params: &Value) -> Result<Box<dyn VoxelGenerator>, OpsError> {
     Ok(Box::new(tree))
 }
 
-/// No size cap: `LSystemTree` already refuses more than 7 rewrite
-/// rounds, and 7 rounds is a few hundred thousand voxels — inside the
-/// batch cell budget, which catches it downstream. The origin still
-/// needs a look, for the reason [`check_origin`] gives.
+/// No size cap: `LSystemTree` refuses more than 7 rewrite rounds, which
+/// stays inside the batch cell budget. The origin still needs a look,
+/// for the reason [`check_origin`] gives.
 pub(super) fn check_tree(tree: &LSystemTree) -> Result<(), OpsError> {
     check_origin(tree.origin)
 }
 
 /// A generator's world-space origin, bounded before the generator runs.
-///
-/// The write door refuses anything past ±[`MAX_COORD`] anyway, so this
-/// changes no answer an agent gets — it changes *when*. A generator
-/// stamps its cells at `origin + offset` while it builds its patch, and
-/// on a build with overflow checks (every `cargo test`, every
-/// `cargo run` without `--release`, and the editor if it was built that
-/// way) that addition aborted the process before the door ever saw the
-/// coordinate. Naming the parameter also beats reporting the summed
-/// coordinate the agent never wrote.
+/// The write door refuses the same coordinates, but a generator stamps
+/// `origin + offset` first, which overflows on a checked build.
 fn check_origin(origin: (i32, i32, i32)) -> Result<(), OpsError> {
     let out_of_range = |v: i32| !(-MAX_COORD..=MAX_COORD).contains(&v);
     if out_of_range(origin.0) || out_of_range(origin.1) || out_of_range(origin.2) {
@@ -302,22 +267,9 @@ pub(super) fn check_wfc(wfc: &WfcGenerator) -> Result<(), OpsError> {
     check_origin(wfc.origin)
 }
 
-/// Check every source node in a graph against the same ceilings a
-/// `generate` op would hit, and bound what the whole graph can
-/// materialize at once.
-///
-/// Two different failures, both real. One oversized node is the
-/// `generate` ceiling arriving by another door. Many legal sources are
-/// something only a graph can do: they are generated before anything
-/// downstream runs, and all of it happens *before* the first cell
-/// reaches [`Scratch::write`] and its budget. Transform nodes are not
-/// counted because the evaluator frees each patch once its last reader
-/// has run, so a chain of them costs the working front, not a copy per
-/// node. `builtin.lsystem_tree` isn't counted for the same reason it
-/// has no size ceiling in the registry: its own 7-round rewrite limit
-/// is the bound, and its output isn't a function of a size parameter.
-///
-/// [`Scratch::write`]: super::compile::Scratch::write
+/// Check every source node against the ceilings a `generate` op would
+/// hit, and bound what the whole graph materializes at once. Transform
+/// nodes aren't counted: the evaluator frees each patch as it goes.
 pub(super) fn check_graph_sources(graph: &PipelineGraph) -> Result<(), OpsError> {
     let mut sources = 0usize;
     let mut cells: i64 = 0;
@@ -399,12 +351,9 @@ mod tests {
         }
     }
 
-    /// The contract of "the template is the teaching material": what
-    /// `list_generators` hands an agent has to come straight back as a
-    /// `graph` op without editing. Same pin as the parameter defaults
-    /// above, and it needs one more than they do — the template is the
-    /// *only* place the graph format is spelled out, since the tool
-    /// schema keeps the graph an opaque object on purpose.
+    /// The template has to come straight back as a `graph` op without
+    /// editing — it is the only place the graph format is spelled out,
+    /// since the tool schema keeps the graph opaque on purpose.
     #[test]
     fn the_graph_template_is_accepted_verbatim() {
         use crate::agent_ops::{AgentSession, OpsBatch};

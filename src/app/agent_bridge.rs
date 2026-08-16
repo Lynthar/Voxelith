@@ -1,24 +1,6 @@
-//! The editor's half of the agent bridge: serve an MCP client from the
-//! world the user is looking at.
-//!
-//! Shape is `tick_preview`'s — a background task produces messages, the
-//! frame loop drains them and does the mutating — with one addition: an
-//! agent's tool call is waiting for an answer, so every message carries
-//! a line back. The world, the selection and the undo stack never leave
-//! this thread; `voxelith::mcp::bridge` owns the wire and knows nothing
-//! about chunks.
-//!
-//! What this buys over the checkpoint-and-reload path it grew out of is
-//! one undo stack. An agent's batch goes through the same
-//! `CommandHistory` as a brush stroke, so Ctrl+Z walks back through
-//! both, and a human can start drawing mid-build without stopping
-//! anything or losing a race to save.
-//!
-//! Two modes, and the difference is only *when* a batch lands.
-//! [`Approval::Auto`] commits it as it arrives — the human watches it
-//! appear and undoes it if it was wrong, which is the faster loop for a
-//! run of batches. [`Approval::Review`] puts it up as a translucent
-//! preview and parks the agent's call until they answer.
+//! The editor's half of the agent bridge: the frame loop drains calls
+//! and does the mutating, answering each one down the line it came in
+//! on. The world never leaves this thread.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
@@ -41,11 +23,8 @@ use super::App;
 const REVIEW_ALPHA: f32 = 0.5;
 
 /// Cells the batch would clear, painted so they can be seen going.
-///
-/// `patch_to_mesh` skips air, so a batch that only deletes would preview
-/// as nothing at all — the one preview a human can't review. Red is not
-/// used anywhere else in the viewport, and a cell about to be erased has
-/// no color of its own worth showing.
+/// `patch_to_mesh` skips air, so a delete-only batch would otherwise
+/// preview as nothing at all.
 const CLEARED_TINT: Voxel = Voxel {
     material: 1,
     r: 220,
@@ -56,22 +35,18 @@ const CLEARED_TINT: Voxel = Voxel {
     _reserved: 0,
 };
 
-/// How long an unanswered batch stays parked.
-///
-/// The agent's own client normally gives up long before this, and
-/// [`BridgeCall::abandoned`] catches that exactly; this is the backstop
-/// for the patient client whose human walked away, so the preview
-/// doesn't sit on screen for the rest of the session.
+/// How long an unanswered batch stays parked — the backstop for a
+/// patient client whose human walked away.
+/// [`BridgeCall::abandoned`] catches the ordinary timeout exactly.
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A batch waiting on a human.
 pub(super) struct PendingReview {
     call: BridgeCall,
     outcome: BatchOutcome,
-    /// The edit generation when this was parked. Any editing the human
-    /// does meanwhile moves it, and that invalidates the batch: its
-    /// `old_voxel`s are what the world held *then*, so committing it
-    /// later would make undo restore a state that never existed.
+    /// The edit generation when this was parked. Any editing under it
+    /// moves the counter and invalidates the batch, whose `old_voxel`s
+    /// describe the world as it was then.
     history_mark: u64,
     parked_at: Instant,
 }
@@ -83,12 +58,9 @@ impl PendingReview {
     }
 }
 
-/// Writes and clears, counted apart.
-///
-/// One number would do neither job: "changes 40 voxels" reads as "adds
-/// 40" to the person deciding, and a batch that only deletes is exactly
-/// the one they most need to understand before saying yes — especially
-/// since the preview can only ever stand in for what is leaving.
+/// Writes and clears, counted apart: "changes 40 voxels" reads as "adds
+/// 40" to the person deciding, and a delete-only batch is the one they
+/// most need to understand before saying yes.
 fn summarize(changes: &[VoxelChange]) -> String {
     let cleared = changes
         .iter()
@@ -137,20 +109,17 @@ impl AgentBridgeState {
 }
 
 impl App {
-    /// Bind the port and start serving. No-op if the bridge is already
-    /// up.
-    ///
-    /// Port 0 asks the OS for a free one, and the panel shows whatever
-    /// it handed out.
+    /// Bind the port and start serving; a no-op when the bridge is
+    /// already up. Port 0 asks the OS for a free one, and the panel
+    /// shows whatever it handed out.
     pub(super) fn start_agent_bridge(&mut self, port: u16) {
         if self.agent.is_running() {
             return;
         }
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         // Bind here rather than inside the task: "that port is taken" is
-        // an answer to the button the user just pressed, and it belongs
-        // in front of them instead of in a log line from a background
-        // task that quietly never started.
+        // an answer to the button just pressed, and belongs in front of
+        // the user rather than in a log line.
         let listener = match TcpListener::bind(address) {
             Ok(listener) => listener,
             Err(e) => {
@@ -162,10 +131,9 @@ impl App {
         };
         let address = listener.local_addr().unwrap_or(address);
 
-        // Minted per start, so stopping and restarting the bridge
-        // invalidates whatever an old client kept. The human copies the
-        // line the panel shows; nothing writes the token to disk, which
-        // is also why the panel is the only place it exists.
+        // Minted per start, so restarting the bridge invalidates
+        // whatever an old client kept. Nothing writes it to disk, which
+        // is why the panel is the only place it exists.
         let token = voxelith::mcp::AccessToken::generate();
         let client_command =
             voxelith::mcp::guard::client_command(&format!("http://{address}/mcp"), &token);
@@ -173,18 +141,16 @@ impl App {
         let (handle, receiver) = bridge::channel();
         let task = self.async_runtime.handle().spawn(async move {
             if let Err(e) = bridge::serve_http_bridged(handle, listener, token).await {
-                // The socket is already bound by the time we get here, so
-                // this is the transport itself failing rather than a port
-                // clash. Nothing to recover: the receiver going quiet is
-                // what the panel shows.
+                // The socket is bound by the time we get here, so this is
+                // the transport failing rather than a port clash.
+                // Nothing to recover; the panel shows it going quiet.
                 log::error!("agent bridge stopped serving: {e}");
             }
         });
 
         let running = RunningBridge::new(address, client_command, task);
-        // Also to the log, not only the panel: `--agent-port` is a
-        // command-line affordance, and someone who started the editor
-        // from a terminal expects the terminal to tell them how to
+        // To the log as well as the panel: someone who started the
+        // editor with `--agent-port` expects the terminal to say how to
         // connect rather than to go hunting for a window.
         log::info!("Agent bridge client setup: {}", running.client_command());
         self.ui
@@ -195,11 +161,8 @@ impl App {
     }
 
     /// Bring the bridge up before the first frame, for
-    /// `voxelith --agent-port`. `None` leaves it off.
-    ///
-    /// Nothing here needs the window or the GPU — a socket and a channel
-    /// are all it is — so a call that arrives before the first frame
-    /// simply queues until the frame loop drains it.
+    /// `voxelith --agent-port`. Nothing here needs the window or GPU, so
+    /// an early call just queues until the frame loop drains it.
     pub fn start_agent_bridge_at(&mut self, port: Option<u16>) {
         let Some(port) = port else {
             return;
@@ -314,11 +277,9 @@ impl App {
             return;
         }
         self.agent.approval = approval;
-        // Turning approval *off* with something already parked would
-        // leave a preview on screen that nothing can answer any more:
-        // the strip is gone, and auto mode has no notion of a batch
-        // waiting. Land it — the user just said batches may land — and
-        // the agent hears one clear answer either way.
+        // Turning approval off with something parked would leave a
+        // preview nothing can answer. Land it — the user just said
+        // batches may land — and the agent hears one clear answer.
         if approval == Approval::Auto && self.agent.pending.is_some() {
             self.accept_agent_batch();
         }
@@ -329,19 +290,8 @@ impl App {
     }
 
     /// The witness that the world has not moved under a parked batch.
-    ///
-    /// This used to be the `(undo, redo)` depths, on the reasoning that
-    /// every edit goes through `CommandHistory` so one of them must
-    /// change. Every edit does — but the *pair* comes back to a value
-    /// it already held in three ordinary ways: undo then draw, draw
-    /// with the undo stack already full, and continuing a stroke. Each
-    /// leaves a different world behind the same two numbers, and
-    /// accepting a batch there commits `old_voxel`s describing a world
-    /// that is gone, so undoing it restores a state that never existed.
-    ///
-    /// `CommandHistory::generation` moves on every one of those and
-    /// never moves back, which makes the comparison below say what it
-    /// always claimed to say.
+    /// `CommandHistory::generation` rather than the `(undo, redo)`
+    /// depths — those return to a value they already held.
     fn history_mark(&self) -> u64 {
         self.editor.history.generation()
     }
@@ -361,15 +311,8 @@ impl App {
             return;
         };
         // Checked here as well as at Accept, and this is the copy that
-        // matters to the person: the moment they edit anything, the
-        // parked batch is already doomed (its `old_voxel`s describe the
-        // world as it was), and the three local paths that write
-        // straight into the world — Generate, Run Pipeline, Import —
-        // also clear the overlay it was being previewed in. Waiting for
-        // a click would leave the strip asking them to approve
-        // something they can no longer see, and leave the agent hanging
-        // for an answer that was decided the moment they picked up the
-        // brush.
+        // matters: waiting for a click would leave the strip asking to
+        // approve something the user can no longer see.
         if pending.history_mark != self.editor.history.generation() {
             self.drop_pending_review(
                 "world_changed",
@@ -397,10 +340,9 @@ impl App {
     }
 
     fn serve_agent_call(&mut self, call: BridgeCall) {
-        // `apply_ops` is the one call that may not answer at once, since
-        // under review it parks until a human decides — so it takes the
-        // whole call. Running the batch here, while the request is still
-        // borrowed, keeps that borrow out of the answering path.
+        // `apply_ops` is the one call that may not answer at once, so it
+        // takes the whole call. Running the batch here keeps the request
+        // borrow out of the answering path.
         let batch = match &call.request {
             AgentRequest::ApplyOps(batch) => Some((
                 agent_ops::run_batch(
@@ -457,9 +399,8 @@ impl App {
             }
 
             // The history is shared, so an agent's undo can step back
-            // over a human's brush stroke. That is the point rather than
-            // a hazard: "undo that" should work whoever did it, and the
-            // human's own Ctrl+Z is right there to put it back.
+            // over a human's stroke. That is the point: "undo that"
+            // should work whoever did it.
             AgentRequest::Undo => {
                 let stepped = self
                     .editor
@@ -488,11 +429,9 @@ impl App {
         }
     }
 
-    /// Answer an undo / redo, re-meshing first when it moved.
-    ///
-    /// Same ordering as `commit_agent_batch`: the world changed, so the
-    /// screen and the modified flag have to catch up before the answer
-    /// reports on them.
+    /// Answer an undo or redo, re-meshing first when it moved. Same
+    /// ordering as `commit_agent_batch`: the screen and the modified
+    /// flag catch up before the answer reports on them.
     fn stepped_and_meshed(&mut self, stepped: bool) -> Answer {
         if stepped {
             self.rebuild_all_meshes();
@@ -519,10 +458,8 @@ impl App {
         };
 
         // A dry run changed nothing and has nothing to approve. Its
-        // description has to come from the preview's world, not this
-        // one: a report of the world after the batch beside a
-        // description of the world before it is the one way to make
-        // "what would this do?" actively misleading.
+        // description comes from the preview's world, or the answer
+        // pairs an after-report with a before-picture.
         if dry_run {
             let description = agent_ops::describe(DocumentView {
                 world: &outcome.world,
@@ -589,15 +526,9 @@ impl App {
         }
         let changed = outcome.changes.len();
 
-        // A graph the batch carried goes into the Graph panel — that is
-        // what sending a graph is *for*: the agent picks the generators
-        // and wires them, the human takes over at the sliders. It rides
-        // inside the batch's command as a before/after transition, so
-        // the one Ctrl+Z that takes the voxels back out restores the
-        // graph the batch replaced too. Laid out before it's stored,
-        // since an agent sends no positions and every node would
-        // otherwise pile up on the origin (and redo must re-apply the
-        // laid-out version, not re-pile them).
+        // A graph the batch carried goes into the Graph panel, riding
+        // inside the command so one Ctrl+Z restores both. Laid out
+        // before storing, since an agent sends no positions.
         let graph = outcome.graph.map(|mut after| {
             if after.all_at_origin() {
                 after.relayout();
@@ -608,10 +539,9 @@ impl App {
             }
         });
         if graph.as_ref().is_some_and(|t| t.before != t.after) {
-            // A batch that only carried a graph changed no voxel, so the
-            // re-mesh below finds nothing dirty and the document would
-            // answer "no unsaved changes" while holding a pipeline that
-            // exists nowhere on disk.
+            // A graph-only batch changes no voxel, so the re-mesh below
+            // finds nothing dirty and the document would report no
+            // unsaved changes while holding a pipeline not on disk.
             self.document.bump();
         }
 
@@ -636,16 +566,9 @@ impl App {
         self.ui
             .set_status(format!("Agent applied {changed} voxel changes"));
 
-        // Re-mesh before answering rather than letting the frame loop
-        // reach its own call further down. Two things depend on the
-        // order: the geometry is on screen in the frame the agent is
-        // told about it, and — since that call is also where the
-        // document is flagged as modified — the `unsaved_changes` in
-        // this answer is true rather than a frame stale. An agent that
-        // has just written 125 voxels being told the document has no
-        // unsaved changes is the editor lying about its own state. The
-        // later call this frame finds no dirty chunks and returns at
-        // once.
+        // Re-mesh before answering: that call is where the document is
+        // flagged modified, so answering first tells an agent that just
+        // wrote 125 voxels there are no unsaved changes.
         self.rebuild_all_meshes();
 
         Applied {
@@ -697,10 +620,8 @@ impl App {
     }
 
     /// Hand the overlay slot back to the procgen previews.
-    ///
-    /// `invalidate_preview` also resets their state machines, so
-    /// whichever of them is switched on re-renders into the freed slot
-    /// on the next tick instead of staying dark until a parameter moves.
+    /// `invalidate_preview` resets their state machines too, so an
+    /// enabled one re-renders next tick rather than staying dark.
     fn clear_review_preview(&mut self) {
         self.invalidate_preview();
     }
@@ -748,10 +669,9 @@ mod tests {
         );
     }
 
-    /// The preview has to show cells the batch would clear.
-    /// `patch_to_mesh` skips air, so a delete-only batch would otherwise
-    /// put nothing on screen and ask a human to approve an invisible
-    /// change.
+    /// The preview has to show cells the batch would clear: air renders
+    /// as nothing, so a delete-only batch would ask a human to approve
+    /// an invisible change.
     #[test]
     fn cleared_cells_get_a_visible_stand_in() {
         assert!(CLEARED_TINT.is_solid(), "air would not render at all");
