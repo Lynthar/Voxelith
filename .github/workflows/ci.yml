@@ -5,7 +5,7 @@ name: CI
 # and the full feature-matrix job) and macOS (Metal, Apple Silicon — the
 # primary dev machine since 2026-08). Linux is deliberately absent: it
 # would add the rfd/winit/wgpu system-dependency dance for a platform
-# nobody runs the editor on yet. See docs/STATUS.md.
+# nobody runs the editor on yet.
 on:
   push:
     branches: [main]

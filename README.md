@@ -125,8 +125,6 @@ On macOS, use ⌘ wherever a shortcut below says `Ctrl`.
 └──────────────────────────────────────────────┘
 ```
 
-See [`docs/STATUS.md`](docs/STATUS.md) for current implementation state, the remaining roadmap, and design invariants.
-
 ## License
 
 Apache License 2.0 © 2024-2026 Lynthar
