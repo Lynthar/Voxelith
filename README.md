@@ -72,6 +72,11 @@ cargo run --release -- mcp --root ./models --checkpoint
 cargo run --release -- --agent-port 8737
 ```
 
+**On macOS, build the app bundle if you want the icon**: `packaging/macos/bundle.sh`
+writes `Voxelith.app`, and the Dock reads the icon from inside it. A bare
+`cargo run` binary shows the generic executable icon there — winit cannot
+set a window icon on macOS, so nothing in the code can change that.
+
 Every subcommand above is headless; `--agent-port` is the editor itself.
 `cargo build --no-default-features` builds that headless half — library
 plus CLI, with no winit / wgpu / egui in the dependency tree — for a

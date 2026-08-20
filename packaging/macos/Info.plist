@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for Voxelith.app/Contents/Info.plist. __VERSION__ is filled in
+  by bundle.sh from Cargo.toml, so the version lives in one place.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>voxelith</string>
+	<!-- Names Resources/voxelith.icns; the extension is implied. -->
+	<key>CFBundleIconFile</key>
+	<string>voxelith</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.lynthar.voxelith</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Voxelith</string>
+	<key>CFBundleDisplayName</key>
+	<string>Voxelith</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<!-- wgpu on Metal; Apple Silicon ships nothing older. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.graphics-design</string>
+</dict>
+</plist>

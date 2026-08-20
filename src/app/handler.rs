@@ -19,11 +19,10 @@ use super::{App, PendingAction};
 /// tremor without blocking deliberate drags.
 const DRAG_THRESHOLD_PX_SQ: f32 = 8.0 * 8.0;
 
-/// The window icon, decoded from the same artwork `build.rs` embeds as
-/// the exe resource, so pinned and running taskbar items match. `None`
-/// on decode failure — not worth failing startup over.
-fn window_icon() -> Option<winit::window::Icon> {
-    let bytes = include_bytes!("../../assets/branding/icon_64.png");
+/// Decode one of the embedded icon PNGs. Windows and X11 only: macOS
+/// ignores window icons and reads the .app bundle's icns instead.
+/// `None` on decode failure — startup goes on without one.
+fn icon_from(bytes: &[u8]) -> Option<winit::window::Icon> {
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
@@ -55,9 +54,16 @@ impl ApplicationHandler for App {
                 }
                 None => saved,
             };
+            // Created hidden, shown after `init`. The taskbar asks a new
+            // window for its icon once, when it makes the button, and
+            // gives up if the thread is busy — which it is, for as long
+            // as wgpu takes to come up. It never asks again.
             let window_attrs = Window::default_attributes()
                 .with_title("Voxelith")
-                .with_window_icon(window_icon())
+                .with_window_icon(icon_from(include_bytes!(
+                    "../../assets/branding/icon_32.png"
+                )))
+                .with_visible(false)
                 .with_inner_size(winit::dpi::LogicalSize::new(w, h));
 
             let window = event_loop.create_window(window_attrs).unwrap();
@@ -66,6 +72,7 @@ impl ApplicationHandler for App {
             // the chain has to start somewhere, and macOS delivers no
             // initial paint event — the window would stay blank forever.
             if let Some(window) = &self.window {
+                window.set_visible(true);
                 window.request_redraw();
             }
         }

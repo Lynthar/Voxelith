@@ -18,8 +18,10 @@
 # brightest, the broad +z face mid, the +x edge darkest.
 #
 # Needs Pillow (any recent version; ICO append_images needs >= 9.1).
+import io
 import math
 import os
+import struct
 from PIL import Image, ImageDraw
 
 # Rigid yaw/pitch axonometric, turned toward the face: yaw 30 deg
@@ -174,6 +176,59 @@ def plated_icon(size):
     out.alpha_composite(mark, ((size - inner) // 2, (size - inner) // 2))
     return out
 
+# ------------------------------------------------------------------ icns
+
+# macOS takes the app icon from the bundle's .icns, which is a flat list
+# of typed blocks — one PNG per size, the type code carrying both the
+# nominal size and the scale factor. These are the codes `iconutil` uses
+# for a .iconset, so the result is the same file that tool would make;
+# writing it here means the whole brand set still regenerates on any
+# platform, which matters because the icons are authored on Windows and
+# consumed on macOS. Retina entries share a bitmap with the plain entry
+# of the same pixel size (32 is both 32x32 and 16x16@2x) — the format
+# stores them separately, and the OS picks by slot, not by size.
+ICNS_BLOCKS = [
+    (b'icp4', 16),    # 16x16
+    (b'ic11', 32),    # 16x16@2x
+    (b'icp5', 32),    # 32x32
+    (b'ic12', 64),    # 32x32@2x
+    (b'ic07', 128),   # 128x128
+    (b'ic13', 256),   # 128x128@2x
+    (b'ic08', 256),   # 256x256
+    (b'ic14', 512),   # 256x256@2x
+    (b'ic09', 512),   # 512x512
+    (b'ic10', 1024),  # 512x512@2x
+]
+
+def write_icns(path, icons):
+    """Pack `icons` (size -> RGBA Image) into an .icns at `path`."""
+    body = b''
+    for code, size in ICNS_BLOCKS:
+        buf = io.BytesIO()
+        icons[size].save(buf, format='PNG')
+        png = buf.getvalue()
+        body += code + struct.pack('>I', len(png) + 8) + png
+    with open(path, 'wb') as f:
+        f.write(b'icns' + struct.pack('>I', len(body) + 8) + body)
+    print('wrote', path)
+
+def verify_icns(path):
+    """Re-read the file the way macOS would: walk the blocks, decode
+    every payload, and check each one is a PNG of its slot's size."""
+    d = open(path, 'rb').read()
+    assert d[:4] == b'icns', 'bad magic'
+    assert struct.unpack('>I', d[4:8])[0] == len(d), 'length field disagrees with file'
+    seen, off = [], 8
+    while off < len(d):
+        code = d[off:off + 4]
+        n = struct.unpack('>I', d[off + 4:off + 8])[0]
+        assert n >= 8 and off + n <= len(d), f'block {code} overruns the file'
+        with Image.open(io.BytesIO(d[off + 8:off + n])) as im:
+            seen.append((code, im.size[0], im.size[1]))
+        off += n
+    assert seen == [(c, s, s) for c, s in ICNS_BLOCKS], seen
+    return seen
+
 # ------------------------------------------------------------------ SVG
 
 def mark_svg_body(size, margin=0.15):
@@ -317,17 +372,25 @@ def main():
     write_lockup_svg(out('voxelith-logo-dark.svg'), '#E8ECF4')    # on dark bg
     write_lockup_svg(out('voxelith-logo-light.svg'), '#232838')   # on light bg
     write_banner_svg(out('voxelith-banner.svg'))                  # README hero
-    sizes = [256, 128, 64, 48, 32, 24, 16]
-    icons = {sz: plated_icon(sz) for sz in sizes}
-    icons[64].save(out('icon_64.png'))            # embedded as the window icon
+    ico_sizes = [256, 128, 64, 48, 32, 24, 16]    # Windows exe resource
+    icns_sizes = sorted({s for _, s in ICNS_BLOCKS}, reverse=True)   # macOS bundle
+    icons = {sz: plated_icon(sz)
+             for sz in sorted(set(ico_sizes) | set(icns_sizes), reverse=True)}
+    # The window icon (ICON_SMALL: titlebar, Task Manager), embedded by
+    # src/app/handler.rs. Rendered at 32 rather than downscaled from a
+    # larger bitmap, because plated_icon lifts and tightens everything
+    # under 48 px instead of letting it go muddy.
+    icons[32].save(out('icon_32.png'))
     icons[256].save(out('voxelith.ico'), format='ICO',
-                    append_images=[icons[s] for s in sizes[1:]],
-                    sizes=[(s, s) for s in sizes])
+                    append_images=[icons[s] for s in ico_sizes[1:]],
+                    sizes=[(s, s) for s in ico_sizes])
     print('wrote', out('voxelith.ico'))
     with Image.open(out('voxelith.ico')) as probe:
         got = sorted(probe.info.get('sizes', []))
-        assert got == [(s, s) for s in sorted(sizes)], got
+        assert got == [(s, s) for s in sorted(ico_sizes)], got
     print('ico verified:', got)
+    write_icns(out('voxelith.icns'), icons)
+    print('icns verified:', [f'{c.decode()}:{w}' for c, w, _ in verify_icns(out('voxelith.icns'))])
 
 if __name__ == '__main__':
     main()

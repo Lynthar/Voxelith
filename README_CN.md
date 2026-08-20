@@ -71,6 +71,11 @@ cargo run --release -- mcp --root ./models --checkpoint
 cargo run --release -- --agent-port 8737
 ```
 
+**macOS 上想要图标就构建 app bundle**:`packaging/macos/bundle.sh` 会生成
+`Voxelith.app`,Dock 从这个包里读图标。直接 `cargo run` 出来的二进制在
+Dock 上只有通用可执行文件图标——winit 在 macOS 上无法设置窗口图标,这一点
+代码层面改不了。
+
 以上子命令全部无头,`--agent-port` 那条则是编辑器本身。
 `cargo build --no-default-features` 构建的正是无头这一半——库加 CLI,
 依赖树里没有 winit / wgpu / egui——供没有 GPU 的容器或 CI 使用。想在
