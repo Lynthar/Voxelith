@@ -379,7 +379,7 @@ fn extract_from_mesh(
             .map(|i| i.into_u32().collect())
             .unwrap_or_else(|| (0..positions.len() as u32).collect());
 
-        for chunk in indices.chunks_exact(3) {
+        for chunk in indices.as_chunks::<3>().0 {
             let (i0, i1, i2) = (chunk[0] as usize, chunk[1] as usize, chunk[2] as usize);
             if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
                 continue;

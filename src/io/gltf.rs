@@ -802,7 +802,7 @@ mod tests {
         let off = view["byteOffset"].as_u64().unwrap() as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
         let mut min_r = f32::INFINITY;
-        for rgba in bin[off..off + len].chunks_exact(16) {
+        for rgba in bin[off..off + len].as_chunks::<16>().0 {
             let r = f32::from_le_bytes(rgba[0..4].try_into().unwrap());
             min_r = min_r.min(r);
         }
@@ -905,8 +905,8 @@ mod tests {
         let off = view["byteOffset"].as_u64().unwrap() as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
         let (mut seen1, mut seen2) = (false, false);
-        for z in bin[off..off + len].chunks_exact(4) {
-            match f32::from_le_bytes(z.try_into().unwrap()) as i32 {
+        for z in bin[off..off + len].as_chunks::<4>().0 {
+            match f32::from_le_bytes(*z) as i32 {
                 1 => seen1 = true,
                 2 => seen2 = true,
                 _ => {}
@@ -951,7 +951,7 @@ mod tests {
         let off = view["byteOffset"].as_u64().unwrap() as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
         let (mut seen1, mut seen2) = (false, false);
-        for uv in bin[off..off + len].chunks_exact(8) {
+        for uv in bin[off..off + len].as_chunks::<8>().0 {
             let x = f32::from_le_bytes(uv[0..4].try_into().unwrap());
             let y = f32::from_le_bytes(uv[4..8].try_into().unwrap());
             assert_eq!(y, 0.0, "TEXCOORD_0.y is an unused 0 pad");

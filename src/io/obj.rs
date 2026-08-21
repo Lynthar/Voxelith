@@ -87,7 +87,7 @@ pub fn export_obj(world: &World, path: &Path) -> Result<ObjStats, ObjError> {
                 v.normal[0], v.normal[1], v.normal[2]
             )?;
         }
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let a = base + tri[0] as usize;
             let b = base + tri[1] as usize;
             let c = base + tri[2] as usize;
@@ -148,7 +148,7 @@ fn write_obj_combined_mesh<W: Write>(mesh: &ChunkMesh, writer: &mut W) -> Result
             v.normal[0], v.normal[1], v.normal[2]
         )?;
     }
-    for tri in mesh.indices.chunks_exact(3) {
+    for tri in mesh.indices.as_chunks::<3>().0 {
         // OBJ is 1-indexed.
         let a = tri[0] as usize + 1;
         let b = tri[1] as usize + 1;
