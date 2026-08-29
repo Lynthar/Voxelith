@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Voxelith Contributors"]
 description = "Procedural-first voxel asset creation tool with a headless agent interface"
-license = "Apache-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/Lynthar/Voxelith"
 # Stated so cargo refuses an older toolchain with one clear line instead
 # of a wall of type errors from somewhere in the dependency tree. The

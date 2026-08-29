@@ -2,134 +2,119 @@
 
 <img src="assets/branding/voxelith-banner.svg" alt="Voxelith — a runestone tablet with a V of glowing voxels" width="100%">
 
-**Procedural-first Voxel Asset Creation Tool**
-
-[![Rust](https://img.shields.io/badge/Rust-1.88+-orange.svg)](https://www.rust-lang.org/)
-[![wgpu](https://img.shields.io/badge/wgpu-22.0-blue.svg)](https://wgpu.rs/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
-
-[中文文档](README_CN.md)
-
-<br>
-
-<img src="docs/media/agent-castle-keep.png" width="30%" alt="Castle keep, built by an agent over the ops protocol"> <img src="docs/media/agent-terrain.png" width="30%" alt="Layered terrain from the procedural node graph"> <img src="docs/media/agent-arched-bridge.png" width="30%" alt="Arched bridge — footprint is what tells an arch from a wall">
-
-<sub>Straight out of the tool: models built by an agent over the ops protocol, drawn by <code>voxelith render</code>, graded by <code>voxelith eval</code>.</sub>
+[![license](https://img.shields.io/github/license/Lynthar/Voxelith)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Lynthar/Voxelith/ci.yml?branch=main&label=CI)](https://github.com/Lynthar/Voxelith/actions/workflows/ci.yml)
+[![audit](https://img.shields.io/github/actions/workflow/status/Lynthar/Voxelith/audit.yml?branch=main&label=audit)](https://github.com/Lynthar/Voxelith/actions/workflows/audit.yml)
 
 </div>
 
----
+Procedural-first voxel asset creation — a wgpu/egui editor plus a headless CLI and MCP server that agents can drive
 
-## Overview
+English | [简体中文](README.zh-CN.md)
 
-**Voxelith** is a modern voxel editor built with Rust, featuring GPU-accelerated rendering via wgpu and a clean egui interface. Designed as a procedural-first tool for both manual editing and programmatic generation.
+A voxel editor with a GPU viewport, and the same codebase with no window at all.
+Run it without a subcommand and you get the editor; give it one and it bakes a
+batch of models to glTF, applies a JSON list of operations, renders turnaround
+PNGs on the CPU, or scores a finished model against a set of assertions.
 
-## Features
+I built the headless mode for one workflow: an agent builds something, then
+checks its own work. That's why the operation vocabulary, the MCP server and the
+eval suite were designed in from the start, not added afterwards.
 
-| Feature | Description |
-|---------|-------------|
-| 🎨 **Editing** | 5 brush tools (Place / Remove / Paint / Eyedropper / Fill) + 4 shape tools (Line / Box / Sphere / Cylinder) with a two-phase gesture: drag the footprint, release, pull up for height, click to commit (Esc cancels). Drag-paint with stroke-merged undo, brush hover preview, X / Y / Z symmetry mirroring |
-| ▭ **Box select** | `0` to enter Select. Drag corners to mark an AABB; drag inside to move (single undoable Command, overlap-safe); arrow keys nudge X / Z, `Ctrl+↑↓` Y, `Shift` × 10. Rotate with `R` / `Shift+R`, mirror with `M` — each one undoable step. `Ctrl+C/X/V`, `Ctrl+Shift+V` paste-at-cursor, `Del`, `Ctrl+A` select-all-solid, `Esc` / `Ctrl+D` deselect. Paste auto-selects the destination AABB so Paste→drag→Paste chains |
-| ⚓ **Sockets** | Drop named attachment points on any voxel face (position + outward normal). They persist in the project and export as glTF empty nodes — weapon mounts, FX anchors, banner slots for the engine to hang parts on |
-| 📥 **Mesh import** | Voxelize a `.glb` into the scene at 32³ / 64³ / 128³ — surface sampling plus a parity-scan interior fill, with colors taken from the material's factor and base-color texture. Adds to what's already there as one undoable edit, so Ctrl+Z takes it back |
-| 🔌 **Agent bridge** | The editor hosts an MCP server, so an agent edits the project you have open — its batches land on *your* undo stack, one Ctrl+Z per batch, and you can take over mid-build. It can hand you a node graph rather than raw voxels, so the result stays parametric. Or have it ask first: the batch appears as translucent geometry to apply or discard. Headless variants (a CLI and a standalone server) for when nobody's watching |
-| 🏷️ **Game-asset materials** | Per-brush emissive / metallic flags plus a 4-slot faction **tint zone**, carried through to GLB as glTF materials and a per-vertex `_TINTZONE` attribute for a recolor shader downstream |
-| 🌱 **Procedural generation** | Perlin terrain, L-system trees, WFC tilesets (Dungeon + City) — add one from the Generate menu as a ready-made graph node, then compose with Translate / Filter / Mask / Combine nodes in the visual graph editor. The graph is saved with the project, and an agent can write one for you to keep tuning |
-| ✨ **Live preview** | Debounced translucent overlay shows generator output before you commit |
-| 📁 **File I/O** | Native `.vxlt` (gzip + state), MagicaVoxel `.vox` import (v150 + v200 multi-model + scene graph) / export (v150), Wavefront `.obj` and glTF Binary `.glb` export. OBJ / GLB also have Marching Cubes "smoothed" variants (light: rounded cubes / heavy: clay-like) for organic exports |
-| 💾 **Persistent state** | Window layout, panel toggles, brush and palette, recent files all survive restarts; generator parameters ride in the pipeline graph, so they travel with the project rather than the machine |
-| 🖥️ **Viewport** | Orbit / pan / zoom camera (with auto-resync on every orbit), grid, axes, optional wireframe |
-| 💡 **Per-vertex AO** | Minecraft-style ambient occlusion baked into the greedy mesh — corners and crevices darken, open faces stay bright. Adds visible block-by-block depth without runtime cost |
+<img src="docs/media/editor.png" alt="The Voxelith editor with a lighthouse diorama open in the viewport" width="100%">
 
-## Quick Start
+<sub>The editor — wgpu viewport, egui panels. This lighthouse is one ops batch:
+48 operations applied with <code>voxelith exec</code>, then opened here.</sub>
+
+<img src="docs/media/render.png" alt="The same model drawn by voxelith render" width="100%">
+
+<sub>The same file through <code>voxelith render</code>, which draws on the CPU
+with no GPU involved. Emissive voxels reach the image unshaded, so the lantern
+lights up here and not in the viewport.</sub>
+
+## Install
+
+**There are no prebuilt binaries yet.** Building from source is the only way in,
+and needs Rust 1.88 or newer.
 
 ```bash
 git clone https://github.com/Lynthar/Voxelith.git
 cd Voxelith
 cargo run --release
-
-# Headless batch export: every .vxlt named in the spec → .glb,
-# with per-asset pivot / up-axis / scale. No window, no GPU.
-cargo run --release -- bake assets/spec.json
-
-# Drive the modeling primitives from a shell (or an AI agent) with a
-# JSON edit protocol: apply a batch, read the report, look at a slice.
-cargo run --release -- exec ops.json --out hut.vxlt --describe
-cargo run --release -- inspect hut.vxlt --slice '{"axis":"y","index":1}'
-cargo run --release -- render hut.vxlt --view all   # see it: CPU raycast PNGs, no GPU
-cargo run --release -- generators        # what `generate` can call
-
-# Or serve the same primitives over the Model Context Protocol, holding
-# one document open across calls (stdio; --http needs `mcp-http`).
-# With --checkpoint every edit is written back to the project file, and
-# the editor reloads it — keep the .vxlt open to watch the agent work.
-cargo run --release -- mcp --root ./models --checkpoint
-
-# Or skip the file entirely: the editor hosts a server of its own, so an
-# agent edits the project you have open, on your undo stack. Paste the
-# setup line it prints — loopback, plus a bearer token minted per run,
-# because "a process on this machine" isn't the same as you.
-cargo run --release -- --agent-port 8737
 ```
 
-**On macOS, build the app bundle if you want the icon**: `packaging/macos/bundle.sh`
-writes `Voxelith.app`, and the Dock reads the icon from inside it. A bare
-`cargo run` binary shows the generic executable icon there — winit cannot
-set a window icon on macOS, so nothing in the code can change that.
+For the headless mode only, without the windowing and GPU dependencies:
 
-Every subcommand above is headless; `--agent-port` is the editor itself.
-`cargo build --no-default-features` builds that headless half — library
-plus CLI, with no winit / wgpu / egui in the dependency tree — for a
-container or CI runner that has no GPU. Add `--features mcp` to keep the
-`mcp` subcommand in it: that one travels with its own feature, and a
-plain `--no-default-features` build doesn't have it.
-Run `voxelith exec --help` for the flags and `voxelith generators` for
-the generator catalog; the ops schema itself is documented on the types
-in `src/agent_ops/schema.rs`. If you are pointing an agent at this repo,
-`.claude/skills/voxelith-modeling/` is the guide it should read — which
-of the three paths to drive, the whole op vocabulary, and the modeling
-technique that keeps a first attempt from being wrong.
-
-## Keyboard Shortcuts
-
-On macOS, use ⌘ wherever a shortcut below says `Ctrl`.
-
-| Key | Action | Key | Action |
-|-----|--------|-----|--------|
-| `1-5` | Brush tools | `Ctrl+Z` | Undo |
-| `6-9` | Shape tools | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
-| `0` | Box select | `Ctrl+C/X/V` | Copy / Cut / Paste |
-| `WASD` | Move camera | `Ctrl+Shift+V` | Paste at cursor |
-| `Q` / `E` | Camera up / down | `Del` | Delete selection |
-| `Middle Mouse` | Orbit | `Ctrl+A` | Select all solid |
-| `Right Mouse` | Pan | `Esc / Ctrl+D` | Deselect |
-| `Scroll` | Zoom | `Arrows / Ctrl+↑↓` | Nudge selection |
-| `F` | Frame selection (or whole scene) | `R` / `Shift+R` | Rotate selection ±90° about Y |
-| `Ctrl+S/O/N` | Save / Open / New | `M` | Mirror selection across X |
-| `Ctrl+Shift+S` | Save As | `Alt` (hold) | Eyedropper |
-
-## Tech Stack
-
-- 🦀 **Rust** - Systems language
-- 🎮 **wgpu** - GPU rendering
-- 🖼️ **egui** - Immediate mode UI
-- 🗜️ **flate2** - Compression
-
-## Architecture
-
+```bash
+cargo build --release --no-default-features
+cargo build --release --no-default-features --features mcp
 ```
-┌──────────────────────────────────────────────┐
-│ UI (egui panels + visual node graph editor) │
-├──────────────────────────────────────────────┤
-│ Editor (tools, commands, raycast, undo)     │
-├──────────────────────────────────────────────┤
-│ Procgen (terrain / tree / WFC + DAG eval)   │
-├──────────────────────────────────────────────┤
-│ Core (voxel, chunk, world) │ Mesh           │
-│ Render (wgpu)              │ IO    Prefs    │
-└──────────────────────────────────────────────┘
+
+On macOS, building an app bundle is what gets you a real Dock icon — winit can't
+set one for a bare `cargo run`:
+
+```bash
+packaging/macos/bundle.sh
 ```
+
+CI covers Windows and macOS. Linux isn't in the matrix.
+
+## Usage
+
+The editor has five brushes — place, remove, paint, eyedropper, fill — four
+shapes, box select, and three generators (Perlin terrain, an L-system tree, wave
+function collapse) whose parameters live in the project's pipeline graph.
+
+```bash
+voxelith                                   # the editor
+voxelith --agent-port 8737                 # editor plus a loopback MCP bridge
+```
+
+Seven subcommands run without a window:
+
+```bash
+voxelith bake spec.json --shard 0/4
+voxelith exec ops.json --in in.vxlt --out hut.vxlt --export hut.glb --dry-run
+voxelith render hut.vxlt --view all --size 512 --out hut.png
+voxelith inspect hut.vxlt --slice '{"axis":"y","index":1}'
+voxelith eval evals/cases --results run-2026-08-08/
+voxelith generators
+voxelith mcp --root ./models --http 127.0.0.1:8080 --token …
+```
+
+`exec` takes fourteen operations — boxes, spheres, cylinders, lines, hollowing,
+selection, mirroring, generator graphs — and the same vocabulary is exposed over
+MCP as eleven tools. When the editor hosts that server itself, an agent's edits
+land in your undo stack while you watch. `docs/reference/bake-spec.example.json`
+is a working bake spec to copy from; `evals/` holds the cases, each a task
+description plus properties the result has to satisfy.
+
+The MCP bridge binds to loopback and requires a token (`VOXELITH_MCP_TOKEN`, or
+one generated and printed at startup); `mcp --http` opens a port, so treat that
+token like any local API credential.
+
+## Limitations
+
+- **Nothing has been released yet** — no tags, no binaries, not on crates.io.
+- **No layers, no multiple objects, no scene tree.** There's one world, which
+  means complex assets can't be split into parts. MagicaVoxel,
+  [Goxel](https://github.com/guillaumechereau/goxel) and
+  [vengi](https://github.com/vengi-voxel/vengi) all have those; Voxelith has the
+  headless mode instead, and it reads `.vox` in both versions, so models can move
+  between those tools and Voxelith.
+- **`.vox` export writes version 150 only.** Reading accepts 150 and 200, but a
+  version 200 scene graph gets flattened on the way in.
+- **Linux has no automated coverage.** Whether the GUI builds and runs there has
+  never been verified.
+- **Evals judge assembly, not appearance.** They check component counts,
+  enclosure and dimensions; whether it looks right is your call.
+- **One writer at a time.** Concurrent edits to one file are detected and
+  refused, never merged.
 
 ## License
 
-Apache License 2.0 © 2024-2026 Lynthar
+Mozilla Public License 2.0 — see [LICENSE](LICENSE). Copyright (c) 2026 Lynthar.
+
+This Source Code Form is subject to the terms of the Mozilla Public License, v.
+2.0. If a copy of the MPL was not distributed with this file, You can obtain one
+at <https://mozilla.org/MPL/2.0/>.
