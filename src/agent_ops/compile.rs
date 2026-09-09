@@ -13,7 +13,6 @@ use crate::editor::{
 };
 use crate::procgen::PipelineGraph;
 
-use super::describe::solid_voxel_count;
 use super::registry;
 use super::schema::{quarter_from, Aabb, AxisSpec, GraphEdit, Op, VoxelSpec, WriteMode};
 use super::{
@@ -110,7 +109,7 @@ impl Scratch {
         changes.sort_unstable_by_key(|c| (c.pos.2, c.pos.1, c.pos.0));
 
         Outcome {
-            voxel_count: solid_voxel_count(&self.world),
+            voxel_count: self.world.solid_voxel_count(),
             world_aabb: self.world.scene_aabb().map(Aabb::from_pair),
             changes,
             selection: self.selection,

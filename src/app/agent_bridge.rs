@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
 use voxelith::agent_ops::{self, BatchOutcome, DocumentView, OpsError};
-use voxelith::core::{Voxel, World};
+use voxelith::core::Voxel;
 use voxelith::editor::{Command, VoxelChange};
 use voxelith::mcp::bridge::{
     self, AgentReply, AgentRequest, Answer, Applied, Approval, BridgeCall, BridgeReceiver,
@@ -593,7 +593,7 @@ impl App {
     fn bridge_status(&self) -> BridgeStatus {
         BridgeStatus {
             path: self.project_path.as_deref().map(voxelith::mcp::display),
-            voxel_count: solid_voxel_count(&self.document.world),
+            voxel_count: self.document.world.solid_voxel_count(),
             undo_depth: self.editor.history.undo_count(),
             redo_depth: self.editor.history.redo_count(),
             unsaved_changes: self.document.unsaved(),
@@ -625,15 +625,6 @@ impl App {
     fn clear_review_preview(&mut self) {
         self.invalidate_preview();
     }
-}
-
-/// Solid voxels in the world. Per-chunk counts are maintained on write,
-/// so this walks chunks rather than cells.
-fn solid_voxel_count(world: &World) -> u64 {
-    world
-        .chunks()
-        .map(|(_, chunk)| chunk.read().solid_count() as u64)
-        .sum()
 }
 
 #[cfg(test)]

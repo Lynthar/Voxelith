@@ -17,7 +17,7 @@ pub use project::{
     load_world, load_world_with_state, save_world_with_state, EditorState, Project, ProjectError,
     ProjectMetadata, SocketData, DEFAULT_CAMERA_POSITION,
 };
-pub use vox::{default_palette, export_vox, import_vox, VoxError, VoxModel};
+pub use vox::{default_palette, export_vox, import_vox, VoxError, VoxImport, VoxModel};
 pub use voxelize::voxelize_glb;
 
 use std::io::{self, Read};

@@ -50,12 +50,43 @@ fn chunk_len(id: &[u8; 4], size: i32) -> Result<u64, VoxError> {
     u64::try_from(size).map_err(|_| VoxError::InvalidChunkSize(*id))
 }
 
+/// What was wrong with the file, in terms the person who picked it can
+/// act on. One line per kind: a malformed file can hit the same problem
+/// a million times, and the log keeps the per-occurrence detail.
+#[derive(Default)]
+struct Notes(Vec<&'static str>);
+
+impl Notes {
+    fn add(&mut self, note: &'static str) {
+        if !self.0.contains(&note) {
+            self.0.push(note);
+        }
+    }
+
+    fn into_vec(self) -> Vec<String> {
+        self.0.into_iter().map(String::from).collect()
+    }
+}
+
+/// A `.vox` read into a world, plus what was wrong with the file. A
+/// damaged or over-budget file still yields a world, so `notes` is the
+/// only thing that can tell the user it is not the whole model.
+pub struct VoxImport {
+    pub world: World,
+    pub notes: Vec<String>,
+}
+
 /// Record a parsed scene node, warning on a duplicate id (last one
 /// wins, as before — but silently doing so hid malformed files).
-fn insert_node(nodes: &mut HashMap<i32, SceneNode>, node: Option<(i32, SceneNode)>) {
+fn insert_node(
+    nodes: &mut HashMap<i32, SceneNode>,
+    node: Option<(i32, SceneNode)>,
+    notes: &mut Notes,
+) {
     let Some((id, n)) = node else { return };
     if nodes.insert(id, n).is_some() {
         log::warn!("VOX: duplicate scene-graph node id {id}; keeping the last");
+        notes.add("the scene graph has duplicate node ids; the last of each wins");
     }
 }
 
@@ -298,7 +329,7 @@ impl VoxScene {
     /// Read a v150 or v200 file. Multi-model scenes and the scene graph
     /// are preserved; unhandled chunks are skipped by their declared
     /// content size.
-    pub fn read<R: Read>(reader: &mut R) -> Result<Self, VoxError> {
+    pub fn read<R: Read>(reader: &mut R, notes: &mut Notes) -> Result<Self, VoxError> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if magic != VOX_MAGIC {
@@ -314,6 +345,7 @@ impl VoxScene {
                 version,
                 VOX_VERSIONS_SUPPORTED
             );
+            notes.add("this file's version is not one Voxelith knows; it was read anyway");
         }
 
         let main_header = ChunkHeader::read(reader)?;
@@ -359,6 +391,7 @@ impl VoxScene {
                         let z = u32::from_le_bytes(buf);
                         if pending_size.is_some() {
                             log::warn!("VOX: SIZE chunk without a matching XYZI");
+                            notes.add("a model declares a size but carries no voxels");
                         }
                         pending_size = Some((x, y, z));
                     }
@@ -390,6 +423,10 @@ impl VoxScene {
                                     "VOX: XYZI chunk with no preceding SIZE; \
                                      assuming 1×1×1"
                                 );
+                                notes.add(
+                                    "a model has no declared size, so it can sit \
+                                     off its intended spot",
+                                );
                                 (1, 1, 1)
                             }
                         };
@@ -408,13 +445,13 @@ impl VoxScene {
                         }
                     }
                     b"nTRN" => {
-                        insert_node(&mut nodes, read_ntrn_chunk(&mut body)?);
+                        insert_node(&mut nodes, read_ntrn_chunk(&mut body, notes)?, notes);
                     }
                     b"nGRP" => {
-                        insert_node(&mut nodes, read_ngrp_chunk(&mut body)?);
+                        insert_node(&mut nodes, read_ngrp_chunk(&mut body)?, notes);
                     }
                     b"nSHP" => {
-                        insert_node(&mut nodes, read_nshp_chunk(&mut body)?);
+                        insert_node(&mut nodes, read_nshp_chunk(&mut body, notes)?, notes);
                     }
                     _ => {
                         // MATL / LAYR / IMAP / rOBJ / rCAM / NOTE /
@@ -448,8 +485,8 @@ impl VoxScene {
     /// Flatten the scene graph into a `World`, then rotate Z-up to Y-up
     /// when `convert_axes`. Flattening runs in MagicaVoxel's own space
     /// so the per-node rotations compose correctly.
-    pub fn to_world(&self, convert_axes: bool) -> World {
-        let native = self.to_world_native();
+    pub fn to_world(&self, convert_axes: bool, notes: &mut Notes) -> World {
+        let native = self.to_world_native(notes);
         if convert_axes {
             rotate_world_z_up_to_y_up(&native)
         } else {
@@ -460,13 +497,14 @@ impl VoxScene {
     /// Flatten the scene graph in MagicaVoxel's native Z-up space,
     /// accumulating transforms from the root and rotating each model
     /// around its own center. No `nTRN` nodes → everything at the origin.
-    fn to_world_native(&self) -> World {
+    fn to_world_native(&self, notes: &mut Notes) -> World {
         let mut world = World::new();
         if !self.nodes.is_empty() && !self.nodes.contains_key(&0) {
             log::warn!(
                 "VOX: scene graph has no root node 0; placing every model \
                  at the origin instead"
             );
+            notes.add("the scene graph has no root; every model was placed at the origin");
         }
         if self.nodes.is_empty() || !self.nodes.contains_key(&0) {
             // No scene graph: write model voxels straight into world
@@ -495,7 +533,14 @@ impl VoxScene {
             &mut path,
             0,
             &mut limits,
+            notes,
         );
+        if limits.exhausted {
+            // The log line says which limit; this is the half the person
+            // who picked the file sees. A truncated import that looks
+            // complete is how a model ships with half its geometry.
+            notes.add("only part of this file was imported — see the log for which limit it hit");
+        }
         world
     }
 
@@ -509,6 +554,7 @@ impl VoxScene {
         path: &mut std::collections::HashSet<i32>,
         depth: usize,
         limits: &mut FlattenLimits,
+        notes: &mut Notes,
     ) {
         if limits.spent() {
             return;
@@ -527,6 +573,7 @@ impl VoxScene {
         // which is how a DAG says "this part appears in several places".
         if !path.insert(node_id) {
             log::warn!("VOX: scene graph cycle through node {node_id}; pruning");
+            notes.add("the scene graph has a cycle; the branch that repeats was pruned");
             return;
         }
         if let Some(node) = self.nodes.get(&node_id) {
@@ -546,7 +593,16 @@ impl VoxScene {
                         translation.2 + rotated_t.2,
                     );
                     let new_r = rotation_compose(rotation, *local_r);
-                    self.flatten_node(world, *child_id, new_t, new_r, path, depth + 1, limits);
+                    self.flatten_node(
+                        world,
+                        *child_id,
+                        new_t,
+                        new_r,
+                        path,
+                        depth + 1,
+                        limits,
+                        notes,
+                    );
                 }
                 SceneNode::Group { children } => {
                     for &child_id in children {
@@ -558,17 +614,21 @@ impl VoxScene {
                             path,
                             depth + 1,
                             limits,
+                            notes,
                         );
                     }
                 }
                 SceneNode::Shape { model_id } => {
                     if let Some(model) = self.models.get(*model_id as usize) {
-                        place_model(world, model, &self.palette, translation, rotation);
-                        if world.chunk_count() > MAX_SCENE_CHUNKS {
-                            limits.stop("scene expands to too much of the world");
+                        if limits.charge(model.voxels.len() as u64) {
+                            place_model(world, model, &self.palette, translation, rotation);
+                            if world.chunk_count() > MAX_SCENE_CHUNKS {
+                                limits.stop("scene expands to too much of the world");
+                            }
                         }
                     } else {
                         log::warn!("VOX: nSHP references missing model {model_id}");
+                        notes.add("part of the scene refers to a model the file does not contain");
                     }
                 }
             }
@@ -589,19 +649,36 @@ const MAX_SCENE_VISITS: u32 = 1 << 20;
 /// claims a whole 32³ chunk (256 KiB), so a tiny file scattering models
 /// across distant translations could otherwise ask for gigabytes.
 const MAX_SCENE_CHUNKS: usize = 4096;
+/// Cap on voxels the walk may place. The other three see no work: a
+/// DAG replaying one model a million times into the same chunks passes
+/// all of them. 2^24 is a dense 256³ model, so one legal model fits.
+const MAX_SCENE_PLACED: u64 = 1 << 24;
 
-/// Budget tracking for `flatten_node`. A `.vox` is untrusted input, and
-/// all three limits above are about refusing to be talked into an
-/// out-of-memory abort or a stack overflow by a small file.
+/// Budget tracking for `flatten_node`. A `.vox` is untrusted input:
+/// depth guards the stack, visits and chunks guard memory, and
+/// `placed` guards the time the import takes.
 #[derive(Default)]
 struct FlattenLimits {
     visits: u32,
+    placed: u64,
     exhausted: bool,
 }
 
 impl FlattenLimits {
     fn spent(&self) -> bool {
         self.exhausted
+    }
+
+    /// Charge `n` voxels against the placement budget. `false` means
+    /// the caller must not place them — the walk stops instead, since
+    /// past this point the file is buying time, not geometry.
+    fn charge(&mut self, n: u64) -> bool {
+        self.placed = self.placed.saturating_add(n);
+        if self.placed > MAX_SCENE_PLACED {
+            self.stop("scene places too many voxels");
+            return false;
+        }
+        true
     }
 
     /// Abandon the rest of the walk, keeping whatever was placed so
@@ -722,7 +799,10 @@ fn parse_translation(s: &str) -> Option<(i32, i32, i32)> {
 /// Read an `nTRN` chunk's body, or `None` on malformed input, which the
 /// caller treats as a no-op. Only frame 0 is read; the layout is in the
 /// vox-extension spec.
-fn read_ntrn_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
+fn read_ntrn_chunk<R: Read>(
+    reader: &mut R,
+    notes: &mut Notes,
+) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
     let node_id = i32::from_le_bytes(i32buf);
@@ -749,20 +829,26 @@ fn read_ntrn_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, 
                 // part of the way to the origin, which is harder to spot.
                 match parse_translation(t_str) {
                     Some(t) => translation = t,
-                    None => log::warn!(
-                        "VOX: nTRN {node_id} has malformed _t {t_str:?}; \
-                         placing at the origin"
-                    ),
+                    None => {
+                        log::warn!(
+                            "VOX: nTRN {node_id} has malformed _t {t_str:?}; \
+                             placing at the origin"
+                        );
+                        notes.add("a placement offset is malformed; that part sits at the origin");
+                    }
                 }
             }
             if let Some(r_str) = dict.get("_r") {
                 // "_r" value is a single byte stored as decimal text.
                 match r_str.parse::<u8>().ok().and_then(decode_rotation_byte) {
                     Some(m) => rotation = m,
-                    None => log::warn!(
-                        "VOX: nTRN {node_id} has malformed _r {r_str:?}; \
-                         using no rotation"
-                    ),
+                    None => {
+                        log::warn!(
+                            "VOX: nTRN {node_id} has malformed _r {r_str:?}; \
+                             using no rotation"
+                        );
+                        notes.add("a rotation is malformed; that part is unrotated");
+                    }
                 }
             }
         }
@@ -800,7 +886,10 @@ fn read_ngrp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, 
 /// Read an `nSHP` chunk. Several model ids mean an animation, not
 /// several parts, so only the first is kept — the same "first frame
 /// wins" rule `read_ntrn_chunk` follows.
-fn read_nshp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, VoxError> {
+fn read_nshp_chunk<R: Read>(
+    reader: &mut R,
+    notes: &mut Notes,
+) -> Result<Option<(i32, SceneNode)>, VoxError> {
     let mut i32buf = [0u8; 4];
     reader.read_exact(&mut i32buf)?;
     let node_id = i32::from_le_bytes(i32buf);
@@ -819,10 +908,12 @@ fn read_nshp_chunk<R: Read>(reader: &mut R) -> Result<Option<(i32, SceneNode)>, 
     }
     let Some(model_id) = first else {
         log::warn!("VOX: nSHP {node_id} references no models");
+        notes.add("part of the scene names no model and was skipped");
         return Ok(None);
     };
     if model_id < 0 {
         log::warn!("VOX: nSHP {node_id} has negative model id {model_id}; skipping");
+        notes.add("part of the scene names an invalid model and was skipped");
         return Ok(None);
     }
     Ok(Some((node_id, SceneNode::Shape { model_id })))
@@ -1093,9 +1184,20 @@ pub fn export_vox<W: Write>(
 /// Import world from VOX (v150 or v200; v200 scenes are flattened).
 /// `convert_axes` rotates MagicaVoxel's Z-up into Y-up — pass `false`
 /// for a file already authored Y-up.
-pub fn import_vox<R: Read>(reader: &mut R, convert_axes: bool) -> Result<World, VoxError> {
-    let scene = VoxScene::read(reader)?;
-    Ok(scene.to_world(convert_axes))
+///
+/// # Errors
+/// A file that is not a readable `.vox`. Content problems that leave a
+/// usable world — truncation, damage, missing models — come back in
+/// [`VoxImport::notes`] instead, and the caller has to show them: a
+/// world returned without them looks like the whole model.
+pub fn import_vox<R: Read>(reader: &mut R, convert_axes: bool) -> Result<VoxImport, VoxError> {
+    let mut notes = Notes::default();
+    let scene = VoxScene::read(reader, &mut notes)?;
+    let world = scene.to_world(convert_axes, &mut notes);
+    Ok(VoxImport {
+        world,
+        notes: notes.into_vec(),
+    })
 }
 
 #[cfg(test)]
@@ -1114,7 +1216,7 @@ mod tests {
         let overflow = export_vox(&world, &mut buffer, false).unwrap();
         assert_eq!(overflow, 0, "3 colors should fit in the 254-slot palette");
 
-        let imported = import_vox(&mut buffer.as_slice(), false).unwrap();
+        let imported = import_vox(&mut buffer.as_slice(), false).unwrap().world;
 
         assert!(imported.get_voxel(0, 0, 0).is_solid());
         assert!(imported.get_voxel(1, 0, 0).is_solid());
@@ -1146,7 +1248,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         export_vox(&world, &mut buffer, true).unwrap();
-        let imported = import_vox(&mut buffer.as_slice(), true).unwrap();
+        let imported = import_vox(&mut buffer.as_slice(), true).unwrap().world;
 
         // Same colors, same vertical relationship preserved.
         assert_eq!(imported.get_voxel(0, 0, 0).color(), base.color());
@@ -1166,7 +1268,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         export_vox(&world, &mut buffer, false).unwrap();
-        let imported = import_vox(&mut buffer.as_slice(), false).unwrap();
+        let imported = import_vox(&mut buffer.as_slice(), false).unwrap().world;
 
         assert!(imported.get_voxel(0, 0, 0).is_solid());
         assert!(imported.get_voxel(0, 3, 0).is_solid());
@@ -1370,7 +1472,9 @@ mod tests {
             (10, 0, 0),
             Some(MIRROR_X),
         );
-        let world = import_vox(&mut even.as_slice(), false).expect("import");
+        let world = import_vox(&mut even.as_slice(), false)
+            .expect("import")
+            .world;
         assert!(
             world.get_voxel(10, 0, 0).is_solid(),
             "even-sized mirror landed off by one"
@@ -1384,7 +1488,9 @@ mod tests {
             (10, 0, 0),
             Some(MIRROR_X),
         );
-        let world = import_vox(&mut odd.as_slice(), false).expect("import");
+        let world = import_vox(&mut odd.as_slice(), false)
+            .expect("import")
+            .world;
         assert!(
             world.get_voxel(11, 0, 0).is_solid(),
             "odd-sized mirror moved"
@@ -1397,7 +1503,9 @@ mod tests {
         // Control for the two above: with no rotation, a cell sits at
         // `translation + p - pivot` regardless of parity.
         let even = build_v200_placed(&build_model((2, 1, 1), &[(0, 0, 0, 1)]), (10, 0, 0), None);
-        let world = import_vox(&mut even.as_slice(), false).expect("import");
+        let world = import_vox(&mut even.as_slice(), false)
+            .expect("import")
+            .world;
         assert!(world.get_voxel(9, 0, 0).is_solid());
     }
 
@@ -1435,8 +1543,9 @@ mod tests {
         ));
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(10, &[0])));
 
-        let world =
-            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
+        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
+            .expect("v200 import")
+            .world;
         assert!(
             world.get_voxel(0, 0, 0).is_solid(),
             "first instance missing"
@@ -1462,8 +1571,9 @@ mod tests {
         chunks.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[2])));
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[0, 1])));
 
-        let world =
-            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
+        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
+            .expect("v200 import")
+            .world;
         // Both models are 1³ at the origin, so "only the first" shows
         // up as exactly one solid voxel in the world.
         assert_eq!(solid_voxels(&world), 1);
@@ -1482,9 +1592,104 @@ mod tests {
         chunks.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[2])));
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[-1])));
 
-        let world =
+        let imported =
             import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
-        assert_eq!(solid_voxels(&world), 0);
+        assert_eq!(solid_voxels(&imported.world), 0);
+        // Dropping a whole model without telling anyone is how a file
+        // arrives looking complete and missing a limb.
+        assert!(
+            imported.notes.iter().any(|n| n.contains("invalid model")),
+            "a skipped model has to be reported, got {:?}",
+            imported.notes
+        );
+    }
+
+    /// `fan_a` × `fan_b` shape visits, all of them the same `model`.
+    fn build_fan_out_scene(model: &[u8], fan_a: usize, fan_b: usize) -> Vec<u8> {
+        let mut chunks = model.to_vec();
+        chunks.extend_from_slice(&build_chunk(
+            b"nGRP",
+            &build_ngrp_content(0, &vec![1i32; fan_a]),
+        ));
+        chunks.extend_from_slice(&build_chunk(
+            b"nGRP",
+            &build_ngrp_content(1, &vec![2i32; fan_b]),
+        ));
+        chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[0])));
+        build_v200_file(&chunks)
+    }
+
+    fn was_truncated(notes: &[String]) -> bool {
+        notes.iter().any(|n| n.starts_with("only part"))
+    }
+
+    #[test]
+    fn a_wide_fan_out_scene_stops_at_the_placement_budget() {
+        // 262144 placements of 65536 voxels out of a 270 KB file. Depth
+        // is 3, the replays share one chunk and the visits stay under
+        // their ceiling: only the placement budget can stop this.
+        let mut voxels = vec![(0u8, 0u8, 0u8, 0u8); 65_536];
+        voxels[0] = (0, 0, 0, 1);
+        let model = build_model((32, 32, 64), &voxels);
+
+        let imported = import_vox(&mut build_fan_out_scene(&model, 512, 512).as_slice(), false)
+            .expect("a truncated scene still imports");
+        assert!(
+            was_truncated(&imported.notes),
+            "a truncated import has to say so, got {:?}",
+            imported.notes
+        );
+
+        // Control: the same model placed once carries no note, so the
+        // assertion above can't pass on an import that always complains.
+        let once = import_vox(&mut build_fan_out_scene(&model, 1, 1).as_slice(), false)
+            .expect("v200 import");
+        assert!(once.notes.is_empty(), "clean import: {:?}", once.notes);
+        assert_eq!(solid_voxels(&once.world), 1);
+    }
+
+    #[test]
+    fn a_shared_subtree_stops_at_the_visit_budget() {
+        // Empty models cost nothing to place, so this reaches the visit
+        // ceiling (2^20) without the placement budget firing first.
+        let model = build_model((1, 1, 1), &[]);
+        let imported = import_vox(
+            &mut build_fan_out_scene(&model, 1024, 1024).as_slice(),
+            false,
+        )
+        .expect("v200 import");
+        assert!(
+            was_truncated(&imported.notes),
+            "hitting the visit ceiling has to say so, got {:?}",
+            imported.notes
+        );
+    }
+
+    #[test]
+    fn a_long_transform_chain_stops_at_the_depth_budget() {
+        // A chain of nTRN nodes is the shape that recurses the walk into
+        // a stack overflow; the model at the end must never be reached.
+        let depth = MAX_SCENE_DEPTH + 2;
+        let mut chunks = build_unit_model(1);
+        for id in 0..depth as i32 {
+            chunks.extend_from_slice(&build_chunk(
+                b"nTRN",
+                &build_ntrn_content(id, id + 1, (0, 0, 0), None),
+            ));
+        }
+        chunks.extend_from_slice(&build_chunk(
+            b"nSHP",
+            &build_nshp_content(depth as i32, &[0]),
+        ));
+
+        let imported =
+            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
+        assert!(
+            was_truncated(&imported.notes),
+            "hitting the depth ceiling has to say so, got {:?}",
+            imported.notes
+        );
+        assert_eq!(solid_voxels(&imported.world), 0);
     }
 
     #[test]
@@ -1501,7 +1706,8 @@ mod tests {
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[0])));
 
         let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
-            .expect("import must survive an unknown trailing field");
+            .expect("import must survive an unknown trailing field")
+            .world;
         assert!(
             world.get_voxel(5, 0, 0).is_solid(),
             "the chunks after the padded one must still parse"
@@ -1548,8 +1754,9 @@ mod tests {
         // to the flood fill and the greedy mesher's zero-key sentinel.
         let mut chunks = build_unit_model(1);
         chunks.extend_from_slice(&build_rgba_chunk([10, 20, 30, 0]));
-        let world =
-            import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v150-style import");
+        let world = import_vox(&mut build_v200_file(&chunks).as_slice(), false)
+            .expect("v150-style import")
+            .world;
         let v = world.get_voxel(0, 0, 0);
         assert!(v.is_solid());
         assert_eq!(v.color(), [10, 20, 30, 255]);
@@ -1704,7 +1911,9 @@ mod tests {
         buf.extend_from_slice(&(chunks.len() as i32).to_le_bytes());
         buf.extend_from_slice(&chunks);
 
-        let world = import_vox(&mut buf.as_slice(), false).expect("v200 import");
+        let world = import_vox(&mut buf.as_slice(), false)
+            .expect("v200 import")
+            .world;
         let v = world.get_voxel(5, 0, 0);
         assert!(v.is_solid(), "expected solid voxel at (5, 0, 0)");
         assert_eq!((v.r, v.g, v.b), (255, 0, 0));
@@ -1750,7 +1959,8 @@ mod tests {
         buf.extend_from_slice(&chunks);
 
         let world = import_vox(&mut buf.as_slice(), false)
-            .expect("v200 with unknown chunks should still import");
+            .expect("v200 with unknown chunks should still import")
+            .world;
         // No scene graph in this test, so fallback path: voxel at
         // (0, 0, 0) in world.
         let v = world.get_voxel(0, 0, 0);
@@ -1838,7 +2048,9 @@ mod tests {
         buf.extend_from_slice(&(chunks.len() as i32).to_le_bytes());
         buf.extend_from_slice(&chunks);
 
-        let world = import_vox(&mut buf.as_slice(), false).expect("multi-model v200");
+        let world = import_vox(&mut buf.as_slice(), false)
+            .expect("multi-model v200")
+            .world;
 
         // Red voxel translated to (10, 0, 0)
         let red = world.get_voxel(10, 0, 0);

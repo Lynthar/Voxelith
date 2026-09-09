@@ -64,12 +64,12 @@ impl Document {
     }
 
     /// The header every tool result carries: what document this is and
-    /// how big it currently is. An agent that just called `undo` wants
-    /// to see the effect without a second round trip.
+    /// how big it currently is. It rides on every reply, so the count
+    /// comes off the chunk counters, not off a full structure analysis.
     fn status(&self) -> Status {
         Status {
             path: self.path.as_deref().map(paths::display),
-            voxel_count: self.session.describe().voxel_count,
+            voxel_count: self.session.world.solid_voxel_count(),
             undo_depth: self.session.history.undo_count(),
             redo_depth: self.session.history.redo_count(),
         }

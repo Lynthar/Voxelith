@@ -442,8 +442,8 @@ impl App {
 
         match std::fs::File::open(&path) {
             Ok(mut file) => match io::import_vox(&mut file, convert_axes) {
-                Ok(world) => {
-                    self.document.world = world;
+                Ok(import) => {
+                    self.document.world = import.world;
                     self.reset_scene_session_state();
                     self.document.metadata = voxelith::io::ProjectMetadata::default();
                     // Detach from any open `.vxlt`: the imported model is
@@ -461,7 +461,16 @@ impl App {
                     // the project MRU — see `Prefs::touch_recent`.
                     self.prefs.remember_import_dir(&path);
                     let filename = file_label(&path);
-                    self.ui.set_status(format!("Imported: {}", filename));
+                    let mut status = format!("Imported: {}", filename);
+                    // A file that was truncated or damaged still gives
+                    // back a world, and "Imported" on its own is how a
+                    // model quietly arrives missing half its geometry.
+                    if !import.notes.is_empty() {
+                        status.push_str(" (");
+                        status.push_str(&import.notes.join("; "));
+                        status.push(')');
+                    }
+                    self.ui.set_status(status);
                 }
                 Err(e) => {
                     log::error!("Failed to import VOX from {:?}: {}", path, e);

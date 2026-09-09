@@ -29,7 +29,8 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     // `None` base path: any image or buffer referencing an external
     // file URI is refused rather than read off the local disk.
     let buffers = gltf::import_buffers(&document, None, blob).context("Reading GLB buffers")?;
-    let textures = decode_base_color_textures(&document, &buffers);
+    let mut notes: Vec<String> = Vec::new();
+    let textures = decode_base_color_textures(&document, &buffers, &mut notes);
 
     // Prefer the explicit default scene; fall back to the first scene;
     // if neither exists, walk all meshes directly (some exporters
@@ -83,6 +84,7 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     let surface = finalize_surface(accumulator);
     let filled = fill_interior(&surface);
     let mut patch = build_patch(filled);
+    patch.notes.append(&mut notes);
     if limits.exhausted {
         // The log line says which limit; this is the half the person who
         // picked the file sees. A truncated import that looks complete
@@ -120,11 +122,12 @@ const MAX_TEXTURE_ALLOC: u64 = 256 * 1024 * 1024;
 const MAX_TEXTURE_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Decode the base-color textures the materials actually sample, keyed
-/// by image index. One that fails to decode is logged and skipped — the
-/// model still voxelizes, from the factor or vertex colors instead.
+/// by image index. One that fails is logged, skipped and noted once —
+/// the model still voxelizes, wearing the factor or vertex colors.
 fn decode_base_color_textures(
     document: &gltf::Document,
     buffers: &[gltf::buffer::Data],
+    notes: &mut Vec<String>,
 ) -> HashMap<usize, DecodedImage> {
     let wanted: HashSet<usize> = document
         .materials()
@@ -134,6 +137,7 @@ fn decode_base_color_textures(
 
     let mut out = HashMap::new();
     let mut budget = MAX_TEXTURE_BUDGET;
+    let mut skipped = false;
     for image in document.images() {
         let index = image.index();
         if !wanted.contains(&index) {
@@ -144,22 +148,37 @@ fn decode_base_color_textures(
             // too, and we're not about to read local files on behalf of
             // a downloaded asset.
             log::warn!("Skipping texture {index}: external image URIs aren't read");
+            skipped = true;
             continue;
         };
         let Some(buffer) = buffers.get(view.buffer().index()) else {
             log::warn!("Skipping texture {index}: buffer out of range");
+            skipped = true;
             continue;
         };
         let Some(encoded) = buffer.get(view.offset()..view.offset() + view.length()) else {
             log::warn!("Skipping texture {index}: view out of range");
+            skipped = true;
             continue;
         };
         match decode_texture(encoded, &mut budget) {
             Ok(decoded) => {
                 out.insert(index, decoded);
             }
-            Err(e) => log::warn!("Skipping texture {index}: {e:#}"),
+            Err(e) => {
+                log::warn!("Skipping texture {index}: {e:#}");
+                skipped = true;
+            }
         }
+    }
+    // One line however many failed: the log names each, and the point
+    // here is that the colours came from somewhere else.
+    if skipped {
+        notes.push(
+            "some textures could not be read — those parts take their colour from the \
+             mesh instead"
+                .into(),
+        );
     }
     out
 }

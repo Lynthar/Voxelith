@@ -824,22 +824,17 @@ impl App {
         }
         let state = self.current_editor_state();
         let metadata = self.document.metadata.clone();
-        // Atomic write: serialize to a per-process temp, then rename it
-        // over the autosave, so a crash mid-write leaves at most a stale
-        // temp and recovery always loads a complete state.
-        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        // The write is already atomic and durable, temp and parent-dir
+        // fsync included. Wrapping it in a second temp+rename put that
+        // fsync on a name crash recovery never reads.
         let result =
-            voxelith::io::save_world_with_state(&self.document.world, state, metadata, &tmp)
-                .and_then(|()| std::fs::rename(&tmp, &path).map_err(Into::into));
+            voxelith::io::save_world_with_state(&self.document.world, state, metadata, &path);
         match result {
             Ok(()) => {
                 log::info!("Autosaved to {}", path.display());
                 self.document.mark_autosaved();
             }
-            Err(e) => {
-                log::warn!("Autosave failed: {}", e);
-                let _ = std::fs::remove_file(&tmp); // drop a partial temp
-            }
+            Err(e) => log::warn!("Autosave failed: {}", e),
         }
         self.last_autosave = Instant::now();
     }

@@ -369,13 +369,6 @@ fn components_of(solids: &HashSet<(i32, i32, i32)>) -> Vec<LoosePart> {
     parts
 }
 
-pub(super) fn solid_voxel_count(world: &World) -> u64 {
-    world
-        .chunks()
-        .map(|(_, chunk)| chunk.read().solid_count() as u64)
-        .sum()
-}
-
 /// The parts of a document a description is built from, borrowed from
 /// whoever owns them. A view rather than a session, so neither host has
 /// to pretend to be the other.
@@ -602,7 +595,7 @@ mod tests {
     }
 
     fn measure(world: &World) -> Structure {
-        structure(world, solid_voxel_count(world)).expect("this world is measurable")
+        structure(world, world.solid_voxel_count()).expect("this world is measurable")
     }
 
     /// Two cubes a cell apart: the failure an agent can't see in a

@@ -139,6 +139,16 @@ impl World {
         self.chunks.len()
     }
 
+    /// Solid voxels in the world. Each chunk keeps its own count on
+    /// write, so this walks chunks rather than cells — cheap enough to
+    /// hang off a status line.
+    pub fn solid_voxel_count(&self) -> u64 {
+        self.chunks
+            .values()
+            .map(|chunk| chunk.read().solid_count() as u64)
+            .sum()
+    }
+
     /// Copy the world, chunk contents and all. Not `impl Clone` —
     /// chunks live behind `Arc<RwLock<…>>`, so a derived clone would
     /// write through to this world's voxels. 256 KB per chunk.
