@@ -24,7 +24,7 @@ pub struct ToolSpec {
 
 /// Every tool, in toolbar order.
 #[rustfmt::skip] // one row per tool — the table reads as a table
-pub const TOOL_SPECS: &[ToolSpec] = &[
+pub static TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { tool: Tool::Place, note: "", separator_before: false },
     ToolSpec { tool: Tool::Remove, note: "", separator_before: false },
     ToolSpec { tool: Tool::Paint, note: "", separator_before: false },
@@ -104,7 +104,7 @@ pub struct ChordSpec {
 }
 
 /// Every pure "primary chord → action" binding, in help-window order.
-pub const CHORDS: &[ChordSpec] = &[
+pub static CHORDS: &[ChordSpec] = &[
     // -- Edit --
     ChordSpec {
         key: KeyCode::KeyZ,
@@ -230,18 +230,15 @@ mod tests {
         // A row shadowed by an earlier row (same key, overlapping
         // shift requirement) would render in the help window yet never
         // fire — the exact drift this table exists to prevent.
-        for (i, chord) in CHORDS.iter().enumerate() {
+        for chord in CHORDS {
             for shift in [false, true] {
                 if chord.shift.is_none_or(|s| s == shift) {
                     let found = find_chord(chord.key, shift).unwrap();
-                    let is_self = std::ptr::eq(found, chord);
-                    let earlier = CHORDS[..i]
-                        .iter()
-                        .any(|c| c.key == chord.key && c.shift.is_none_or(|s| s == shift));
                     assert!(
-                        is_self || earlier,
-                        "chord {} is shadowed and can never fire",
-                        chord.chord_label
+                        std::ptr::eq(found, chord),
+                        "chord {} is shadowed by {} and can never fire",
+                        chord.chord_label,
+                        found.chord_label
                     );
                 }
             }
