@@ -8,9 +8,10 @@ use std::time::{Duration, Instant, SystemTime};
 use voxelith::{
     editor::Command,
     editor::Socket,
+    editor::Tool,
     io,
     procgen::PipelineGraph,
-    ui::{ExportKind, ExportReport, Surface},
+    ui::{ExportFormat, ExportKind, ExportReport, Surface},
 };
 
 use super::App;
@@ -186,7 +187,7 @@ impl App {
                 .iter()
                 .map(|v| [v.r, v.g, v.b, v.a])
                 .collect(),
-            selected_tool: self.editor.current_tool as usize,
+            selected_tool: usize::from(self.editor.current_tool.index()),
             // Carry the brush's material flags + tint zone so open /
             // crash-recovery can restore them; without these the load
             // path's `from_rgba` silently zeroes the brush mode (#8).
@@ -246,7 +247,7 @@ impl App {
             .iter()
             .map(|&c| super::brush_from_stored(c))
             .collect();
-        self.editor.current_tool = super::tool_from_index(state.selected_tool as u8);
+        self.editor.current_tool = Tool::from_index(state.selected_tool as u8);
 
         // View state — Open only, and only when the pose is usable
         // (`camera_from_state` refuses the degenerate ones old files
@@ -715,7 +716,7 @@ impl App {
     pub(super) fn do_export(&mut self, kind: ExportKind) {
         let dialog = self
             .file_dialog(DialogStart::Export)
-            .add_filter(kind_filter_name(kind), &[kind_extension(kind)])
+            .add_filter(kind.format().name(), &[kind.format().extension()])
             .set_title(kind_dialog_title(kind));
         let Some(path) = dialog.save_file() else {
             return;
@@ -745,11 +746,7 @@ impl App {
     }
 
     fn export_obj_to(&mut self, path: &Path, surface: Surface) {
-        let result = match surface {
-            Surface::Blocky => io::export_obj(&self.document.world, path),
-            Surface::SmoothLight => io::export_obj_smoothed(&self.document.world, path, false),
-            Surface::SmoothHeavy => io::export_obj_smoothed(&self.document.world, path, true),
-        };
+        let result = io::export_obj_surface(&self.document.world, path, surface);
         match result {
             Ok(stats) => {
                 self.prefs.remember_export_dir(path);
@@ -767,8 +764,8 @@ impl App {
                     self.set_export_report(
                         path,
                         ExportReport {
-                            format: "Wavefront OBJ (.obj)".into(),
-                            mesh_source: mesh_source_label(surface).into(),
+                            format: ExportFormat::Obj.label(),
+                            mesh_source: surface.mesh_source_label().into(),
                             triangles: Some(stats.triangle_count),
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
@@ -795,15 +792,13 @@ impl App {
 
     fn export_glb_to(&mut self, path: &Path, surface: Surface) {
         let sockets = self.socket_export_nodes();
-        let result = match surface {
-            Surface::Blocky => io::export_glb(&self.document.world, &sockets, path),
-            Surface::SmoothLight => {
-                io::export_glb_smoothed(&self.document.world, &sockets, path, false)
-            }
-            Surface::SmoothHeavy => {
-                io::export_glb_smoothed(&self.document.world, &sockets, path, true)
-            }
-        };
+        let result = io::export_glb_surface(
+            &self.document.world,
+            &sockets,
+            path,
+            surface,
+            io::ExportTransform::default(),
+        );
         match result {
             Ok(stats) => {
                 self.prefs.remember_export_dir(path);
@@ -828,8 +823,8 @@ impl App {
                     self.set_export_report(
                         path,
                         ExportReport {
-                            format: "glTF Binary (.glb)".into(),
-                            mesh_source: mesh_source_label(surface).into(),
+                            format: ExportFormat::Glb.label(),
+                            mesh_source: surface.mesh_source_label().into(),
                             triangles: Some(stats.triangle_count),
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
@@ -885,7 +880,7 @@ impl App {
                     self.set_export_report(
                         path,
                         ExportReport {
-                            format: "MagicaVoxel (.vox)".into(),
+                            format: ExportFormat::Vox.label(),
                             color_model: "254-color palette".into(),
                             notes,
                             ..Default::default()
@@ -927,33 +922,6 @@ fn kind_dialog_title(kind: ExportKind) -> &'static str {
             "Export Smoothed glTF Binary (light / preserve detail)"
         }
         ExportKind::Glb(Surface::SmoothHeavy) => "Export Smoothed glTF Binary (heavy / clay)",
-    }
-}
-
-/// The save dialog's file-type filter name.
-fn kind_filter_name(kind: ExportKind) -> &'static str {
-    match kind {
-        ExportKind::Vox => "MagicaVoxel",
-        ExportKind::Obj(_) => "Wavefront OBJ",
-        ExportKind::Glb(_) => "glTF Binary",
-    }
-}
-
-/// The format's file extension.
-fn kind_extension(kind: ExportKind) -> &'static str {
-    match kind {
-        ExportKind::Vox => "vox",
-        ExportKind::Obj(_) => "obj",
-        ExportKind::Glb(_) => "glb",
-    }
-}
-
-/// Geometry-source label for the export report.
-fn mesh_source_label(surface: Surface) -> &'static str {
-    match surface {
-        Surface::Blocky => "Greedy mesh",
-        Surface::SmoothLight => "Marching Cubes (light)",
-        Surface::SmoothHeavy => "Marching Cubes (heavy)",
     }
 }
 

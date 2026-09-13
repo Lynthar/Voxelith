@@ -120,16 +120,9 @@ fn refused(error: &ExecError) -> Result<CallToolResult, McpError> {
 /// A success: `{"ok": true, …}`, pretty-printed as text — the one shape
 /// every MCP client renders and every model reads without help.
 fn answered<T: Serialize>(body: T) -> Result<CallToolResult, McpError> {
-    #[derive(Serialize)]
-    struct Envelope<T> {
-        ok: bool,
-        #[serde(flatten)]
-        body: T,
-    }
-    let text = serde_json::to_string_pretty(&Envelope { ok: true, body }).map_err(|e| {
-        McpError::internal_error(format!("could not serialize the answer: {e}"), None)
-    })?;
-    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        exec::ok_json(&body),
+    )]))
 }
 
 /// A path that didn't pass [`Root`], in the usual envelope.

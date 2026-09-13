@@ -8,11 +8,17 @@ use crate::editor::Tool;
 
 use super::panels::UiAction;
 
-/// One toolbar, Inspector and help entry for a tool. Name and shortcut
-/// come from [`Tool`] and the icon from `icons`, so this row adds only
-/// the usage note and the toolbar grouping.
+/// One toolbar, Inspector, help and dispatch entry for a tool. The name
+/// comes from [`Tool`] and the icon from `icons`; everything a surface
+/// prints or a key press fires is in this row.
 pub struct ToolSpec {
     pub tool: Tool,
+    /// The bare key that selects the tool; `None` for toolbar-only
+    /// tools. A test pins `shortcut` to this key's digit.
+    pub key: Option<KeyCode>,
+    /// The shortcut as the toolbar tooltip, Inspector and help window
+    /// print it. Empty when there is no key.
+    pub shortcut: &'static str,
     /// How the tool is used: the toolbar shows it on hover and the
     /// Inspector as its hint line, one string for both. Empty for tools
     /// whose name says it all.
@@ -25,47 +31,64 @@ pub struct ToolSpec {
 /// Every tool, in toolbar order.
 #[rustfmt::skip] // one row per tool — the table reads as a table
 pub static TOOL_SPECS: &[ToolSpec] = &[
-    ToolSpec { tool: Tool::Place, note: "", separator_before: false },
-    ToolSpec { tool: Tool::Remove, note: "", separator_before: false },
-    ToolSpec { tool: Tool::Paint, note: "", separator_before: false },
+    ToolSpec { tool: Tool::Place, key: Some(KeyCode::Digit1), shortcut: "1", note: "", separator_before: false },
+    ToolSpec { tool: Tool::Remove, key: Some(KeyCode::Digit2), shortcut: "2", note: "", separator_before: false },
+    ToolSpec { tool: Tool::Paint, key: Some(KeyCode::Digit3), shortcut: "3", note: "", separator_before: false },
     ToolSpec {
         tool: Tool::Eyedropper,
+        key: Some(KeyCode::Digit4),
+        shortcut: "4 / Alt",
         note: "Click a voxel to pick its color and material into the brush.",
         separator_before: false,
     },
     ToolSpec {
         tool: Tool::Fill,
+        key: Some(KeyCode::Digit5),
+        shortcut: "5",
         note: "Click a solid voxel to recolor its contiguous same-color region.",
         separator_before: false,
     },
     ToolSpec {
         tool: Tool::Line,
+        key: Some(KeyCode::Digit6),
+        shortcut: "6",
         note: "Drag from anchor to end (3D Bresenham line).",
         separator_before: true,
     },
     ToolSpec {
         tool: Tool::Box,
+        key: Some(KeyCode::Digit7),
+        shortcut: "7",
         note: "Drag corner to corner (filled AABB).",
         separator_before: false,
     },
     ToolSpec {
         tool: Tool::Sphere,
+        key: Some(KeyCode::Digit8),
+        shortcut: "8",
         note: "Drag a bounding box; the ellipsoid fits inside it.",
         separator_before: false,
     },
     ToolSpec {
         tool: Tool::Cylinder,
+        key: Some(KeyCode::Digit9),
+        shortcut: "9",
         note: "Drag a footprint, then pull up — the cylinder stands \
                along the locked face's normal.",
         separator_before: false,
     },
     ToolSpec {
         tool: Tool::Select,
+        key: Some(KeyCode::Digit0),
+        shortcut: "0",
         note: "Drag to mark an AABB. Esc or Ctrl+D deselects.",
         separator_before: true,
     },
+    // No digit free; picked from the toolbar.
     ToolSpec {
         tool: Tool::Socket,
+        key: None,
+        shortcut: "",
         note: "Click a voxel face (or the ground) to drop a named \
                attachment point. Exports to glTF as an empty node.",
         separator_before: true,
@@ -79,6 +102,14 @@ pub fn spec_of(tool: Tool) -> &'static ToolSpec {
         .iter()
         .find(|s| s.tool == tool)
         .expect("every tool has a spec row; a test pins this")
+}
+
+/// The tool a bare `key` selects, if any — the digit-row dispatch.
+pub fn tool_for_key(key: KeyCode) -> Option<Tool> {
+    TOOL_SPECS
+        .iter()
+        .find(|s| s.key == Some(key))
+        .map(|s| s.tool)
 }
 
 /// Which help-window section a chord row renders under.
@@ -247,14 +278,38 @@ mod tests {
 
     #[test]
     fn every_tool_has_exactly_one_spec() {
-        use crate::editor::Tool::*;
-        let all = [
-            Place, Remove, Paint, Eyedropper, Fill, Line, Box, Sphere, Cylinder, Select, Socket,
-        ];
-        for tool in all {
+        for tool in Tool::ALL {
             let count = TOOL_SPECS.iter().filter(|s| s.tool == tool).count();
             assert_eq!(count, 1, "{tool:?} must appear exactly once");
         }
-        assert_eq!(TOOL_SPECS.len(), all.len());
+        assert_eq!(TOOL_SPECS.len(), Tool::ALL.len());
+    }
+
+    #[test]
+    fn every_key_selects_the_tool_its_label_promises() {
+        // The label is what the toolbar and help window print, the key
+        // is what fires; a digit bound twice would print for both rows
+        // and select only the first.
+        for spec in TOOL_SPECS {
+            let Some(key) = spec.key else {
+                assert!(
+                    spec.shortcut.is_empty(),
+                    "{:?} labels a key it lacks",
+                    spec.tool
+                );
+                continue;
+            };
+            assert_eq!(tool_for_key(key), Some(spec.tool), "{key:?} is bound twice");
+            let name = format!("{key:?}");
+            let digit = name
+                .strip_prefix("Digit")
+                .expect("tool keys are the digit row");
+            assert!(
+                spec.shortcut.starts_with(digit),
+                "{:?}: label {:?} does not name {key:?}",
+                spec.tool,
+                spec.shortcut
+            );
+        }
     }
 }

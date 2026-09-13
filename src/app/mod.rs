@@ -294,7 +294,7 @@ impl App {
             .brush_color
             .set_tint_zone(prefs.editor.brush_tint_zone);
         editor.brush_size = prefs.editor.brush_size.max(1);
-        editor.current_tool = tool_from_index(prefs.editor.selected_tool);
+        editor.current_tool = Tool::from_index(prefs.editor.selected_tool);
         editor.symmetry = SymmetryAxes {
             x: prefs.editor.symmetry[0],
             y: prefs.editor.symmetry[1],
@@ -396,7 +396,7 @@ impl App {
                 self.editor.brush_color.a,
             ],
             brush_size: self.editor.brush_size,
-            selected_tool: tool_to_index(self.editor.current_tool),
+            selected_tool: self.editor.current_tool.index(),
             palette: self
                 .editor
                 .palette
@@ -646,39 +646,6 @@ pub(super) enum ShapeDragKey {
 pub(super) fn shape_height_from_cursor(release_y: f32, cursor_y: f32) -> i32 {
     let dy = release_y - cursor_y; // screen up → positive
     (dy / SHAPE_HEIGHT_PIXELS_PER_VOXEL).round().max(0.0) as i32
-}
-
-fn tool_from_index(idx: u8) -> Tool {
-    match idx {
-        0 => Tool::Place,
-        1 => Tool::Remove,
-        2 => Tool::Paint,
-        3 => Tool::Eyedropper,
-        4 => Tool::Fill,
-        5 => Tool::Line,
-        6 => Tool::Box,
-        7 => Tool::Sphere,
-        8 => Tool::Cylinder,
-        9 => Tool::Select,
-        10 => Tool::Socket,
-        _ => Tool::Place,
-    }
-}
-
-fn tool_to_index(t: Tool) -> u8 {
-    match t {
-        Tool::Place => 0,
-        Tool::Remove => 1,
-        Tool::Paint => 2,
-        Tool::Eyedropper => 3,
-        Tool::Fill => 4,
-        Tool::Line => 5,
-        Tool::Box => 6,
-        Tool::Sphere => 7,
-        Tool::Cylinder => 8,
-        Tool::Select => 9,
-        Tool::Socket => 10,
-    }
 }
 
 impl App {

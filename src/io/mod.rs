@@ -23,6 +23,8 @@ pub use voxelize::voxelize_glb;
 use std::io::{self, Read};
 use std::path::Path;
 
+use crate::core::World;
+
 /// Read exactly `len` bytes without trusting `len` enough to
 /// pre-allocate it: the buffer grows to the bytes actually present, so
 /// peak allocation tracks real data rather than a declared length.
@@ -55,76 +57,126 @@ pub(super) fn skip_bytes<R: Read>(reader: &mut R, n: u64) -> io::Result<()> {
     Ok(())
 }
 
-/// Supported file formats
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileFormat {
-    /// Native Voxelith project (.vxlt)
-    Project,
-    /// MagicaVoxel (.vox)
-    Vox,
-    /// Wavefront OBJ (.obj) — export only
-    Obj,
-    /// glTF Binary (.glb) — export only
+/// How an exported mesh is built. The Export dialog, the bake spec and
+/// the export reports all spell their three options from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Surface {
+    /// Greedy mesh — the voxels as they render.
+    Blocky,
+    /// Marching Cubes on the raw 0/1 density — rounded, keeps thin
+    /// features.
+    SmoothLight,
+    /// Marching Cubes after a 3×3×3 blur — clay-like, may dissolve
+    /// 1-cell features.
+    SmoothHeavy,
+}
+
+impl Surface {
+    pub const ALL: [Surface; 3] = [Surface::Blocky, Surface::SmoothLight, Surface::SmoothHeavy];
+
+    /// The `smoothing` keyword a bake spec writes for this surface.
+    pub fn bake_keyword(self) -> &'static str {
+        match self {
+            Surface::Blocky => "none",
+            Surface::SmoothLight => "light",
+            Surface::SmoothHeavy => "heavy",
+        }
+    }
+
+    /// The surface a bake spec's `smoothing` keyword names.
+    pub fn from_bake_keyword(keyword: &str) -> Option<Surface> {
+        Self::ALL.into_iter().find(|s| s.bake_keyword() == keyword)
+    }
+
+    /// Geometry-source label for the export reports.
+    pub fn mesh_source_label(self) -> &'static str {
+        match self {
+            Surface::Blocky => "Greedy mesh",
+            Surface::SmoothLight => "Marching Cubes (light)",
+            Surface::SmoothHeavy => "Marching Cubes (heavy)",
+        }
+    }
+
+    /// `None` for the greedy mesh; `Some(blur)` for Marching Cubes,
+    /// with or without the 3×3×3 density blur.
+    fn blur(self) -> Option<bool> {
+        match self {
+            Surface::Blocky => None,
+            Surface::SmoothLight => Some(false),
+            Surface::SmoothHeavy => Some(true),
+        }
+    }
+}
+
+/// Export `world` as `.obj` with the given surface.
+pub fn export_obj_surface(
+    world: &World,
+    path: &Path,
+    surface: Surface,
+) -> Result<ObjStats, ObjError> {
+    match surface.blur() {
+        None => export_obj(world, path),
+        Some(blur) => export_obj_smoothed(world, path, blur),
+    }
+}
+
+/// Export `world` and `sockets` as `.glb` with the given surface and
+/// placement.
+pub fn export_glb_surface(
+    world: &World,
+    sockets: &[SocketNode],
+    path: &Path,
+    surface: Surface,
+    transform: ExportTransform,
+) -> Result<GlbStats, GlbError> {
+    match surface.blur() {
+        None => export_glb_with_transform(world, sockets, path, transform),
+        Some(blur) => export_glb_smoothed_with_transform(world, sockets, path, blur, transform),
+    }
+}
+
+/// A mesh or voxel export target — one row per format. The Export
+/// dialog's radios, the CLI's extension check and the report labels
+/// all read this table, so a new format is one variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExportFormat {
     Glb,
+    Obj,
+    Vox,
 }
 
-impl FileFormat {
-    /// Detect format from file extension
-    pub fn from_extension(path: &Path) -> Option<Self> {
-        let ext = path.extension()?.to_str()?.to_lowercase();
-        match ext.as_str() {
-            "vxlt" | "voxelith" => Some(Self::Project),
-            "vox" => Some(Self::Vox),
-            "obj" => Some(Self::Obj),
-            "glb" => Some(Self::Glb),
-            _ => None,
-        }
-    }
+impl ExportFormat {
+    /// In dialog order, which is also how the CLI lists them.
+    pub const ALL: [ExportFormat; 3] = [ExportFormat::Glb, ExportFormat::Obj, ExportFormat::Vox];
 
-    /// Get default file extension for this format
-    pub fn extension(&self) -> &'static str {
+    pub fn extension(self) -> &'static str {
         match self {
-            Self::Project => "vxlt",
-            Self::Vox => "vox",
-            Self::Obj => "obj",
-            Self::Glb => "glb",
+            ExportFormat::Glb => "glb",
+            ExportFormat::Obj => "obj",
+            ExportFormat::Vox => "vox",
         }
     }
 
-    /// Get format name for display
-    pub fn name(&self) -> &'static str {
+    /// The format's name, as the save dialog's file-type filter.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Project => "Voxelith Project",
-            Self::Vox => "MagicaVoxel",
-            Self::Obj => "Wavefront OBJ",
-            Self::Glb => "glTF Binary",
+            ExportFormat::Glb => "glTF Binary",
+            ExportFormat::Obj => "Wavefront OBJ",
+            ExportFormat::Vox => "MagicaVoxel",
         }
     }
 
-    /// Get file filter for file dialogs
-    pub fn filter(&self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            Self::Project => ("Voxelith Project", &["vxlt", "voxelith"]),
-            Self::Vox => ("MagicaVoxel", &["vox"]),
-            Self::Obj => ("Wavefront OBJ", &["obj"]),
-            Self::Glb => ("glTF Binary", &["glb"]),
-        }
+    /// `name (.ext)`: the dialog's radio label and the reports'
+    /// `format` field.
+    pub fn label(self) -> String {
+        format!("{} (.{})", self.name(), self.extension())
     }
-}
 
-/// All supported import formats
-pub fn import_formats() -> Vec<FileFormat> {
-    vec![FileFormat::Project, FileFormat::Vox]
-}
-
-/// All supported export formats
-pub fn export_formats() -> Vec<FileFormat> {
-    vec![
-        FileFormat::Project,
-        FileFormat::Vox,
-        FileFormat::Obj,
-        FileFormat::Glb,
-    ]
+    /// The format `path`'s extension names, case-insensitively.
+    pub fn from_path(path: &Path) -> Option<ExportFormat> {
+        let ext = path.extension()?.to_string_lossy().to_lowercase();
+        Self::ALL.into_iter().find(|f| f.extension() == ext)
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +212,28 @@ mod tests {
         let mut c = Cursor::new(vec![0u8; 4]);
         let err = skip_bytes(&mut c, 9_999_999_999).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn every_export_format_round_trips_through_its_extension() {
+        for format in ExportFormat::ALL {
+            let path = Path::new("model").with_extension(format.extension());
+            assert_eq!(ExportFormat::from_path(&path), Some(format));
+            let shouty = path.with_extension(format.extension().to_uppercase());
+            assert_eq!(ExportFormat::from_path(&shouty), Some(format));
+        }
+        assert_eq!(ExportFormat::from_path(Path::new("model.gltf")), None);
+        assert_eq!(ExportFormat::from_path(Path::new("model")), None);
+    }
+
+    #[test]
+    fn every_surface_round_trips_through_its_bake_keyword() {
+        for surface in Surface::ALL {
+            assert_eq!(
+                Surface::from_bake_keyword(surface.bake_keyword()),
+                Some(surface)
+            );
+        }
+        assert_eq!(Surface::from_bake_keyword("medium"), None);
     }
 }

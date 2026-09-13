@@ -925,17 +925,11 @@ impl App {
                 return;
             }
         }
+        if let Some(tool) = voxelith::ui::keymap::tool_for_key(key) {
+            self.editor.select_tool(tool);
+            return;
+        }
         match key {
-            KeyCode::Digit1 => self.editor.select_tool(Tool::Place),
-            KeyCode::Digit2 => self.editor.select_tool(Tool::Remove),
-            KeyCode::Digit3 => self.editor.select_tool(Tool::Paint),
-            KeyCode::Digit4 => self.editor.select_tool(Tool::Eyedropper),
-            KeyCode::Digit5 => self.editor.select_tool(Tool::Fill),
-            KeyCode::Digit6 => self.editor.select_tool(Tool::Line),
-            KeyCode::Digit7 => self.editor.select_tool(Tool::Box),
-            KeyCode::Digit8 => self.editor.select_tool(Tool::Sphere),
-            KeyCode::Digit9 => self.editor.select_tool(Tool::Cylinder),
-            KeyCode::Digit0 => self.editor.select_tool(Tool::Select),
             // Esc cancels the in-flight gesture first and only
             // deselects when there is none — doing both at once threw
             // away a marquee the user had set up before the shape.
@@ -1224,6 +1218,19 @@ mod tests {
         assert!(!app.document.world.get_voxel(2, 0, 0).is_air());
         assert_eq!(app.editor.history.undo_count(), 1);
         assert_eq!(app.editor.selection.unwrap().min, (2, 0, 0));
+    }
+
+    #[test]
+    fn every_digit_in_the_table_selects_its_tool() {
+        // The row the toolbar prints is the row that fires: a key
+        // bound in `TOOL_SPECS` but not dispatched here would show a
+        // shortcut nobody can press.
+        for spec in voxelith::ui::keymap::TOOL_SPECS {
+            let Some(key) = spec.key else { continue };
+            let mut app = app_with_tool(Tool::Socket);
+            app.handle_tool_shortcut(key);
+            assert_eq!(app.editor.current_tool, spec.tool, "{key:?}");
+        }
     }
 
     #[test]

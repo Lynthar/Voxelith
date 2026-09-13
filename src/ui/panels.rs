@@ -8,18 +8,7 @@ use crate::prefs::PanelVisibility;
 
 use super::CameraView;
 
-/// How the exported mesh is built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Surface {
-    /// Greedy mesh — the voxels as they render.
-    Blocky,
-    /// Marching Cubes on the raw 0/1 density — rounded, keeps thin
-    /// features.
-    SmoothLight,
-    /// Marching Cubes after a 3×3×3 blur — clay-like, may dissolve
-    /// 1-cell features.
-    SmoothHeavy,
-}
+pub use crate::io::{ExportFormat, Surface};
 
 /// One export request: format × surface, with the pairings that don't
 /// exist unrepresentable — `.vox` stores voxels, so there is no
@@ -31,14 +20,14 @@ pub enum ExportKind {
     Glb(Surface),
 }
 
-/// The format half of the Export… dialog's choice, separate from
-/// `ExportKind` because the dialog keeps a surface selection alive even
-/// while `.vox` has it grayed out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportFormat {
-    Vox,
-    Obj,
-    Glb,
+impl ExportKind {
+    pub fn format(self) -> ExportFormat {
+        match self {
+            ExportKind::Vox => ExportFormat::Vox,
+            ExportKind::Obj(_) => ExportFormat::Obj,
+            ExportKind::Glb(_) => ExportFormat::Glb,
+        }
+    }
 }
 
 /// The Export… dialog's format × surface choice. Beside the visibility
@@ -355,12 +344,10 @@ mod tests {
     /// grayed-out surface column into one surfaceless kind.
     #[test]
     fn export_dialog_choices_cover_exactly_the_seven_kinds() {
-        let formats = [ExportFormat::Vox, ExportFormat::Obj, ExportFormat::Glb];
-        let surfaces = [Surface::Blocky, Surface::SmoothLight, Surface::SmoothHeavy];
-        let mut kinds: Vec<ExportKind> = formats
+        let mut kinds: Vec<ExportKind> = ExportFormat::ALL
             .iter()
             .flat_map(|&format| {
-                surfaces
+                Surface::ALL
                     .iter()
                     .map(move |&surface| ExportChoice { format, surface }.kind())
             })

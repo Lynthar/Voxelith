@@ -645,20 +645,26 @@ impl Ui {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label("Format");
-                ui.radio_value(&mut choice.format, ExportFormat::Glb, "glTF Binary (.glb)")
-                    .on_hover_text(
-                        "The game-asset path: bakes per-vertex AO, carries \
+                ui.radio_value(
+                    &mut choice.format,
+                    ExportFormat::Glb,
+                    ExportFormat::Glb.label(),
+                )
+                .on_hover_text(
+                    "The game-asset path: bakes per-vertex AO, carries \
                      emissive / metallic, tint zones and sockets.",
-                    );
+                );
                 ui.radio_value(
                     &mut choice.format,
                     ExportFormat::Obj,
-                    "Wavefront OBJ (.obj)",
+                    ExportFormat::Obj.label(),
                 );
-                ui.radio_value(&mut choice.format, ExportFormat::Vox, "MagicaVoxel (.vox)")
-                    .on_hover_text(
-                        "Voxel data rather than a mesh — stays editable in MagicaVoxel.",
-                    );
+                ui.radio_value(
+                    &mut choice.format,
+                    ExportFormat::Vox,
+                    ExportFormat::Vox.label(),
+                )
+                .on_hover_text("Voxel data rather than a mesh — stays editable in MagicaVoxel.");
 
                 ui.add_space(6.0);
                 ui.label("Surface");
@@ -1140,18 +1146,19 @@ impl Ui {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
 
-                    // Tool buttons. The tooltip's name and shortcut come
-                    // from `Tool` itself rather than eleven copies of
-                    // the key map, and the icon is painted per state.
+                    // Tool buttons. The tooltip is the descriptor row's
+                    // shortcut and note under the tool's name, and the
+                    // icon is painted per state.
                     let tool_button =
-                        |ui: &mut egui::Ui, tool: Tool, current: Tool, note: &str| -> bool {
+                        |ui: &mut egui::Ui, spec: &keymap::ToolSpec, current: Tool| -> bool {
+                            let tool = spec.tool;
                             let mut tooltip = tool.name().to_string();
-                            if !tool.shortcut().is_empty() {
-                                tooltip.push_str(&format!(" ({})", tool.shortcut()));
+                            if !spec.shortcut.is_empty() {
+                                tooltip.push_str(&format!(" ({})", spec.shortcut));
                             }
-                            if !note.is_empty() {
+                            if !spec.note.is_empty() {
                                 tooltip.push('\n');
-                                tooltip.push_str(note);
+                                tooltip.push_str(spec.note);
                             }
                             let selected = tool == current;
                             let (rect, response) = ui
@@ -1183,7 +1190,7 @@ impl Ui {
                             ui.separator();
                             ui.add_space(8.0);
                         }
-                        if tool_button(ui, spec.tool, editor.current_tool, spec.note) {
+                        if tool_button(ui, spec, editor.current_tool) {
                             editor.select_tool(spec.tool);
                         }
                     }
@@ -1286,15 +1293,15 @@ impl Ui {
             .show(ctx, |ui| {
                 // Which tool this inspects, from the same descriptor
                 // row the toolbar tooltip prints.
+                let spec = keymap::spec_of(tool);
                 ui.horizontal(|ui| {
                     ui.heading(tool.name());
-                    if !tool.shortcut().is_empty() {
-                        ui.label(egui::RichText::new(tool.shortcut()).weak());
+                    if !spec.shortcut.is_empty() {
+                        ui.label(egui::RichText::new(spec.shortcut).weak());
                     }
                 });
-                let note = keymap::spec_of(tool).note;
-                if !note.is_empty() {
-                    ui.label(egui::RichText::new(note).small().weak());
+                if !spec.note.is_empty() {
+                    ui.label(egui::RichText::new(spec.note).small().weak());
                 }
                 ui.separator();
 
@@ -1981,7 +1988,7 @@ impl Ui {
                                 // the toolbar renders, so this list can't
                                 // promise a tool the toolbar doesn't have.
                                 for spec in keymap::TOOL_SPECS {
-                                    let shortcut = spec.tool.shortcut();
+                                    let shortcut = spec.shortcut;
                                     if shortcut.is_empty() {
                                         ui.label("(toolbar only)");
                                     } else {
@@ -2289,6 +2296,29 @@ pub enum CameraView {
 // Free functions over the parameter struct alone, so the graph sidebar
 // can hand in a node's embedded generator directly.
 
+/// The grid row every generator opens with: the seed and a Rand button.
+fn seed_row(ui: &mut egui::Ui, seed: &mut u32) {
+    ui.label("Seed");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(seed).speed(1.0));
+        if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
+            *seed = rand::random();
+        }
+    });
+    ui.end_row();
+}
+
+/// The grid row for a generator's anchor cell.
+fn origin_row(ui: &mut egui::Ui, origin: &mut (i32, i32, i32)) {
+    ui.label("Origin");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut origin.0).prefix("x:"));
+        ui.add(egui::DragValue::new(&mut origin.1).prefix("y:"));
+        ui.add(egui::DragValue::new(&mut origin.2).prefix("z:"));
+    });
+    ui.end_row();
+}
+
 fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
     ui.heading("Perlin Terrain");
     ui.add_space(4.0);
@@ -2297,14 +2327,7 @@ fn terrain_params_ui(ui: &mut egui::Ui, t: &mut PerlinTerrain) {
         .num_columns(2)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
-            ui.label("Seed");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
-                if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
-                    t.seed = rand::random();
-                }
-            });
-            ui.end_row();
+            seed_row(ui, &mut t.seed);
 
             ui.label("Width");
             ui.add(egui::Slider::new(&mut t.width, 8..=256));
@@ -2356,14 +2379,7 @@ fn tree_params_ui(ui: &mut egui::Ui, t: &mut LSystemTree) {
         .num_columns(2)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
-            ui.label("Seed");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
-                if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
-                    t.seed = rand::random();
-                }
-            });
-            ui.end_row();
+            seed_row(ui, &mut t.seed);
 
             ui.label("Iterations");
             ui.add(egui::Slider::new(&mut t.iterations, 1..=6));
@@ -2381,13 +2397,7 @@ fn tree_params_ui(ui: &mut egui::Ui, t: &mut LSystemTree) {
             ui.add(egui::Slider::new(&mut t.length_scale, 0.4..=1.0));
             ui.end_row();
 
-            ui.label("Origin");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut t.origin.0).prefix("x:"));
-                ui.add(egui::DragValue::new(&mut t.origin.1).prefix("y:"));
-                ui.add(egui::DragValue::new(&mut t.origin.2).prefix("z:"));
-            });
-            ui.end_row();
+            origin_row(ui, &mut t.origin);
 
             ui.label("Trunk");
             color_button_u8(ui, &mut t.trunk_color);
@@ -2407,14 +2417,7 @@ fn wfc_params_ui(ui: &mut egui::Ui, t: &mut WfcGenerator) {
         .num_columns(2)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
-            ui.label("Seed");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut t.seed).speed(1.0));
-                if ui.button("Rand").on_hover_text("Randomize seed").clicked() {
-                    t.seed = rand::random();
-                }
-            });
-            ui.end_row();
+            seed_row(ui, &mut t.seed);
 
             ui.label("Width (tiles)");
             ui.add(egui::Slider::new(&mut t.width, 2..=24));
@@ -2424,13 +2427,7 @@ fn wfc_params_ui(ui: &mut egui::Ui, t: &mut WfcGenerator) {
             ui.add(egui::Slider::new(&mut t.depth, 2..=24));
             ui.end_row();
 
-            ui.label("Origin");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut t.origin.0).prefix("x:"));
-                ui.add(egui::DragValue::new(&mut t.origin.1).prefix("y:"));
-                ui.add(egui::DragValue::new(&mut t.origin.2).prefix("z:"));
-            });
-            ui.end_row();
+            origin_row(ui, &mut t.origin);
 
             ui.label("Tileset");
             egui::ComboBox::from_id_salt("wfc_tileset")

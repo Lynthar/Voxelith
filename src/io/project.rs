@@ -112,7 +112,7 @@ pub struct EditorState {
     pub brush_color: [u8; 4],
     /// Color palette
     pub palette: Vec<[u8; 4]>,
-    /// Selected tool index
+    /// Selected tool, as `editor::Tool::index`.
     pub selected_tool: usize,
     /// Named attachment points placed in the scene. `#[serde(default)]`
     /// so files written before sockets existed still load.

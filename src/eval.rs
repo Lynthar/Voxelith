@@ -160,35 +160,16 @@ impl EvalError {
     /// Same envelope as the other headless commands: one shape to parse
     /// whichever way the run went.
     pub fn to_json(&self) -> String {
-        #[derive(Serialize)]
-        struct Envelope<'a> {
-            ok: bool,
-            error: &'a EvalError,
-        }
-        serde_json::to_string_pretty(&Envelope {
-            ok: false,
-            error: self,
-        })
-        .unwrap_or_else(|_| r#"{"ok":false,"error":{"code":"internal","message":""}}"#.into())
+        crate::exec::err_json(self)
     }
 }
 
 impl SuiteReport {
+    /// `ok` is "the run completed", not "everything passed" — the same
+    /// meaning it has everywhere else here. Whether the bar was cleared
+    /// is `passed == total`, and the exit code.
     pub fn to_json(&self) -> String {
-        #[derive(Serialize)]
-        struct Envelope<'a> {
-            ok: bool,
-            #[serde(flatten)]
-            report: &'a SuiteReport,
-        }
-        serde_json::to_string_pretty(&Envelope {
-            // `ok` is "the run completed", not "everything passed" —
-            // the same meaning it has everywhere else here. Whether the
-            // bar was cleared is `passed == total`, and the exit code.
-            ok: true,
-            report: self,
-        })
-        .unwrap_or_else(|_| r#"{"ok":false}"#.into())
+        crate::exec::ok_json(self)
     }
 }
 

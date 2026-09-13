@@ -87,8 +87,7 @@ impl Default for PanelVisibility {
 }
 
 /// Editor brush state worth restoring across sessions. `selected_tool`
-/// uses the same numeric encoding as `io::EditorState`, with
-/// `app::tool_from_index` as the authority.
+/// is `editor::Tool::index`, the same number `io::EditorState` stores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorPrefs {
@@ -219,6 +218,20 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::Tool;
+
+    #[test]
+    fn the_selected_tool_survives_a_prefs_round_trip_by_its_index() {
+        // The file stores the number, not the name: 10 has meant Socket
+        // since the tool existed, and a renumbering would silently open
+        // every user's editor on the wrong tool.
+        let mut p = Prefs::default();
+        p.editor.selected_tool = Tool::Socket.index();
+        let s = ron::ser::to_string_pretty(&p, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(s.contains("selected_tool: 10,"), "{s}");
+        let back: Prefs = ron::from_str(&s).unwrap();
+        assert_eq!(Tool::from_index(back.editor.selected_tool), Tool::Socket);
+    }
 
     /// A graph written by a build that kept graphs in prefs must survive
     /// the move into project files — the user's work, not a cache.

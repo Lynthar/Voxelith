@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::agent_ops::{AgentSession, ApplyReport, Description, OpsBatch, OpsError, SliceRequest};
 use crate::editor::Socket;
-use crate::io::{self, EditorState, SocketData, SocketNode};
+use crate::io::{self, EditorState, ExportFormat, SocketData, SocketNode};
 use crate::view::{self, ViewKind};
 
 /// One invocation's inputs. `ops`-less requests are read-only, which is
@@ -103,32 +103,35 @@ impl std::fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
-/// `{"ok": true, …outcome}` — the success envelope. Generic so every
-/// subcommand's outcome wears the same one; an agent branches on `ok`
+/// `{"ok": true, …body}`, pretty-printed — the success envelope every
+/// headless command and MCP answer wears, so an agent branches on `ok`
 /// without caring which command it ran.
-#[derive(Serialize)]
-struct OkEnvelope<'a, T> {
-    ok: bool,
-    #[serde(flatten)]
-    outcome: &'a T,
+pub(crate) fn ok_json<T: Serialize>(body: &T) -> String {
+    #[derive(Serialize)]
+    struct Envelope<'a, T> {
+        ok: bool,
+        #[serde(flatten)]
+        body: &'a T,
+    }
+    serde_json::to_string_pretty(&Envelope { ok: true, body }).expect("the outcome must serialize")
 }
 
-/// `{"ok": false, "error": {…}}` — the failure envelope.
-#[derive(Serialize)]
-struct ErrEnvelope<'a> {
-    ok: bool,
-    error: &'a ExecError,
+/// `{"ok": false, "error": {…}}` — the failure envelope, the same shape
+/// whichever layer refused.
+pub(crate) fn err_json<E: Serialize>(error: &E) -> String {
+    #[derive(Serialize)]
+    struct Envelope<'a, E> {
+        ok: bool,
+        error: &'a E,
+    }
+    serde_json::to_string_pretty(&Envelope { ok: false, error }).expect("the error must serialize")
 }
 
 impl ExecOutcome {
     /// The exact bytes the binary prints. Lives here so `main.rs` stays
     /// presentation-free, the same split `bake::BakeOutcome` uses.
     pub fn to_json(&self) -> String {
-        let envelope = OkEnvelope {
-            ok: true,
-            outcome: self,
-        };
-        serde_json::to_string_pretty(&envelope).expect("the outcome must serialize")
+        ok_json(self)
     }
 }
 
@@ -136,21 +139,13 @@ impl RenderOutcome {
     /// Same envelope and the same stdout contract as `ExecOutcome` — the
     /// PNGs go to files, the report goes here.
     pub fn to_json(&self) -> String {
-        let envelope = OkEnvelope {
-            ok: true,
-            outcome: self,
-        };
-        serde_json::to_string_pretty(&envelope).expect("the outcome must serialize")
+        ok_json(self)
     }
 }
 
 impl ExecError {
     pub fn to_json(&self) -> String {
-        let envelope = ErrEnvelope {
-            ok: false,
-            error: self,
-        };
-        serde_json::to_string_pretty(&envelope).expect("the error must serialize")
+        err_json(self)
     }
 }
 
@@ -160,17 +155,14 @@ impl ExecError {
 pub fn generators_json() -> String {
     #[derive(Serialize)]
     struct Catalog {
-        ok: bool,
         generators: Vec<crate::agent_ops::GeneratorInfo>,
         /// A working pipeline graph to copy into a `graph` op.
         graph_template: serde_json::Value,
     }
-    let catalog = Catalog {
-        ok: true,
+    ok_json(&Catalog {
         generators: crate::agent_ops::generator_infos(),
         graph_template: crate::agent_ops::graph_template(),
-    };
-    serde_json::to_string_pretty(&catalog).expect("the catalog must serialize")
+    })
 }
 
 /// Load → apply → describe → export → save, in that order. The order is
@@ -436,19 +428,8 @@ fn image_path(base: &Path, kind: ViewKind) -> PathBuf {
 /// extension nothing here produces, or a missing directory. Called
 /// before any write, and again by [`export_mesh`] for the format.
 pub(crate) fn check_export_target(path: &Path) -> Result<(), ExecError> {
-    let format = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if !matches!(format.as_str(), "glb" | "obj" | "vox") {
-        return Err(ExecError::new(
-            "unsupported_export_format",
-            format!(
-                "don't know how to export {:?} (from {}); supported: .glb, .obj, .vox",
-                format,
-                path.display()
-            ),
-        ));
+    if ExportFormat::from_path(path).is_none() {
+        return Err(unsupported_export(path));
     }
     // An empty parent is a bare file name — the working directory,
     // which exists by definition.
@@ -466,11 +447,30 @@ pub(crate) fn check_export_target(path: &Path) -> Result<(), ExecError> {
     Ok(())
 }
 
-pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportInfo, ExecError> {
-    let format = path
+/// The refusal for an extension no export produces, naming the ones
+/// that do.
+fn unsupported_export(path: &Path) -> ExecError {
+    let extension = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+    let supported: Vec<String> = ExportFormat::ALL
+        .iter()
+        .map(|f| format!(".{}", f.extension()))
+        .collect();
+    ExecError::new(
+        "unsupported_export_format",
+        format!(
+            "don't know how to export {:?} (from {}); supported: {}",
+            extension,
+            path.display(),
+            supported.join(", ")
+        ),
+    )
+}
+
+pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportInfo, ExecError> {
+    let format = ExportFormat::from_path(path).ok_or_else(|| unsupported_export(path))?;
     let failed = |e: &dyn std::fmt::Display| {
         ExecError::new(
             "export_failed",
@@ -478,8 +478,8 @@ pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportI
         )
     };
 
-    let (format, vertices, triangles, notes) = match format.as_str() {
-        "glb" => {
+    let (vertices, triangles, notes) = match format {
+        ExportFormat::Glb => {
             let sockets: Vec<SocketNode> = session
                 .sockets
                 .iter()
@@ -490,13 +490,13 @@ pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportI
                 })
                 .collect();
             let stats = io::export_glb(&session.world, &sockets, path).map_err(|e| failed(&e))?;
-            ("glb", stats.vertex_count, stats.triangle_count, Vec::new())
+            (stats.vertex_count, stats.triangle_count, Vec::new())
         }
-        "obj" => {
+        ExportFormat::Obj => {
             let stats = io::export_obj(&session.world, path).map_err(|e| failed(&e))?;
-            ("obj", stats.vertex_count, stats.triangle_count, Vec::new())
+            (stats.vertex_count, stats.triangle_count, Vec::new())
         }
-        "vox" => {
+        ExportFormat::Vox => {
             let mut file = std::fs::File::create(path).map_err(|e| failed(&e))?;
             // Axis conversion on, matching the editor's default: a model
             // exported from here should stand upright in MagicaVoxel.
@@ -510,23 +510,13 @@ pub(crate) fn export_mesh(session: &AgentSession, path: &Path) -> Result<ExportI
                 Vec::new()
             };
             // `.vox` is a voxel format — it has no mesh to count.
-            ("vox", 0, 0, notes)
-        }
-        other => {
-            return Err(ExecError::new(
-                "unsupported_export_format",
-                format!(
-                    "don't know how to export {:?} (from {}); supported: .glb, .obj, .vox",
-                    other,
-                    path.display()
-                ),
-            ))
+            (0, 0, notes)
         }
     };
 
     Ok(ExportInfo {
         path: path.display().to_string(),
-        format,
+        format: format.extension(),
         vertices,
         triangles,
         bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
@@ -939,6 +929,22 @@ mod tests {
         assert!(envelope.get("error").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_failure_envelope_carries_the_code_and_message() {
+        let error = ExecError::new("unsupported_export_format", "no");
+        let envelope: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
+        assert_eq!(envelope["ok"], serde_json::json!(false));
+        assert_eq!(
+            envelope["error"]["code"],
+            serde_json::json!("unsupported_export_format")
+        );
+        assert_eq!(envelope["error"]["message"], serde_json::json!("no"));
+        // Not about one op, so no `op_index` — absent rather than null,
+        // like every optional part of the success envelope.
+        assert!(envelope["error"].get("op_index").is_none());
+        assert_eq!(envelope.as_object().unwrap().len(), 2);
     }
 
     #[test]

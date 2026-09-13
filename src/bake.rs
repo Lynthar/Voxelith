@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::editor::Socket;
-use crate::io::{self, ExportTransform, Pivot, SocketNode, UpAxis};
+use crate::io::{self, ExportFormat, ExportTransform, Pivot, SocketNode, Surface, UpAxis};
 
 /// A spec-level failure that aborts the bake before any item runs.
 /// Per-item failures do not surface here — they land in that item's
@@ -87,13 +87,6 @@ pub struct RawItem {
 // ===========================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Smoothing {
-    None,
-    Light,
-    Heavy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 enum Optimize {
     None,
     Meshopt,
@@ -104,7 +97,7 @@ enum Optimize {
 struct ResolvedItem {
     src: PathBuf,
     out: PathBuf,
-    smoothing: Smoothing,
+    smoothing: Surface,
     transform: ExportTransform,
     optimize: Optimize,
     optimize_args: Option<Vec<String>>,
@@ -121,8 +114,8 @@ impl ResolvedItem {
             out: self.out.display().to_string(),
             ok: false,
             error: None,
-            format: "glTF Binary (.glb)".to_string(),
-            mesh_source: mesh_source_label(self.smoothing).to_string(),
+            format: ExportFormat::Glb.label(),
+            mesh_source: self.smoothing.mesh_source_label().to_string(),
             pivot: self.pivot_label.clone(),
             up_axis: self.up_label.clone(),
             unit_scale: self.transform.unit_scale,
@@ -395,7 +388,7 @@ fn merge(defaults: &Settings, item: &Settings) -> Settings {
 
 /// Parsed, validated settings (paths get added later by `make_item`).
 struct ParsedSettings {
-    smoothing: Smoothing,
+    smoothing: Surface,
     transform: ExportTransform,
     optimize: Optimize,
     optimize_args: Option<Vec<String>>,
@@ -414,15 +407,12 @@ fn parse_settings(s: &Settings) -> Result<ParsedSettings, String> {
         ));
     }
 
-    let smoothing = match s.smoothing.as_deref().unwrap_or("none") {
-        "none" => Smoothing::None,
-        "light" => Smoothing::Light,
-        "heavy" => Smoothing::Heavy,
-        other => {
-            return Err(format!(
-                "unknown smoothing '{other}' (expected none|light|heavy)"
-            ))
-        }
+    let smoothing = match s.smoothing.as_deref() {
+        None => Surface::Blocky,
+        Some(keyword) => Surface::from_bake_keyword(keyword).ok_or_else(|| {
+            let expected = Surface::ALL.map(Surface::bake_keyword).join("|");
+            format!("unknown smoothing '{keyword}' (expected {expected})")
+        })?,
     };
 
     let (pivot, pivot_label) = match s.pivot.as_deref().unwrap_or("origin") {
@@ -500,14 +490,6 @@ fn parse_shard(s: &str) -> Result<(usize, usize), BakeError> {
     Ok((i, n))
 }
 
-fn mesh_source_label(s: Smoothing) -> &'static str {
-    match s {
-        Smoothing::None => "Greedy mesh",
-        Smoothing::Light => "Marching Cubes (light)",
-        Smoothing::Heavy => "Marching Cubes (heavy)",
-    }
-}
-
 // ===========================================================================
 // Per-item bake
 // ===========================================================================
@@ -548,25 +530,7 @@ fn bake_item_inner(item: &ResolvedItem) -> ItemReport {
         }
     }
 
-    let stats = match item.smoothing {
-        Smoothing::None => {
-            io::export_glb_with_transform(&world, &sockets, &item.out, item.transform)
-        }
-        Smoothing::Light => io::export_glb_smoothed_with_transform(
-            &world,
-            &sockets,
-            &item.out,
-            false,
-            item.transform,
-        ),
-        Smoothing::Heavy => io::export_glb_smoothed_with_transform(
-            &world,
-            &sockets,
-            &item.out,
-            true,
-            item.transform,
-        ),
-    };
+    let stats = io::export_glb_surface(&world, &sockets, &item.out, item.smoothing, item.transform);
     let stats = match stats {
         Ok(s) => s,
         Err(e) => return item.failed(format!("export failed: {e}")),
@@ -763,7 +727,7 @@ mod tests {
     fn parse_settings_defaults_are_identity() {
         let p = parse_settings(&Settings::default()).unwrap();
         assert!(p.transform.is_identity());
-        assert_eq!(p.smoothing, Smoothing::None);
+        assert_eq!(p.smoothing, Surface::Blocky);
         assert_eq!(p.optimize, Optimize::None);
     }
 
@@ -780,7 +744,7 @@ mod tests {
         assert_eq!(p.transform.pivot, Pivot::BaseCenter);
         assert_eq!(p.transform.up_axis, UpAxis::Z);
         assert_eq!(p.transform.unit_scale, 0.5);
-        assert_eq!(p.smoothing, Smoothing::Heavy);
+        assert_eq!(p.smoothing, Surface::SmoothHeavy);
 
         // "feet" is an alias for base-center but keeps its own label.
         let feet = parse_settings(&Settings {
