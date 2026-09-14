@@ -143,9 +143,8 @@ pub fn graph_template() -> Value {
 /// rejected here rather than on the generator structs, which stay
 /// lenient for the storage formats. Only top-level keys are checked.
 fn from_partial<T: Default + Serialize + DeserializeOwned>(params: &Value) -> Result<T, OpsError> {
-    let mut merged = match serde_json::to_value(T::default()) {
-        Ok(Value::Object(map)) => map,
-        _ => panic!("generator params must serialize to a JSON object"),
+    let Ok(Value::Object(mut merged)) = serde_json::to_value(T::default()) else {
+        panic!("generator params must serialize to a JSON object")
     };
     match params {
         Value::Null => {}
@@ -450,7 +449,7 @@ mod tests {
         // params — there is no downstream budget that gets a look first.
         let terrain = build_err(
             "builtin.perlin_terrain",
-            &json!({"width": 100000, "depth": 100000}),
+            &json!({"width": 100_000, "depth": 100_000}),
         );
         assert_eq!(terrain.code, ErrorCode::InvalidParams);
 

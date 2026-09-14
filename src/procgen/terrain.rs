@@ -108,8 +108,8 @@ impl VoxelGenerator for PerlinTerrain {
                     // Offset each octave off the integer lattice, where
                     // Perlin is exactly 0. Fixed rather than
                     // seed-derived, so a given seed stays stable.
-                    let ox = octave as f64 * 0.7548776662;
-                    let oz = octave as f64 * 0.5698402909;
+                    let ox = octave as f64 * 0.754_877_666_2;
+                    let oz = octave as f64 * 0.569_840_290_9;
                     let n = perlin.get([x as f64 * freq + ox, z as f64 * freq + oz]);
                     acc += n * amp;
                     total_amp += amp;

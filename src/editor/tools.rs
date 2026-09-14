@@ -313,10 +313,10 @@ impl BrushTool {
 /// Pick color from a voxel
 pub fn eyedrop(world: &World, hit: &RaycastHit) -> Option<Voxel> {
     let voxel = world.get_voxel(hit.voxel_pos.0, hit.voxel_pos.1, hit.voxel_pos.2);
-    if !voxel.is_air() {
-        Some(voxel)
-    } else {
+    if voxel.is_air() {
         None
+    } else {
+        Some(voxel)
     }
 }
 

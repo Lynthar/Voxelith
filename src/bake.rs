@@ -214,14 +214,14 @@ impl BakeOutcome {
         }
         for r in &self.reports {
             if r.ok {
-                let size = if r.bytes_final != r.bytes_raw {
+                let size = if r.bytes_final == r.bytes_raw {
+                    format_bytes(r.bytes_raw)
+                } else {
                     format!(
                         "{} -> {}",
                         format_bytes(r.bytes_raw),
                         format_bytes(r.bytes_final)
                     )
-                } else {
-                    format_bytes(r.bytes_raw)
                 };
                 let _ = writeln!(
                     out,
@@ -811,12 +811,16 @@ mod tests {
         assert_eq!(group_thousands(0), "0");
         assert_eq!(group_thousands(42), "42");
         assert_eq!(group_thousands(1234), "1,234");
-        assert_eq!(group_thousands(1234567), "1,234,567");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
     }
 
     #[test]
     fn bake_single_item_produces_glb_and_report() {
         use crate::core::{Voxel, World};
+
+        fn esc(p: &Path) -> String {
+            p.display().to_string().replace('\\', "\\\\")
+        }
 
         let dir = std::env::temp_dir().join("voxelith_bake_it");
         let _ = std::fs::remove_dir_all(&dir);
@@ -837,9 +841,6 @@ mod tests {
             .unwrap();
 
         // Absolute paths; `base.join(absolute)` keeps the absolute path.
-        fn esc(p: &Path) -> String {
-            p.display().to_string().replace('\\', "\\\\")
-        }
         let spec = format!(
             r#"{{ "defaults": {{ "pivot": "base-center", "optimize": "none" }},
                   "items": [ {{ "src": "{}", "out": "{}" }} ] }}"#,

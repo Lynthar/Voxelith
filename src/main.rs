@@ -270,9 +270,10 @@ fn run_mcp(root: Option<PathBuf>, http: Option<String>, token: Option<String>, c
         .format_timestamp(None)
         .init();
 
-    let checkpoint = match checkpoint {
-        true => Checkpoint::AfterEveryEdit,
-        false => Checkpoint::Off,
+    let checkpoint = if checkpoint {
+        Checkpoint::AfterEveryEdit
+    } else {
+        Checkpoint::Off
     };
     let requested = root.unwrap_or_else(|| PathBuf::from("."));
     let root = match voxelith::mcp::Root::new(&requested) {

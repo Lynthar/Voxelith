@@ -155,6 +155,7 @@ impl OpsError {
     /// Tag an error with the op it came from. Op executors raise errors
     /// without knowing their own index; the batch loop attaches it once
     /// here instead of threading the index through every call site.
+    #[must_use]
     pub fn at(mut self, op_index: usize) -> Self {
         self.op_index = Some(op_index);
         self

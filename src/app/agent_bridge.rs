@@ -606,9 +606,10 @@ impl App {
         let voxels: Vec<((i32, i32, i32), Voxel)> = changes
             .iter()
             .map(|change| {
-                let voxel = match change.new_voxel.is_air() {
-                    true => CLEARED_TINT,
-                    false => change.new_voxel,
+                let voxel = if change.new_voxel.is_air() {
+                    CLEARED_TINT
+                } else {
+                    change.new_voxel
                 };
                 (change.pos, voxel)
             })

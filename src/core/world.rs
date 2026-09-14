@@ -152,6 +152,7 @@ impl World {
     /// Copy the world, chunk contents and all. Not `impl Clone` —
     /// chunks live behind `Arc<RwLock<…>>`, so a derived clone would
     /// write through to this world's voxels. 256 KB per chunk.
+    #[must_use]
     pub fn deep_clone(&self) -> World {
         World {
             chunks: self

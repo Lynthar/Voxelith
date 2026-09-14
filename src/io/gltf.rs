@@ -993,7 +993,7 @@ mod tests {
         assert!(socket.get("mesh").is_none(), "socket must not carry a mesh");
         assert_eq!(socket["translation"], serde_json::json!([0.5, 1.0, 0.5]));
         assert_eq!(
-            socket["rotation"].as_array().map(|a| a.len()),
+            socket["rotation"].as_array().map(Vec::len),
             Some(4),
             "rotation is a 4-component quaternion"
         );

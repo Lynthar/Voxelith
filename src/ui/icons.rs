@@ -2,6 +2,8 @@
 //! no icon-font dependency, crisp at any scale, and colored by widget
 //! state. The `match` is total over [`Tool`]; glyphs use the unit square.
 
+use std::f32::consts::TAU;
+
 use egui::{vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 
 use crate::editor::Tool;
@@ -90,7 +92,6 @@ pub fn paint_tool_icon(painter: &Painter, rect: Rect, tool: Tool, color: Color32
                     })
                     .collect()
             };
-            use std::f32::consts::TAU;
             painter.add(Shape::closed_line(ellipse(0.2, 0.0, TAU, 16), stroke));
             painter.line_segment([p(0.5 - rx, 0.2), p(0.5 - rx, 0.8)], stroke);
             painter.line_segment([p(0.5 + rx, 0.2), p(0.5 + rx, 0.8)], stroke);

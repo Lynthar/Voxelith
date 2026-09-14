@@ -246,7 +246,7 @@ impl Scratch {
                 region,
             } => {
                 let quarter = quarter_from(*quarters)?;
-                let (source, from_selection) = self.resolve_region(region)?;
+                let (source, from_selection) = self.resolve_region(region.as_ref())?;
                 self.charge(source.cell_count() as u64)?;
                 let (rotated, changes) =
                     rotate_selection_changes(&self.world, source, axis.to_axis(), quarter);
@@ -262,7 +262,7 @@ impl Scratch {
             }
 
             Op::Mirror { axis, region } => {
-                let (source, _) = self.resolve_region(region)?;
+                let (source, _) = self.resolve_region(region.as_ref())?;
                 self.charge(source.cell_count() as u64)?;
                 let changes = mirror_selection_changes(&self.world, source, axis.to_axis());
                 for change in changes {
@@ -276,7 +276,7 @@ impl Scratch {
                 plane,
                 region,
                 write_mode,
-            } => self.mirror_copy(*axis, *plane, region, *write_mode),
+            } => self.mirror_copy(*axis, *plane, region.as_ref(), *write_mode),
         }
     }
 
@@ -510,7 +510,7 @@ impl Scratch {
         &mut self,
         axis: AxisSpec,
         plane: Option<i32>,
-        region: &Option<Aabb>,
+        region: Option<&Aabb>,
         mode: WriteMode,
     ) -> Result<(), OpsError> {
         let (source, _) = self.resolve_region(region)?;
@@ -554,7 +554,7 @@ impl Scratch {
     /// An op's region: the explicit one if given, else the session
     /// selection. The flag says which, because ops that move their
     /// contents follow the selection only when they are it.
-    fn resolve_region(&self, region: &Option<Aabb>) -> Result<(Selection, bool), OpsError> {
+    fn resolve_region(&self, region: Option<&Aabb>) -> Result<(Selection, bool), OpsError> {
         let (region, from_selection) = match region {
             Some(aabb) => (aabb.to_selection(), false),
             None => {
@@ -654,14 +654,11 @@ fn set_node_params(
     let node = graph
         .get_mut(id)
         .ok_or_else(|| OpsError::new(ErrorCode::InvalidGraph, format!("no node with id {id}")))?;
-    let mut current = match serde_json::to_value(&node.kind) {
-        Ok(Value::Object(map)) => map,
-        _ => {
-            return Err(OpsError::new(
-                ErrorCode::InvalidGraph,
-                "this node has no parameters to set",
-            ))
-        }
+    let Ok(Value::Object(mut current)) = serde_json::to_value(&node.kind) else {
+        return Err(OpsError::new(
+            ErrorCode::InvalidGraph,
+            "this node has no parameters to set",
+        ));
     };
     for (key, value) in overrides {
         if key == "kind" {
@@ -1729,7 +1726,7 @@ mod tests {
                 {"edit":"connect","target":2,"slot":0,"source":9}
             ]}]}"#,
         );
-        assert!(missing.message.contains("9"), "got: {}", missing.message);
+        assert!(missing.message.contains('9'), "got: {}", missing.message);
 
         let retyped = refuse(
             &mut session,

@@ -560,7 +560,9 @@ fn write_temp_then_sync(project: &Project, tmp: &std::path::Path) -> Result<(), 
     project.save(&mut writer)?;
     // `into_inner` flushes the buffer and hands back the File; on a flush
     // error it yields an `IntoInnerError` we unwrap to the io::Error.
-    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    let file = writer
+        .into_inner()
+        .map_err(io::IntoInnerError::into_error)?;
     file.sync_all()?;
     Ok(())
 }

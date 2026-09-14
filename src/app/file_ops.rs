@@ -42,10 +42,13 @@ pub(super) fn classify_disk_poll(
     unsaved_changes: bool,
 ) -> DiskPoll {
     match (watched, on_disk) {
-        (Some(watched), Some(on_disk)) if watched != on_disk => match unsaved_changes {
-            true => DiskPoll::WarnStale,
-            false => DiskPoll::Reload,
-        },
+        (Some(watched), Some(on_disk)) if watched != on_disk => {
+            if unsaved_changes {
+                DiskPoll::WarnStale
+            } else {
+                DiskPoll::Reload
+            }
+        }
         _ => DiskPoll::Ignore,
     }
 }
@@ -132,7 +135,7 @@ impl App {
                 .recent_files
                 .first()
                 .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf()),
+                .map(Path::to_path_buf),
             DialogStart::Export => self.prefs.last_export_dir.clone(),
             DialogStart::Import => self.prefs.last_import_dir.clone(),
         };
@@ -359,7 +362,7 @@ impl App {
 
         let metadata = self.document.metadata.clone();
         match io::save_world_with_state(&self.document.world, editor_state, metadata, &path) {
-            Ok(_) => {
+            Ok(()) => {
                 self.project_path = Some(path.clone());
                 // Our own write — mark it, or the next poll reads it as
                 // somebody else's and reloads what we just saved.
@@ -370,7 +373,7 @@ impl App {
                 self.ui.set_status(format!("Saved: {}", filename));
             }
             Err(e) => {
-                log::error!("Failed to save project {:?}: {}", path, e);
+                log::error!("Failed to save project {}: {}", path.display(), e);
                 self.show_write_error("Save failed", &path, "save", &e, true);
                 self.ui.set_status(format!(
                     "Save failed: {} — your work is NOT saved",
@@ -419,7 +422,7 @@ impl App {
                 self.ui.set_status(format!("Opened: {}", filename));
             }
             Err(e) => {
-                log::error!("Failed to open project {:?}: {}", path, e);
+                log::error!("Failed to open project {}: {}", path.display(), e);
                 let (short, detail) = describe_project_open_error(&e, &path);
                 self.show_error_dialog("Open failed", &detail);
                 self.ui.set_status(short);
@@ -474,14 +477,14 @@ impl App {
                     self.ui.set_status(status);
                 }
                 Err(e) => {
-                    log::error!("Failed to import VOX from {:?}: {}", path, e);
+                    log::error!("Failed to import VOX from {}: {}", path.display(), e);
                     let (short, detail) = describe_vox_import_error(&e, &path);
                     self.show_error_dialog("Import failed", &detail);
                     self.ui.set_status(short);
                 }
             },
             Err(e) => {
-                log::error!("Failed to open file {:?}: {}", path, e);
+                log::error!("Failed to open file {}: {}", path.display(), e);
                 let detail = format!(
                     "Couldn't open \"{}\" — {}.\n\nCheck the file still exists \
                      and isn't locked by another app.",
@@ -498,6 +501,7 @@ impl App {
     /// **adds to** the document as one undoable command, which is why it
     /// needs no unsaved-changes guard — Ctrl+Z puts it back.
     pub(super) fn import_glb(&mut self) {
+        const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
         let resolution = self.ui.import_resolution;
         let dialog = self
             .file_dialog(DialogStart::Import)
@@ -511,7 +515,6 @@ impl App {
         // Size gate before the whole-file read: everything downstream is
         // budgeted, but the read itself wasn't, so a mispicked
         // multi-gigabyte file landed in memory before anything spoke.
-        const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
         match std::fs::metadata(&path) {
             Ok(meta) if meta.len() > MAX_IMPORT_BYTES => {
                 let detail = format!(
@@ -532,7 +535,7 @@ impl App {
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                log::error!("Failed to read {:?}: {}", path, e);
+                log::error!("Failed to read {}: {}", path.display(), e);
                 let detail = format!(
                     "Couldn't open \"{}\" — {}.\n\nCheck the file still exists \
                      and isn't locked by another app.",
@@ -548,21 +551,20 @@ impl App {
         let patch = match io::voxelize_glb(&bytes, resolution) {
             Ok(patch) => patch,
             Err(e) => {
-                log::error!("Failed to voxelize {:?}: {:#}", path, e);
+                log::error!("Failed to voxelize {}: {:#}", path.display(), e);
                 // A `.gltf` with sidecar buffers is the textbook export
                 // and exactly what this refuses — it reads no file but
                 // the one picked. Saying so beats a generic error.
                 let sidecars = path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
-                let hint = match sidecars {
-                    true => {
-                        "\n\nA `.gltf` is only readable here when it carries its buffers \
-                         and images inside itself. One that references a `.bin` or a `.png` \
-                         beside it can't be: nothing outside the file you picked is read. \
-                         Export it as a single `.glb` instead."
-                    }
-                    false => "",
+                let hint = if sidecars {
+                    "\n\nA `.gltf` is only readable here when it carries its buffers \
+                     and images inside itself. One that references a `.bin` or a `.png` \
+                     beside it can't be: nothing outside the file you picked is read. \
+                     Export it as a single `.glb` instead."
+                } else {
+                    ""
                 };
                 let detail = format!(
                     "Couldn't turn \"{}\" into voxels — {:#}.\n\nThe file has to \
@@ -901,7 +903,7 @@ impl App {
                 }
             },
             Err(e) => {
-                log::error!("Failed to create file {:?}: {}", path, e);
+                log::error!("Failed to create file {}: {}", path.display(), e);
                 self.show_write_error("Export failed", path, "create", &e, true);
                 self.ui
                     .set_status(format!("Export failed: {}", file_label(path)));

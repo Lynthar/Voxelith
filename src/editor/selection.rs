@@ -46,6 +46,7 @@ impl Selection {
     }
 
     /// Shift the selection by `delta` so the box keeps its size.
+    #[must_use]
     pub fn translated(&self, delta: (i32, i32, i32)) -> Self {
         Self {
             min: (

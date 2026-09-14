@@ -764,7 +764,7 @@ impl Ui {
                                 let label = path
                                     .file_name()
                                     .and_then(|n| n.to_str())
-                                    .map(|s| s.to_string())
+                                    .map(ToString::to_string)
                                     .unwrap_or_else(|| path.display().to_string());
                                 let resp =
                                     ui.button(label).on_hover_text(path.display().to_string());
@@ -2674,11 +2674,11 @@ fn cubic_bezier_point(
 /// Bezier, tessellated to a polyline rather than depending on egui's
 /// `CubicBezierShape` API across versions.
 fn paint_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
+    const SEGMENTS: usize = 24;
     let dx = (to.x - from.x).abs().max(40.0);
     let c1 = egui::pos2(from.x + dx * 0.5, from.y);
     let c2 = egui::pos2(to.x - dx * 0.5, to.y);
 
-    const SEGMENTS: usize = 24;
     let mut pts = Vec::with_capacity(SEGMENTS + 1);
     for i in 0..=SEGMENTS {
         let t = i as f32 / SEGMENTS as f32;
@@ -2706,6 +2706,11 @@ fn graph_canvas(
     delete_id: &mut Option<NodeId>,
     wire_action: &mut Option<(NodeId, usize, Option<NodeId>)>,
 ) {
+    struct NodeFrame {
+        body_resp: egui::Response,
+        delta: egui::Vec2,
+    }
+
     let avail = ui.available_size();
     let (canvas_rect, _bg) = ui.allocate_exact_size(avail, egui::Sense::hover());
     let painter = ui.painter_at(canvas_rect);
@@ -2750,10 +2755,6 @@ fn graph_canvas(
     // Two passes: allocate every node body first so its drag response
     // is registered, then draw and handle sockets. Splitting keeps
     // z-order predictable, with sockets on top of bodies.
-    struct NodeFrame {
-        body_resp: egui::Response,
-        delta: egui::Vec2,
-    }
     let mut frames: Vec<(NodeId, NodeFrame)> = Vec::with_capacity(graph.nodes.len());
 
     for node in &graph.nodes {

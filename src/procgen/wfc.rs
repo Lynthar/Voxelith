@@ -248,6 +248,8 @@ fn wall_with_door_pattern_z(color: Voxel) -> [Voxel; TILE_VOLUME] {
 /// T-junctions, a crossing and a building. Connector 0 is a grass side
 /// and 1 a road side, so roads network into grids on their own.
 fn city_tileset() -> Tileset {
+    type RoadSpec = (&'static str, [u8; 4], (bool, bool, bool, bool), f32);
+
     let grass = Voxel::from_rgb(76, 153, 0);
     let asphalt = Voxel::from_rgb(50, 50, 50);
     let sidewalk = Voxel::from_rgb(180, 180, 180);
@@ -272,7 +274,6 @@ fn city_tileset() -> Tileset {
     // Roads: straight, four corners, four T and one cross, each built by
     // `road_y0_pattern` from the flags marking which faces the asphalt
     // exits. (name, connectors, exits, weight).
-    type RoadSpec = (&'static str, [u8; 4], (bool, bool, bool, bool), f32);
     #[rustfmt::skip] // hand-aligned columns: the flag grid IS the road shape
     let road_specs: &[RoadSpec] = &[
         ("road_x",            [1, 1, 0, 0], (true,  true,  false, false), 1.5),

@@ -228,7 +228,6 @@ fn march_one_cube(
     // The 12 potential edge vertices, filled lazily — only those
     // flagged in `edges` are used. Edge i connects the corner pair at
     // EDGE_VERTEX_PAIRS[i].
-    type EdgeVertex = (([f32; 3], [f32; 3], [f32; 4]), bool);
     let mut edge_vertices: [EdgeVertex; 12] = [(([0.0; 3], [0.0; 3], [0.0; 4]), false); 12];
     // Field-global identity of each edge, so neighbouring cubes reuse
     // one vertex instead of each emitting their own copy.
@@ -324,6 +323,10 @@ fn march_one_cube(
 /// corner plus the axis it runs along. Two cubes that share an edge
 /// produce the same key.
 type EdgeKey = ((usize, usize, usize), u8);
+
+/// One lazily filled edge vertex of a cube: (position, normal, color)
+/// plus whether it has been computed yet.
+type EdgeVertex = (([f32; 3], [f32; 3], [f32; 4]), bool);
 
 fn edge_key(a: (usize, usize, usize), b: (usize, usize, usize)) -> EdgeKey {
     let axis = if a.0 != b.0 {

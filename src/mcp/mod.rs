@@ -290,9 +290,10 @@ impl VoxelithMcp {
         // A dry run changed nothing, so there is nothing to check-point:
         // writing the unchanged document back would give the human's
         // editor a reload that shows exactly what it already shows.
-        let checkpoint = match batch.options.dry_run {
-            true => None,
-            false => self.checkpoint(&document),
+        let checkpoint = if batch.options.dry_run {
+            None
+        } else {
+            self.checkpoint(&document)
         };
         answered(Applied {
             status: document.status(),

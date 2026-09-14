@@ -53,6 +53,7 @@ impl ChunkPos {
 
     /// Get neighbor chunk position in the given direction
     #[inline]
+    #[must_use]
     pub fn neighbor(&self, dx: i32, dy: i32, dz: i32) -> Self {
         Self {
             x: self.x + dx,
@@ -241,7 +242,7 @@ mod tests {
     #[test]
     fn test_chunk_size() {
         // Chunk should be approximately 256KB (32³ * 8 bytes per voxel)
-        assert_eq!(CHUNK_VOLUME * std::mem::size_of::<Voxel>(), 262144);
+        assert_eq!(CHUNK_VOLUME * std::mem::size_of::<Voxel>(), 262_144);
     }
 
     #[test]

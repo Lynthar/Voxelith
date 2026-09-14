@@ -476,13 +476,13 @@ mod tests {
                 }
             })
             .collect();
-        after.sort();
+        after.sort_unstable();
         let mut expected = vec![
             [red.r, red.g, red.b, red.a],
             [green.r, green.g, green.b, green.a],
             [blue.r, blue.g, blue.b, blue.a],
         ];
-        expected.sort();
+        expected.sort_unstable();
         assert_eq!(after, expected);
     }
 

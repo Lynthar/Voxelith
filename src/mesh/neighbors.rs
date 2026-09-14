@@ -58,7 +58,7 @@ pub(crate) fn neighbor_arcs(world: &World, chunk_pos: ChunkPos) -> NeighborArcs 
 /// # Safety
 /// Chunk writes must stay on the thread driving `rebuild_all_meshes`
 /// while these guards live, or the 27 locks can deadlock.
-pub(crate) fn lock_neighbors<'a>(arcs: &'a NeighborArcs) -> NeighborGuards<'a> {
+pub(crate) fn lock_neighbors(arcs: &NeighborArcs) -> NeighborGuards<'_> {
     std::array::from_fn(|i| arcs[i].as_ref().map(|a| a.read()))
 }
 
