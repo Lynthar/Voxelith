@@ -19,6 +19,55 @@ fn is_project_file(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("vxlt"))
 }
 
+/// Keys in `data` that saving `loaded` would not write back — a typo or
+/// a setting this build no longer has — as dotted paths. The file has
+/// already parsed by the time this runs, so it only reports.
+fn unwritten_keys(data: &str, loaded: &Prefs) -> Vec<String> {
+    let mut keys = Vec::new();
+    let written = ron::to_string(loaded)
+        .ok()
+        .and_then(|s| ron::from_str::<ron::Value>(&s).ok());
+    if let (Ok(file), Some(written)) = (ron::from_str::<ron::Value>(data), written) {
+        collect_unwritten_keys(&file, &written, "", &mut keys);
+    }
+    keys
+}
+
+/// Walk nested structs and `Some(..)` in step, recording every key of
+/// `file` that `written` lacks.
+fn collect_unwritten_keys(
+    file: &ron::Value,
+    written: &ron::Value,
+    path: &str,
+    out: &mut Vec<String>,
+) {
+    use ron::Value;
+    match (file, written) {
+        (Value::Map(file), Value::Map(written)) => {
+            for (key, value) in file.iter() {
+                let Value::String(name) = key else {
+                    continue;
+                };
+                let full = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path}.{name}")
+                };
+                match written.iter().find(|(k, _)| *k == key) {
+                    Some((_, counterpart)) => {
+                        collect_unwritten_keys(value, counterpart, &full, out);
+                    }
+                    None => out.push(full),
+                }
+            }
+        }
+        (Value::Option(Some(file)), Value::Option(Some(written))) => {
+            collect_unwritten_keys(file, written, path, out);
+        }
+        _ => {}
+    }
+}
+
 /// Top-level preferences container.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -145,7 +194,14 @@ impl Prefs {
             }
         };
         match ron::from_str::<Prefs>(&data) {
-            Ok(p) => p,
+            Ok(p) => {
+                for key in unwritten_keys(&data, &p) {
+                    log::warn!(
+                        "prefs key `{key}` is not a current setting and will not be written back"
+                    );
+                }
+                p
+            }
             Err(e) => {
                 log::warn!(
                     "Failed to parse prefs at {}: {}; using defaults",
@@ -266,6 +322,21 @@ mod tests {
             !prefs.panels.show_inspector,
             "the old key's value must carry over"
         );
+    }
+
+    #[test]
+    fn keys_the_loader_drops_are_named_for_the_log() {
+        // A misspelled key parses fine and vanishes on the next save;
+        // the log line is the only place the user can learn that.
+        let data = "( panels: ( show_stats: true, show_palete: false ), window: ( widht: 5 ) )";
+        let prefs: Prefs = ron::from_str(data).unwrap();
+        assert_eq!(
+            unwritten_keys(data, &prefs),
+            ["panels.show_palete", "window.widht"]
+        );
+        // Control: a file this build wrote itself has nothing to report.
+        let own = ron::ser::to_string_pretty(&prefs, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(unwritten_keys(&own, &prefs).is_empty());
     }
 
     #[test]
