@@ -60,9 +60,9 @@ impl Default for WindowPrefs {
 #[serde(default)]
 pub struct PanelVisibility {
     pub show_stats: bool,
-    /// The context Inspector (the Tools float's successor; renamed
-    /// from `show_tools`, so an older prefs file's value for that key
-    /// is ignored and this starts from its default once).
+    /// The context Inspector, the Tools float's successor. The alias
+    /// reads the key a file from before the rename still carries.
+    #[serde(alias = "show_tools")]
     pub show_inspector: bool,
     pub show_palette: bool,
     pub show_viewport_settings: bool,
@@ -255,6 +255,17 @@ mod tests {
         )"#;
         let prefs: Prefs = ron::from_str(ron).expect("an older prefs file must still parse");
         assert_eq!(prefs.recent_files.len(), 1, "the rest of the file survives");
+    }
+
+    #[test]
+    fn a_prefs_file_with_the_retired_show_tools_key_keeps_its_value() {
+        // `show_tools` became `show_inspector`; a file from before the
+        // rename must still open with the panel the way the user left it.
+        let prefs: Prefs = ron::from_str("( panels: ( show_tools: false ) )").unwrap();
+        assert!(
+            !prefs.panels.show_inspector,
+            "the old key's value must carry over"
+        );
     }
 
     #[test]
