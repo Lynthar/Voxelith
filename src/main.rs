@@ -401,7 +401,18 @@ fn run_gui(agent_port: Option<u16>) {
 
     log::info!("Starting Voxelith...");
 
-    let event_loop = EventLoop::new().unwrap();
+    if let Err(e) = run_editor(agent_port) {
+        eprintln!("editor error: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// The event loop from creation to exit. What can fail here is the OS
+/// refusing a loop or a window, and that comes back as a value rather
+/// than a panic so `run_gui` can say so in one line.
+#[cfg(feature = "gui")]
+fn run_editor(agent_port: Option<u16>) -> Result<(), winit::error::EventLoopError> {
+    let event_loop = EventLoop::new()?;
     // A placeholder: `about_to_wait` re-arms the flow every turn with
     // `WaitUntil(next_frame_at)`. `Poll` here would burn a core
     // busy-spinning between frames.
@@ -409,5 +420,6 @@ fn run_gui(agent_port: Option<u16>) {
 
     let mut app = app::App::new();
     app.start_agent_bridge_at(agent_port);
-    event_loop.run_app(&mut app).unwrap();
+    event_loop.run_app(&mut app)?;
+    app.startup_error.take().map_or(Ok(()), |e| Err(e.into()))
 }

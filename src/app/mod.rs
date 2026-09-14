@@ -227,6 +227,10 @@ pub struct App {
     /// actual `event_loop.exit()` happens in `handler`, which is the
     /// only place holding an `ActiveEventLoop`.
     pub(super) exit_requested: bool,
+    /// Why `resumed` could not bring the window up. The handler has no
+    /// return channel, so it parks the error here and stops the loop;
+    /// `main` reports it and exits non-zero.
+    pub(crate) startup_error: Option<winit::error::OsError>,
 
     /// AABB of the most recent generation or import, for the "Frame
     /// Generated" action. `None` until something is generated; not
@@ -354,6 +358,7 @@ impl App {
             last_disk_poll: Instant::now(),
             pending_guarded: None,
             exit_requested: false,
+            startup_error: None,
             last_generated_bounds: None,
         }
     }

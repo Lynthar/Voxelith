@@ -66,7 +66,14 @@ impl ApplicationHandler for App {
                 .with_visible(false)
                 .with_inner_size(winit::dpi::LogicalSize::new(w, h));
 
-            let window = event_loop.create_window(window_attrs).unwrap();
+            let window = match event_loop.create_window(window_attrs) {
+                Ok(window) => window,
+                Err(e) => {
+                    self.startup_error = Some(e);
+                    event_loop.exit();
+                    return;
+                }
+            };
             self.init(window);
             // Kick the first frame: the scheduler re-arms itself, but
             // the chain has to start somewhere, and macOS delivers no
