@@ -484,7 +484,7 @@ impl VoxScene {
     /// when `convert_axes`. Flattening runs in MagicaVoxel's own space
     /// so the per-node rotations compose correctly.
     pub fn to_world(&self, convert_axes: bool, notes: &mut Notes) -> World {
-        let native = self.to_world_native(notes);
+        let native = self.to_world_native(FlattenLimits::default(), notes);
         if convert_axes {
             rotate_world_z_up_to_y_up(&native)
         } else {
@@ -495,7 +495,7 @@ impl VoxScene {
     /// Flatten the scene graph in MagicaVoxel's native Z-up space,
     /// accumulating transforms from the root and rotating each model
     /// around its own center. No `nTRN` nodes → everything at the origin.
-    fn to_world_native(&self, notes: &mut Notes) -> World {
+    fn to_world_native(&self, mut limits: FlattenLimits, notes: &mut Notes) -> World {
         let mut world = World::new();
         if !self.nodes.is_empty() && !self.nodes.contains_key(&0) {
             log::warn!(
@@ -521,7 +521,6 @@ impl VoxScene {
         }
 
         // DFS from root id 0.
-        let mut limits = FlattenLimits::default();
         let mut path = std::collections::HashSet::new();
         self.flatten_node(
             &mut world,
@@ -620,7 +619,7 @@ impl VoxScene {
                     if let Some(model) = self.models.get(*model_id as usize) {
                         if limits.charge(model.voxels.len() as u64) {
                             place_model(world, model, &self.palette, translation, rotation);
-                            if world.chunk_count() > MAX_SCENE_CHUNKS {
+                            if world.chunk_count() > limits.max_chunks {
                                 limits.stop("scene expands to too much of the world");
                             }
                         }
@@ -655,11 +654,24 @@ const MAX_SCENE_PLACED: u64 = 1 << 24;
 /// Budget tracking for `flatten_node`. A `.vox` is untrusted input:
 /// depth guards the stack, visits and chunks guard memory, and
 /// `placed` guards the time the import takes.
-#[derive(Default)]
 struct FlattenLimits {
     visits: u32,
     placed: u64,
+    /// `MAX_SCENE_CHUNKS`, except in the test that lowers it: reaching
+    /// the real cap takes 4,097 dense chunks, about a gibibyte.
+    max_chunks: usize,
     exhausted: bool,
+}
+
+impl Default for FlattenLimits {
+    fn default() -> Self {
+        Self {
+            visits: 0,
+            placed: 0,
+            max_chunks: MAX_SCENE_CHUNKS,
+            exhausted: false,
+        }
+    }
 }
 
 impl FlattenLimits {
@@ -1661,6 +1673,59 @@ mod tests {
             "hitting the visit ceiling has to say so, got {:?}",
             imported.notes
         );
+    }
+
+    /// One unit model under `n` sibling transforms 64 cells apart along
+    /// x, so every placement claims a chunk of its own.
+    fn build_scattered_scene(n: i32) -> Vec<u8> {
+        let shape_id = n + 2;
+        let transforms: Vec<i32> = (2..shape_id).collect();
+        let mut chunks = build_unit_model(1);
+        chunks.extend_from_slice(&build_chunk(
+            b"nTRN",
+            &build_ntrn_content(0, 1, (0, 0, 0), None),
+        ));
+        chunks.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &transforms)));
+        for id in transforms {
+            chunks.extend_from_slice(&build_chunk(
+                b"nTRN",
+                &build_ntrn_content(id, shape_id, ((id - 2) * 64, 0, 0), None),
+            ));
+        }
+        chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(shape_id, &[0])));
+        build_v200_file(&chunks)
+    }
+
+    #[test]
+    fn a_scattered_scene_stops_at_the_chunk_budget() {
+        // The check is the production one; only the cap is lowered.
+        let file = build_scattered_scene(4);
+        let mut notes = Notes::default();
+        let scene = VoxScene::read(&mut file.as_slice(), &mut notes).expect("v200 read");
+        let lowered = FlattenLimits {
+            max_chunks: 2,
+            ..FlattenLimits::default()
+        };
+        let world = scene.to_world_native(lowered, &mut notes);
+        let notes = notes.into_vec();
+        assert!(
+            was_truncated(&notes),
+            "hitting the chunk ceiling has to say so, got {notes:?}"
+        );
+        // The placement that crossed the cap stays; the next never runs.
+        assert_eq!(world.chunk_count(), 3);
+        assert_eq!(solid_voxels(&world), 3);
+
+        // Control: under the cap the same scene imports whole and quietly.
+        let mut notes = Notes::default();
+        let roomy = FlattenLimits {
+            max_chunks: 4,
+            ..FlattenLimits::default()
+        };
+        let world = scene.to_world_native(roomy, &mut notes);
+        assert!(notes.0.is_empty(), "clean import: {:?}", notes.0);
+        assert_eq!(world.chunk_count(), 4);
+        assert_eq!(solid_voxels(&world), 4);
     }
 
     #[test]
