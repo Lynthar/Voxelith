@@ -173,8 +173,7 @@ mod tests {
             assert_eq!(
                 m[6 + leg * 2].position,
                 [0.0, 0.0, 0.0],
-                "tripod leg {} should start at the min corner",
-                leg
+                "tripod leg {leg} should start at the min corner"
             );
         }
     }

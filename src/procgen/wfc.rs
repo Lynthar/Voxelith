@@ -634,8 +634,7 @@ impl VoxelGenerator for WfcGenerator {
 
         if failed_cells > 0 {
             patch.notes.push(format!(
-                "WFC: {} cell(s) over-constrained, filled with empty",
-                failed_cells
+                "WFC: {failed_cells} cell(s) over-constrained, filled with empty"
             ));
         }
 
@@ -832,10 +831,7 @@ mod tests {
                 for x in 1..3 {
                     assert!(
                         door.cells[idx(x, y, z)].is_air(),
-                        "expected portal cell ({},{},{}) to be empty",
-                        x,
-                        y,
-                        z
+                        "expected portal cell ({x},{y},{z}) to be empty"
                     );
                 }
             }
@@ -845,9 +841,7 @@ mod tests {
             for x in 0..TILE_SIZE {
                 assert!(
                     !door.cells[idx(x, 3, z)].is_air(),
-                    "lintel cell ({}, 3, {}) should be solid",
-                    x,
-                    z
+                    "lintel cell ({x}, 3, {z}) should be solid"
                 );
             }
         }
@@ -856,15 +850,11 @@ mod tests {
             for z in 1..3 {
                 assert!(
                     !door.cells[idx(0, y, z)].is_air(),
-                    "left jamb gap at ({}, {})",
-                    y,
-                    z
+                    "left jamb gap at ({y}, {z})"
                 );
                 assert!(
                     !door.cells[idx(3, y, z)].is_air(),
-                    "right jamb gap at ({}, {})",
-                    y,
-                    z
+                    "right jamb gap at ({y}, {z})"
                 );
             }
         }
@@ -888,11 +878,10 @@ mod tests {
                 .tiles
                 .iter()
                 .find(|t| t.name == variant_name)
-                .unwrap_or_else(|| panic!("{} missing", variant_name));
+                .unwrap_or_else(|| panic!("{variant_name} missing"));
             assert_eq!(
                 v.cells, plain_floor.cells,
-                "{} should share plain floor's geometry",
-                variant_name
+                "{variant_name} should share plain floor's geometry"
             );
             // Exactly one connector must be the door socket `3` (the
             // complement of a wall's door mouth); everything else stays
@@ -900,8 +889,7 @@ mod tests {
             let sockets = v.connectors.iter().filter(|&&c| c == 3).count();
             assert_eq!(
                 sockets, 1,
-                "{} should have exactly one door-socket connector",
-                variant_name
+                "{variant_name} should have exactly one door-socket connector"
             );
         }
     }
@@ -956,10 +944,7 @@ mod tests {
                 for x in 0..TILE_SIZE {
                     assert!(
                         road.cells[idx(x, y, z)].is_air(),
-                        "road_x cell ({}, {}, {}) should be empty",
-                        x,
-                        y,
-                        z
+                        "road_x cell ({x}, {y}, {z}) should be empty"
                     );
                 }
             }
@@ -976,10 +961,7 @@ mod tests {
                 for x in 1..3 {
                     assert!(
                         !b.cells[idx(x, y, z)].is_air(),
-                        "building cube cell ({}, {}, {}) should be solid",
-                        x,
-                        y,
-                        z
+                        "building cube cell ({x}, {y}, {z}) should be solid"
                     );
                 }
             }
@@ -1187,8 +1169,7 @@ mod tests {
             for ((_, y, _), _) in &p.voxels {
                 assert_eq!(
                     *y, 0,
-                    "1×1 grid produced a wall/door voxel above the floor (seed {})",
-                    seed
+                    "1×1 grid produced a wall/door voxel above the floor (seed {seed})"
                 );
             }
         }

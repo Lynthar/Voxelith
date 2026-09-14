@@ -220,6 +220,7 @@ unreadable_literal = "warn"
 large_digit_groups = "warn"
 ip_constant = "warn"
 unnecessary_debug_formatting = "warn"
+uninlined_format_args = "warn"
 # Signatures and types: what a caller can pass, what they must not drop.
 ref_option = "warn"
 ref_option_ref = "warn"

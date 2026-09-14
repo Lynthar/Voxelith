@@ -684,13 +684,11 @@ mod tests {
         }
         let total = outward_count + inward_count + zero_count;
         eprintln!(
-            "MC isolated-voxel winding (vs vertex normal): {} outward, {} inward, {} zero (out of {})",
-            outward_count, inward_count, zero_count, total
+            "MC isolated-voxel winding (vs vertex normal): {outward_count} outward, {inward_count} inward, {zero_count} zero (out of {total})"
         );
         assert_eq!(
             inward_count, 0,
-            "MC winding correction failed: {} inward triangles vs vertex normal (expected 0); {} outward, {} zero out of {}",
-            inward_count, outward_count, zero_count, total
+            "MC winding correction failed: {inward_count} inward triangles vs vertex normal (expected 0); {outward_count} outward, {zero_count} zero out of {total}"
         );
     }
 
@@ -741,9 +739,7 @@ mod tests {
             let center = (lo[a] + hi[a]) * 0.5;
             assert!(
                 (center - 2.5).abs() < 0.1,
-                "axis {} surface center {} (expected ~2.5, the cell center of [2,3])",
-                a,
-                center
+                "axis {a} surface center {center} (expected ~2.5, the cell center of [2,3])"
             );
         }
     }

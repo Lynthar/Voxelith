@@ -196,8 +196,8 @@ impl App {
         let patch = match result {
             Ok(p) => p,
             Err(e) => {
-                log::error!("Graph evaluation failed: {}", e);
-                self.ui.set_status(format!("Graph error: {}", e));
+                log::error!("Graph evaluation failed: {e}");
+                self.ui.set_status(format!("Graph error: {e}"));
                 return;
             }
         };
@@ -222,7 +222,7 @@ impl App {
         let cmd = Command::set_voxels(changes);
         self.editor.history.execute(cmd, &mut self.document.world);
 
-        let mut status = format!("Graph: {} voxels", count);
+        let mut status = format!("Graph: {count} voxels");
         if !patch.notes.is_empty() {
             status.push_str(" (");
             status.push_str(&patch.notes.join("; "));

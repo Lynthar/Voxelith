@@ -279,7 +279,7 @@ mod tests {
                 p = rotate_pos(sel, Axis::Y, Quarter::Cw, p);
                 sel = rotated_aabb(sel, Axis::Y, Quarter::Cw);
             }
-            assert_eq!(p, cell, "4× Y-CW should be identity for {:?}", cell);
+            assert_eq!(p, cell, "4× Y-CW should be identity for {cell:?}");
             assert_eq!(sel, s);
         }
     }
@@ -294,8 +294,7 @@ mod tests {
                 let back = rotate_pos(s_cw, axis, Quarter::Ccw, cw);
                 assert_eq!(
                     back, cell,
-                    "CW then CCW around {:?} should round-trip {:?}",
-                    axis, cell
+                    "CW then CCW around {axis:?} should round-trip {cell:?}"
                 );
             }
         }
@@ -327,12 +326,7 @@ mod tests {
                     let p = rotate_pos(s, axis, q, cell);
                     assert!(
                         new_sel.contains(p),
-                        "rotate {:?} {:?}: {:?} → {:?} not in {:?}",
-                        axis,
-                        q,
-                        cell,
-                        p,
-                        new_sel
+                        "rotate {axis:?} {q:?}: {cell:?} → {p:?} not in {new_sel:?}"
                     );
                 }
             }

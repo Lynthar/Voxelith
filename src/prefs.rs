@@ -296,7 +296,7 @@ mod tests {
     fn test_touch_recent_dedup_and_cap() {
         let mut p = Prefs::default();
         for i in 0..15 {
-            p.touch_recent(Path::new(&format!("/tmp/file{}.vxlt", i)));
+            p.touch_recent(Path::new(&format!("/tmp/file{i}.vxlt")));
         }
         assert_eq!(p.recent_files.len(), MAX_RECENT_FILES);
         // Most recent is at the head.

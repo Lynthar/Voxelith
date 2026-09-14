@@ -121,10 +121,10 @@ impl FilterPredicate {
     /// One-line summary for the node body and combo box.
     pub fn label(&self) -> String {
         match self {
-            Self::YAbove(t) => format!("y ≥ {}", t),
-            Self::YBelow(t) => format!("y ≤ {}", t),
+            Self::YAbove(t) => format!("y ≥ {t}"),
+            Self::YBelow(t) => format!("y ≤ {t}"),
             Self::MatchesColor([r, g, b, _]) => {
-                format!("color = #{:02x}{:02x}{:02x}", r, g, b)
+                format!("color = #{r:02x}{g:02x}{b:02x}")
             }
             Self::InsideBox { min, max } => format!(
                 "box ({},{},{})..({},{},{})",
@@ -1339,7 +1339,7 @@ mod tests {
         let patch = g.evaluate().unwrap();
         assert!(!patch.voxels.is_empty());
         for ((_, y, _), _) in &patch.voxels {
-            assert!(*y >= 2, "filter leaked y={}", y);
+            assert!(*y >= 2, "filter leaked y={y}");
         }
     }
 
@@ -1379,7 +1379,7 @@ mod tests {
         let _out = g.add(NodeKind::Output { input: None });
         let err = g.evaluate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unconnected input slot"), "got: {}", msg);
+        assert!(msg.contains("unconnected input slot"), "got: {msg}");
     }
 
     #[test]
@@ -1403,7 +1403,7 @@ mod tests {
         // Translate(100, 0, 0): every x must be >= 100 - depth (terrain centers
         // around 0; with width=4 the leftmost x is -2, shifted = 98).
         for ((x, _, _), _) in &patch.voxels {
-            assert!(*x >= 98, "translated x out of range: {}", x);
+            assert!(*x >= 98, "translated x out of range: {x}");
         }
     }
 
@@ -1486,7 +1486,7 @@ mod tests {
 
         let err = g.evaluate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("cycle"), "got: {}", msg);
+        assert!(msg.contains("cycle"), "got: {msg}");
     }
 
     #[test]

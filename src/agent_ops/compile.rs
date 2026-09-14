@@ -311,9 +311,8 @@ impl Scratch {
             return Err(OpsError::new(
                 ErrorCode::WorldTooLarge,
                 format!(
-                    "this batch would allocate more than {} new chunks (32³ voxels each); \
-                     build closer together or split the work across batches",
-                    MAX_NEW_CHUNKS
+                    "this batch would allocate more than {MAX_NEW_CHUNKS} new chunks (32³ voxels each); \
+                     build closer together or split the work across batches"
                 ),
             ));
         }
@@ -332,8 +331,7 @@ impl Scratch {
             return Err(OpsError::new(
                 ErrorCode::CellBudgetExceeded,
                 format!(
-                    "this batch touches more than {} cells; split it into several batches",
-                    MAX_BATCH_CELLS
+                    "this batch touches more than {MAX_BATCH_CELLS} cells; split it into several batches"
                 ),
             ));
         }
@@ -803,10 +801,7 @@ fn check_coord(pos: (i32, i32, i32)) -> Result<(), OpsError> {
     if out_of_range(pos.0) || out_of_range(pos.1) || out_of_range(pos.2) {
         return Err(OpsError::new(
             ErrorCode::CoordinateOutOfRange,
-            format!(
-                "coordinate {:?} is outside ±{} on some axis",
-                pos, MAX_COORD
-            ),
+            format!("coordinate {pos:?} is outside ±{MAX_COORD} on some axis"),
         ));
     }
     Ok(())
@@ -824,8 +819,7 @@ fn check_line_length(a: (i32, i32, i32), b: (i32, i32, i32)) -> Result<(), OpsEr
         return Err(OpsError::new(
             ErrorCode::RegionTooLarge,
             format!(
-                "line spans {} cells; a single op may cover at most {}",
-                cells, MAX_OP_REGION_CELLS
+                "line spans {cells} cells; a single op may cover at most {MAX_OP_REGION_CELLS}"
             ),
         ));
     }
@@ -859,8 +853,7 @@ fn check_region(region: Selection) -> Result<(), OpsError> {
         return Err(OpsError::new(
             ErrorCode::RegionTooLarge,
             format!(
-                "region {}×{}×{} is {} cells; a single op may cover at most {}",
-                w, h, d, cells, MAX_OP_REGION_CELLS
+                "region {w}×{h}×{d} is {cells} cells; a single op may cover at most {MAX_OP_REGION_CELLS}"
             ),
         ));
     }

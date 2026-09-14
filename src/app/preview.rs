@@ -145,7 +145,7 @@ impl App {
                 return;
             }
             Err(e) => {
-                log::debug!("Graph preview skipped: {}", e);
+                log::debug!("Graph preview skipped: {e}");
                 self.preview_slot_release(PreviewOwner::Graph);
                 return;
             }

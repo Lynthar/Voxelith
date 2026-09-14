@@ -762,10 +762,7 @@ mod tests {
             assert_eq!(
                 loaded_world.get_voxel(x, y, z),
                 v,
-                "voxel ({}, {}, {}) did not round-trip",
-                x,
-                y,
-                z
+                "voxel ({x}, {y}, {z}) did not round-trip"
             );
         }
     }

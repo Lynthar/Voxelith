@@ -307,7 +307,7 @@ mod tests {
         let set: HashSet<_> = v.into_iter().collect();
         // Center column is fully inside.
         for y in 0..=10 {
-            assert!(set.contains(&(1, y, 1)), "missing center cell at y={}", y);
+            assert!(set.contains(&(1, y, 1)), "missing center cell at y={y}");
         }
     }
 
@@ -319,7 +319,7 @@ mod tests {
         assert!(!v.is_empty());
         // Every cell along the line is included.
         for y in 0..=5 {
-            assert!(v.contains(&(0, y, 0)), "missing y={}", y);
+            assert!(v.contains(&(0, y, 0)), "missing y={y}");
         }
 
         // A single cell, every extent 1. Normalizing the AABB is what
@@ -343,8 +343,7 @@ mod tests {
         for y in 0..=3 {
             assert!(
                 vertical.contains(&(5, y, 5)),
-                "center column missing at y={}",
-                y
+                "center column missing at y={y}"
             );
         }
         assert!(

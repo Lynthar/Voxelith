@@ -208,8 +208,7 @@ impl VoxelGenerator for LSystemTree {
     fn generate(&self) -> GenResult<VoxelPatch> {
         if self.iterations > MAX_ITERATIONS {
             return Err(GenError::InvalidParams(format!(
-                "iterations must be <= {}",
-                MAX_ITERATIONS
+                "iterations must be <= {MAX_ITERATIONS}"
             )));
         }
         if self.initial_length <= 0.0 {

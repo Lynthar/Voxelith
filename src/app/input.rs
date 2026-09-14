@@ -563,9 +563,9 @@ impl App {
             (Axis::Z, Quarter::Half) => "Rotate Z 180°",
         };
         if count == 0 {
-            self.ui.set_status(format!("{} (selection empty)", label));
+            self.ui.set_status(format!("{label} (selection empty)"));
         } else {
-            self.ui.set_status(format!("{} ({} cells)", label, count));
+            self.ui.set_status(format!("{label} ({count} cells)"));
         }
     }
 
@@ -614,9 +614,9 @@ impl App {
         };
         if count == 0 {
             self.ui
-                .set_status(format!("{} (no change — selection is symmetric)", label));
+                .set_status(format!("{label} (no change — selection is symmetric)"));
         } else {
-            self.ui.set_status(format!("{} ({} cells)", label, count));
+            self.ui.set_status(format!("{label} ({count} cells)"));
         }
     }
 
@@ -736,7 +736,7 @@ impl App {
         if count == 0 {
             self.ui.set_status("Selection contains no solid voxels");
         } else {
-            self.ui.set_status(format!("Copied {} voxels", count));
+            self.ui.set_status(format!("Copied {count} voxels"));
         }
     }
 
@@ -766,7 +766,7 @@ impl App {
             self.ui
                 .set_status("Selection had no solid voxels — clipboard empty");
         } else {
-            self.ui.set_status(format!("Cut {} voxels", count));
+            self.ui.set_status(format!("Cut {count} voxels"));
         }
     }
 
@@ -791,7 +791,7 @@ impl App {
             self.ui
                 .set_status("Selection had no solid voxels to delete");
         } else {
-            self.ui.set_status(format!("Deleted {} voxels", count));
+            self.ui.set_status(format!("Deleted {count} voxels"));
         }
     }
 
@@ -844,7 +844,7 @@ impl App {
             self.ui
                 .set_status("Pasted (no changes — destination already matched)");
         } else {
-            self.ui.set_status(format!("Pasted {} voxels", count));
+            self.ui.set_status(format!("Pasted {count} voxels"));
         }
     }
 
@@ -855,8 +855,7 @@ impl App {
             Some((min, max)) => {
                 self.editor.selection = Some(Selection { min, max });
                 let (w, h, d) = (max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1);
-                self.ui
-                    .set_status(format!("Selected all: {}×{}×{}", w, h, d));
+                self.ui.set_status(format!("Selected all: {w}×{h}×{d}"));
             }
             None => {
                 // Through `deselect`, not by assigning `None`: a

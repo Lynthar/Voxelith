@@ -370,7 +370,7 @@ impl App {
                 self.document.mark_saved();
                 self.touch_recent(&path);
                 let filename = file_label(&path);
-                self.ui.set_status(format!("Saved: {}", filename));
+                self.ui.set_status(format!("Saved: {filename}"));
             }
             Err(e) => {
                 log::error!("Failed to save project {}: {}", path.display(), e);
@@ -419,7 +419,7 @@ impl App {
                 self.document.mark_saved();
                 self.touch_recent(&path);
                 let filename = file_label(&path);
-                self.ui.set_status(format!("Opened: {}", filename));
+                self.ui.set_status(format!("Opened: {filename}"));
             }
             Err(e) => {
                 log::error!("Failed to open project {}: {}", path.display(), e);
@@ -465,7 +465,7 @@ impl App {
                     // the project MRU — see `Prefs::touch_recent`.
                     self.prefs.remember_import_dir(&path);
                     let filename = file_label(&path);
-                    let mut status = format!("Imported: {}", filename);
+                    let mut status = format!("Imported: {filename}");
                     // A file that was truncated or damaged still gives
                     // back a world, and "Imported" on its own is how a
                     // model quietly arrives missing half its geometry.
@@ -492,7 +492,7 @@ impl App {
                     e
                 );
                 self.show_error_dialog("Import failed", &detail);
-                self.ui.set_status(format!("Import failed: {}", e));
+                self.ui.set_status(format!("Import failed: {e}"));
             }
         }
     }
@@ -543,7 +543,7 @@ impl App {
                     e
                 );
                 self.show_error_dialog("Import failed", &detail);
-                self.ui.set_status(format!("Import failed: {}", e));
+                self.ui.set_status(format!("Import failed: {e}"));
                 return;
             }
         };
@@ -734,15 +734,15 @@ impl App {
     /// empty scene says so instead of reporting a 0-triangle success.
     fn export_status(surface: Surface, filename: &str, triangles: usize, detail: &str) -> String {
         if triangles == 0 {
-            return format!("Exported: {} (empty — no geometry)", filename);
+            return format!("Exported: {filename} (empty — no geometry)");
         }
         match surface {
-            Surface::Blocky => format!("Exported: {} ({})", filename, detail),
+            Surface::Blocky => format!("Exported: {filename} ({detail})"),
             Surface::SmoothLight => {
-                format!("Exported (smoothed, light): {} ({})", filename, detail)
+                format!("Exported (smoothed, light): {filename} ({detail})")
             }
             Surface::SmoothHeavy => {
-                format!("Exported (smoothed, heavy): {} ({})", filename, detail)
+                format!("Exported (smoothed, heavy): {filename} ({detail})")
             }
         }
     }
@@ -778,7 +778,7 @@ impl App {
                 }
             }
             Err(e) => {
-                log::error!("Failed to export OBJ: {}", e);
+                log::error!("Failed to export OBJ: {e}");
                 self.show_write_error(
                     "Export failed",
                     path,
@@ -838,7 +838,7 @@ impl App {
                 }
             }
             Err(e) => {
-                log::error!("Failed to export GLB: {}", e);
+                log::error!("Failed to export GLB: {e}");
                 self.show_write_error(
                     "Export failed",
                     path,
@@ -863,20 +863,18 @@ impl App {
                     let filename = file_label(path);
                     let msg = if overflow > 0 {
                         format!(
-                            "Exported: {} ({} colors quantized — the VOX palette \
-                                 holds 254)",
-                            filename, overflow
+                            "Exported: {filename} ({overflow} colors quantized — the VOX palette \
+                                 holds 254)"
                         )
                     } else {
-                        format!("Exported: {}", filename)
+                        format!("Exported: {filename}")
                     };
                     self.ui.set_status(msg);
                     let mut notes = Vec::new();
                     if overflow > 0 {
                         notes.push(format!(
-                            "{} colors quantized to the nearest of 254 \
-                                 palette slots",
-                            overflow
+                            "{overflow} colors quantized to the nearest of 254 \
+                                 palette slots"
                         ));
                     }
                     self.set_export_report(
@@ -890,7 +888,7 @@ impl App {
                     );
                 }
                 Err(e) => {
-                    log::error!("Failed to export VOX: {}", e);
+                    log::error!("Failed to export VOX: {e}");
                     self.show_write_error(
                         "Export failed",
                         path,
@@ -1007,10 +1005,7 @@ fn describe_vox_import_error(e: &io::VoxError, path: &Path) -> (String, String) 
             "Make sure you picked a .vox file exported from MagicaVoxel.",
         ),
         io::VoxError::UnsupportedVersion(v) => (
-            format!(
-                "unsupported VOX version {} (Voxelith reads v150 and v200)",
-                v
-            ),
+            format!("unsupported VOX version {v} (Voxelith reads v150 and v200)"),
             "Re-export the model as v150 from MagicaVoxel, then import again.",
         ),
         io::VoxError::ModelTooLarge => (
@@ -1022,11 +1017,11 @@ fn describe_vox_import_error(e: &io::VoxError, path: &Path) -> (String, String) 
             "The .vox has no SIZE/XYZI data — check how it was exported.",
         ),
         io::VoxError::InvalidChunkId(id) => (
-            format!("an unexpected chunk tag {:?}", id),
+            format!("an unexpected chunk tag {id:?}"),
             "The file is likely corrupt or uses an unsupported extension.",
         ),
         io::VoxError::InvalidChunkSize(id) => (
-            format!("a corrupt {:?} chunk header (bad length)", id),
+            format!("a corrupt {id:?} chunk header (bad length)"),
             "The .vox is damaged — re-download or re-export it.",
         ),
         io::VoxError::Io(inner) if inner.kind() == std::io::ErrorKind::UnexpectedEof => (
@@ -1034,11 +1029,11 @@ fn describe_vox_import_error(e: &io::VoxError, path: &Path) -> (String, String) 
             "The .vox looks incomplete — re-download or re-export it.",
         ),
         io::VoxError::Io(inner) => (
-            format!("a read error: {}", inner),
+            format!("a read error: {inner}"),
             "Check the file still exists and isn't locked by another app.",
         ),
     };
-    let short = format!("Import failed: {}", reason);
+    let short = format!("Import failed: {reason}");
     let detail = format!(
         "Couldn't import \"{}\" — {}.\n\n{}",
         file_label(path),
@@ -1063,11 +1058,11 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
             "The file is damaged — try a backup or autosave copy.",
         ),
         io::ProjectError::UnsupportedVersion(v) => (
-            format!("saved in a newer project format (version {})", v),
+            format!("saved in a newer project format (version {v})"),
             "Update Voxelith to open this project.",
         ),
         io::ProjectError::Json(inner) => (
-            format!("a corrupt project header ({})", inner),
+            format!("a corrupt project header ({inner})"),
             "The header is damaged — try a backup or autosave copy.",
         ),
         io::ProjectError::Io(inner) if inner.kind() == std::io::ErrorKind::UnexpectedEof => (
@@ -1075,7 +1070,7 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
             "The project looks incomplete — try a backup or autosave copy.",
         ),
         io::ProjectError::Io(inner) => (
-            format!("a read error: {}", inner),
+            format!("a read error: {inner}"),
             "Check the file still exists and isn't locked by another app.",
         ),
         io::ProjectError::InvalidChunkData | io::ProjectError::DecompressionError => (
@@ -1083,7 +1078,7 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
             "The project body is damaged — try a backup or autosave copy.",
         ),
         io::ProjectError::LimitExceeded(what) => (
-            format!("a {} past what any project can hold", what),
+            format!("a {what} past what any project can hold"),
             "The file is corrupt (or not really a project) — try a backup or \
              autosave copy.",
         ),
@@ -1092,7 +1087,7 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
             "The file is damaged — try a backup or autosave copy.",
         ),
     };
-    let short = format!("Open failed: {}", reason);
+    let short = format!("Open failed: {reason}");
     let detail = format!(
         "Couldn't open \"{}\" — {}.\n\n{}",
         file_label(path),

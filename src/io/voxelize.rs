@@ -19,7 +19,7 @@ use crate::procgen::VoxelPatch;
 /// triangle primitives.
 pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     if !(4..=256).contains(&resolution) {
-        bail!("Resolution must be in 4..=256, got {}", resolution);
+        bail!("Resolution must be in 4..=256, got {resolution}");
     }
 
     // Parse structure first, decode pixels ourselves: `import_slice`
@@ -835,8 +835,7 @@ mod tests {
         for x in 0..20 {
             assert!(
                 grid.keys().any(|&(gx, _, _)| gx == x),
-                "no sample landed in the x={} column — the sliver has a hole",
-                x
+                "no sample landed in the x={x} column — the sliver has a hole"
             );
         }
     }
@@ -952,10 +951,7 @@ mod tests {
                 for z in 1..4 {
                     assert!(
                         filled.contains_key(&(x, y, z)),
-                        "interior cell ({},{},{}) should be filled",
-                        x,
-                        y,
-                        z
+                        "interior cell ({x},{y},{z}) should be filled"
                     );
                 }
             }

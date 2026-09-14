@@ -222,7 +222,7 @@ pub fn format_bytes(bytes: u64) -> String {
     const GIB: f64 = MIB * 1024.0;
     let b = bytes as f64;
     if b < KIB {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else if b < MIB {
         format!("{:.1} KiB", b / KIB)
     } else if b < GIB {
@@ -353,7 +353,7 @@ mod tests {
             })
             .collect();
         kinds.dedup(); // the three Vox rows collapse to one
-        kinds.sort_by_key(|k| format!("{:?}", k));
+        kinds.sort_by_key(|k| format!("{k:?}"));
         kinds.dedup();
         assert_eq!(
             kinds.len(),

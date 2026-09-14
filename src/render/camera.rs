@@ -393,9 +393,7 @@ mod tests {
             controller.update_camera_position(&mut camera);
             assert!(
                 (camera.position - original).length() < 1e-3,
-                "round-trip failed for pos={:?} target={:?}",
-                pos,
-                target
+                "round-trip failed for pos={pos:?} target={target:?}"
             );
         }
     }
@@ -416,9 +414,7 @@ mod tests {
         assert!(
             original_dir.dot(new_dir) > 0.9999,
             "post-sync update changed view direction; \
-             original={:?} new={:?}",
-            original_dir,
-            new_dir
+             original={original_dir:?} new={new_dir:?}"
         );
     }
 
@@ -438,9 +434,7 @@ mod tests {
             original_dir.dot(new_dir) < 0.5,
             "expected pre-sync update to produce a divergent direction \
              (this test demonstrates the bug fix is load-bearing); \
-             got original={:?} new={:?}",
-            original_dir,
-            new_dir
+             got original={original_dir:?} new={new_dir:?}"
         );
     }
 
@@ -499,10 +493,7 @@ mod tests {
         let cos = old_to_anchor.normalize().dot(new_to_anchor.normalize());
         assert!(
             cos > 0.9999,
-            "anchor screen direction changed; old={:?} new={:?} cos={}",
-            old_to_anchor,
-            new_to_anchor,
-            cos
+            "anchor screen direction changed; old={old_to_anchor:?} new={new_to_anchor:?} cos={cos}"
         );
         // And new_to_anchor is shorter (zoomed in).
         assert!(
@@ -715,7 +706,7 @@ mod tests {
         let cam = Camera::new(Vec3::ZERO, Vec3::ZERO, 1.6);
         let d1 = cam.fit_distance(Vec3::splat(4.0), 1.1);
         let d2 = cam.fit_distance(Vec3::splat(8.0), 1.1);
-        assert!((d2 - 2.0 * d1).abs() < 1e-3, "d1={} d2={}", d1, d2);
+        assert!((d2 - 2.0 * d1).abs() < 1e-3, "d1={d1} d2={d2}");
     }
 
     #[test]
@@ -761,8 +752,7 @@ mod tests {
         assert!(offset.length() > 1e-3, "drag produced no motion");
         assert!(
             offset.dot(forward).abs() / offset.length() < 1e-3,
-            "pan must not dolly along the view axis; offset={:?}",
-            offset
+            "pan must not dolly along the view axis; offset={offset:?}"
         );
     }
 
@@ -776,9 +766,7 @@ mod tests {
         let after = camera.position - camera.target;
         assert!(
             (after - before).length() < 1e-4,
-            "camera-to-target vector changed: {:?} -> {:?}",
-            before,
-            after
+            "camera-to-target vector changed: {before:?} -> {after:?}"
         );
     }
 

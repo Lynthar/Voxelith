@@ -348,8 +348,7 @@ mod tests {
         let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 100.0, Vec3::splat(999.0));
         assert!(
             (pivot.x - 10.0).abs() < 1e-3,
-            "pivot should land on the hit face at x=10, got {:?}",
-            pivot
+            "pivot should land on the hit face at x=10, got {pivot:?}"
         );
         // Pivot lies on the ray (key property: no view-direction jump).
         assert!((pivot.y).abs() < 1e-3 && (pivot.z).abs() < 1e-3);
@@ -364,11 +363,10 @@ mod tests {
         let pivot = VoxelRaycast::orbit_pivot(&ray, &world, 100.0, Vec3::splat(999.0));
         assert!(
             pivot.y.abs() < 1e-3,
-            "ground fallback should land on y=0, got {:?}",
-            pivot
+            "ground fallback should land on y=0, got {pivot:?}"
         );
         // 45° down over 10 units of height → x = 10 at the crossing.
-        assert!((pivot.x - 10.0).abs() < 1e-3, "got {:?}", pivot);
+        assert!((pivot.x - 10.0).abs() < 1e-3, "got {pivot:?}");
     }
 
     #[test]

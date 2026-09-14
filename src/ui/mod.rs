@@ -278,7 +278,7 @@ impl Ui {
         egui::TopBottomPanel::top("disk_conflict").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("\u{26A0} {} changed on disk.", file))
+                    egui::RichText::new(format!("\u{26A0} {file} changed on disk."))
                         .strong()
                         .color(ui.visuals().warn_fg_color),
                 );
@@ -294,9 +294,8 @@ impl Ui {
                     self.state.confirm = Some(ConfirmPrompt {
                         title: "Reload from disk".to_string(),
                         body: format!(
-                            "Load \"{}\" as it is on disk?\n\nThe unsaved changes in \
-                             this editor will be lost.",
-                            file
+                            "Load \"{file}\" as it is on disk?\n\nThe unsaved changes in \
+                             this editor will be lost."
                         ),
                         action: UiAction::ReloadFromDisk,
                     });
@@ -508,8 +507,7 @@ impl Ui {
             .show(ctx, |ui| {
                 ui.label(format!(
                     "This project has changes that haven't been saved.\n\
-                     Save them before you {}?",
-                    what
+                     Save them before you {what}?"
                 ));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1109,7 +1107,7 @@ impl Ui {
                                     // Unreachable for a fresh Output's
                                     // one input slot, but a wiring
                                     // failure must not be silent.
-                                    log::warn!("Preset node wiring failed: {}", e);
+                                    log::warn!("Preset node wiring failed: {e}");
                                 }
                             }
                             self.selected_node = Some(src);
@@ -1706,9 +1704,8 @@ impl Ui {
                             )
                         } else if editor.palette.len() >= MAX_PALETTE_COLORS {
                             format!(
-                                "Palette is full ({} colors max) — \
-                                 remove one first",
-                                MAX_PALETTE_COLORS
+                                "Palette is full ({MAX_PALETTE_COLORS} colors max) — \
+                                 remove one first"
                             )
                         } else {
                             editor.palette.push(color);
@@ -1937,11 +1934,11 @@ impl Ui {
         }
         if let Some((target, slot, source)) = wire_action {
             if let Err(e) = graph.set_input(target, slot, source) {
-                wire_error = Some(format!("{}", e));
+                wire_error = Some(format!("{e}"));
             }
         }
         if let Some(msg) = wire_error {
-            self.set_status(format!("Graph: {}", msg));
+            self.set_status(format!("Graph: {msg}"));
         }
         if run {
             self.state.request(UiAction::RunGraph);
@@ -2199,7 +2196,7 @@ impl Ui {
                         axes.push('Z');
                     }
                     ui.label(
-                        egui::RichText::new(format!("Sym: {}", axes))
+                        egui::RichText::new(format!("Sym: {axes}"))
                             .color(egui::Color32::LIGHT_YELLOW),
                     );
                 }
@@ -2607,7 +2604,7 @@ fn node_summary(kind: &NodeKind) -> String {
             format!("seed {} • {}×{}", t.seed, t.width, t.depth)
         }
         NodeKind::Translate { dx, dy, dz, .. } => {
-            format!("offset ({}, {}, {})", dx, dy, dz)
+            format!("offset ({dx}, {dy}, {dz})")
         }
         NodeKind::Filter { predicate, .. } => predicate.label(),
         NodeKind::Mask { mode, .. } => mode.label().to_string(),

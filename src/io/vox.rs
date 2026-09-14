@@ -341,9 +341,7 @@ impl VoxScene {
         let version = i32::from_le_bytes(version_buf);
         if !VOX_VERSIONS_SUPPORTED.contains(&version) {
             log::warn!(
-                "VOX version {} (supported {:?}), attempting to read anyway",
-                version,
-                VOX_VERSIONS_SUPPORTED
+                "VOX version {version} (supported {VOX_VERSIONS_SUPPORTED:?}), attempting to read anyway"
             );
             notes.add("this file's version is not one Voxelith knows; it was read anyway");
         }
@@ -2079,8 +2077,7 @@ mod tests {
         let overflow = export_vox(&world, &mut buffer, false).unwrap();
         assert!(
             overflow >= 1,
-            "expected at least one overflow color, got {}",
-            overflow
+            "expected at least one overflow color, got {overflow}"
         );
     }
 }

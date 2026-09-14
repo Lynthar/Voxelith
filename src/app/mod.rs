@@ -425,7 +425,7 @@ impl App {
             };
         }
         if let Err(e) = self.prefs.save() {
-            log::error!("Failed to save prefs: {}", e);
+            log::error!("Failed to save prefs: {e}");
         }
     }
 }
@@ -801,7 +801,7 @@ impl App {
                 log::info!("Autosaved to {}", path.display());
                 self.document.mark_autosaved();
             }
-            Err(e) => log::warn!("Autosave failed: {}", e),
+            Err(e) => log::warn!("Autosave failed: {e}"),
         }
         self.last_autosave = Instant::now();
     }

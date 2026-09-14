@@ -384,8 +384,7 @@ mod tests {
         assert!(tri_count >= 12, "expected at least 12 tris (top+bottom)");
         assert!(
             tri_count < 264,
-            "greedy with AO should beat naive, got {} tris",
-            tri_count
+            "greedy with AO should beat naive, got {tri_count} tris"
         );
     }
 

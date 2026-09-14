@@ -317,13 +317,7 @@ mod tests {
                     let dot = cross[0] * normal[0] + cross[1] * normal[1] + cross[2] * normal[2];
                     assert!(
                         dot > 0.0,
-                        "Face {:?} triangle {} (ao_uniform={}): cross {:?} not parallel to normal {:?}, dot={}",
-                        face,
-                        tri,
-                        ao_uniform,
-                        cross,
-                        normal,
-                        dot,
+                        "Face {face:?} triangle {tri} (ao_uniform={ao_uniform}): cross {cross:?} not parallel to normal {normal:?}, dot={dot}",
                     );
                 }
             }

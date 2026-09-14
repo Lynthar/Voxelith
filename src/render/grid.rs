@@ -234,7 +234,7 @@ mod tests {
         for pair in grid_vertices(size, spacing).as_chunks::<2>().0 {
             let (a, b) = (pair[0].position, pair[1].position);
             let len = (b[0] - a[0]).abs().max((b[2] - a[2]).abs());
-            assert_eq!(len, width, "line {:?}..{:?} is short", a, b);
+            assert_eq!(len, width, "line {a:?}..{b:?} is short");
         }
     }
 }

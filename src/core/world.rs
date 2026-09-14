@@ -466,8 +466,7 @@ mod tests {
         let center = world.scene_center().expect("non-empty");
         assert!(
             (center - Vec3::new(1.5, 1.5, 1.5)).length() < 1e-4,
-            "got {:?}",
-            center
+            "got {center:?}"
         );
     }
 
@@ -482,8 +481,7 @@ mod tests {
         let center = world.scene_center().expect("non-empty");
         assert!(
             (center - Vec3::new(0.5, 0.5, 0.5)).length() < 1e-4,
-            "AIR write extended AABB; got {:?}",
-            center
+            "AIR write extended AABB; got {center:?}"
         );
     }
 
@@ -495,6 +493,6 @@ mod tests {
         world.set_voxel(-2, -2, -2, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(1, 1, 1, Voxel::from_rgb(0, 255, 0));
         let center = world.scene_center().expect("non-empty");
-        assert!((center - Vec3::ZERO).length() < 1e-4, "got {:?}", center);
+        assert!((center - Vec3::ZERO).length() < 1e-4, "got {center:?}");
     }
 }

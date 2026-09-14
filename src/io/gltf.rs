@@ -769,8 +769,7 @@ mod tests {
             let length = view["byteLength"].as_u64().unwrap() as usize;
             assert!(
                 offset + length <= buffer_len,
-                "view {:?} extends past buffer end",
-                view
+                "view {view:?} extends past buffer end"
             );
         }
 

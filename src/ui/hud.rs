@@ -111,7 +111,7 @@ pub(super) fn show_perf_overlay(ctx: &Context, stats: &RenderStats) {
                 );
                 if let Some((ms, chunks)) = stats.last_rebuild {
                     ui.label(
-                        RichText::new(format!("rebuild {:.1} ms ({} chunks)", ms, chunks))
+                        RichText::new(format!("rebuild {ms:.1} ms ({chunks} chunks)"))
                             .color(Color32::from_gray(200)),
                     );
                 }
@@ -181,13 +181,13 @@ pub fn symmetry_label(sym: &SymmetryAxes) -> Option<String> {
     if sym.z {
         axes.push('Z');
     }
-    Some(format!("Sym: {}", axes))
+    Some(format!("Sym: {axes}"))
 }
 
 /// `"Sel: 12×5×8 (480 cells)"` — same compact format as the status
 /// bar so the two readouts are recognizably the same value.
 pub fn selection_label(w: i32, h: i32, d: i32, cells: usize) -> String {
-    format!("Sel: {}×{}×{} ({} cells)", w, h, d, cells)
+    format!("Sel: {w}×{h}×{d} ({cells} cells)")
 }
 
 #[cfg(test)]
