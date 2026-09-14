@@ -81,6 +81,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # `[lints.clippy]` only reaches code the build compiles, and the
+      # headless half lives behind `cfg(not(feature = "gui"))` — a
+      # warning there is invisible to the default-features pass above.
+      - name: Clippy (headless — no default features)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
       - name: Format check
         run: cargo fmt --check
 
