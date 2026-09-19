@@ -87,6 +87,16 @@ jobs:
       - name: Clippy (headless — no default features)
         run: cargo clippy --no-default-features --all-targets -- -D warnings
 
+      # Same gap for the two headless MCP builds above: `mcp` alone
+      # compiles the stdio-only server and its HTTP stub, `mcp-http`
+      # the transport without a GUI, and neither pass above reaches
+      # what only they compile.
+      - name: Clippy (MCP over stdio, headless)
+        run: cargo clippy --no-default-features --features mcp --all-targets -- -D warnings
+
+      - name: Clippy (MCP over HTTP, headless)
+        run: cargo clippy --no-default-features --features mcp-http --all-targets -- -D warnings
+
       - name: Format check
         run: cargo fmt --check
 
