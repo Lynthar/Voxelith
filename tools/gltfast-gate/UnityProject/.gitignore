@@ -1,0 +1,11 @@
+# Unity rebuilds everything else from the manifest, the lock file and Assets/.
+Library/
+Temp/
+Logs/
+UserSettings/
+obj/
+*.csproj
+*.sln
+ProjectSettings/*
+!ProjectSettings/ProjectVersion.txt
+Assets/GltfastGate*

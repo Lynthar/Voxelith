@@ -35,34 +35,33 @@
 //     a placement was requested. Key on the name if you must find it;
 //     "Voxelith_root" is reserved and never used for geometry or sockets.
 //
-// IMPORTANT — the one unverified link in this contract: glTFast prunes UV
-// channels that no material samples, and the tint zone rides in TEXCOORD_0
-// precisely because glTFast also drops custom attributes like _TINTZONE.
-// This shader SAMPLES TEXCOORD_0, but it must be assigned to the mesh
-// *before/while* importing (set it as the import material, or use a
-// glTFast import callback) so the channel survives. If every zone arrives
-// as 0, UV0 was pruned.
+// The tint zone rides in TEXCOORD_0 because glTFast drops custom attributes
+// like _TINTZONE, and glTFast prunes UV channels no material samples, which
+// would take the mirror with it. This shader SAMPLES TEXCOORD_0, so keep a
+// material that reaches the mesh at import time. If every zone arrives as 0,
+// UV0 was pruned.
 //
-// Verifying it (needs a running Unity editor, so it cannot be automated):
-//   1. In Voxelith, place voxels in tint zone 1 and zone 2, save a .vxlt,
-//      and bake it headless with "optimize": "none" — see
-//      docs/reference/bake-spec.example.json. Keeping gltfpack out of the
-//      run stops a compression bug from being mistaken for an import bug.
-//   2. Import the .glb into a Unity 6 URP project with
-//      com.unity.cloud.gltfast installed.
-//   3. Assign this shader to the imported submeshes; set _PrimaryColor red
-//      and _SecondaryColor blue.
-//   4. PASS: zone-1 voxels render red, zone-2 blue — the mirror survived.
-//      Record the glTFast version below.
-//   5. FAIL (all one colour): UV0 was pruned. In preference order — assign
-//      the material *at import* (import material remap, or an
-//      IMaterialGenerator callback) so a material samples UV0 and the
-//      channel is kept; or a thin import callback copying UV0 into a
-//      second vertex-colour channel before pruning; or route through
-//      Blender, which preserves all attributes.
-// Until step 4 passes in your glTFast version, treat per-zone tint as
-// unproven — whole-model _BaseColor tint always works.
-// Verified working as of: <fill in glTFast version>.
+// tools/gltfast-gate/ settles the import half automatically: it bakes a
+// fixture carrying zones 1-3 (no gltfpack, so a compression bug cannot pass
+// for an import bug), hands it to real glTFast both as an Asset and through
+// the runtime API, and fails if UV0 is missing or a zone never arrives.
+// Verified as of glTFast 6.20.0 on Unity 6000.3.19f1: UV0 survives both
+// import paths with no material assigned at import time.
+//
+// The gate cannot see your materials, so confirm the rest by eye once:
+//   1. `python tools/gltfast-gate/run.py` - red here means the zone never
+//      reaches Unity at all, and nothing below will help.
+//   2. Import a baked .glb into your Unity 6 URP project, assign this shader
+//      to the submeshes, set _PrimaryColor red and _SecondaryColor blue.
+//   3. PASS: zone-1 voxels render red, zone-2 blue.
+//   4. FAIL (all one colour) with the gate green: your import pruned UV0. In
+//      preference order - assign the material *at import* (import material
+//      remap, or an IMaterialGenerator callback) so a material samples UV0;
+//      or a thin import callback copying UV0 into a second vertex-colour
+//      channel before pruning; or route through Blender, which preserves all
+//      attributes.
+// Until step 3 passes in your project, treat per-zone tint as unproven -
+// whole-model _BaseColor tint always works.
 //
 // Targets URP 12–17 (Unity 2022 LTS .. Unity 6). Stable URP HLSL APIs only.
 
