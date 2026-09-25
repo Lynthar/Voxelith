@@ -40,6 +40,11 @@ const MAX_RLE_BYTES: usize = CHUNK_VOLUME * 10;
 /// leaves headroom for every AABB derived from one.
 pub(super) const MAX_CHUNK_COORD: i32 = 1 << 24;
 
+/// Chunks a project may hold, enforced on save and on load alike. A chunk
+/// costs 26 bytes in the file and 256 KiB in memory, so load needs a cap,
+/// and save shares it so it never writes a file that load would refuse.
+pub(super) const MAX_PROJECT_CHUNKS: usize = 16_384;
+
 /// Errors that can occur when reading/writing project files
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -64,6 +69,10 @@ pub enum ProjectError {
     /// the stream disagree about where the file ends.
     #[error("Data past the end of the declared content")]
     TrailingData,
+    /// The world spans more chunks than a project may hold. Refused
+    /// before a byte is written, so the file on disk stays as it was.
+    #[error("the model spans {chunks} chunks; a project holds at most {max}")]
+    TooManyChunks { chunks: usize, max: usize },
 }
 
 /// Project metadata
@@ -240,8 +249,19 @@ impl Project {
         Ok(world)
     }
 
-    /// Save project to writer
+    /// Save project to writer.
+    ///
+    /// # Errors
+    /// `TooManyChunks` past [`MAX_PROJECT_CHUNKS`], before a byte reaches
+    /// `writer`; otherwise whatever writing to it fails with.
     pub fn save<W: Write>(&self, writer: &mut W) -> Result<(), ProjectError> {
+        if self.chunks.len() > MAX_PROJECT_CHUNKS {
+            return Err(ProjectError::TooManyChunks {
+                chunks: self.chunks.len(),
+                max: MAX_PROJECT_CHUNKS,
+            });
+        }
+
         // Write magic and version
         writer.write_all(&PROJECT_MAGIC)?;
         writer.write_all(&PROJECT_VERSION.to_le_bytes())?;
@@ -314,6 +334,9 @@ impl Project {
         // Read chunk count
         decoder.read_exact(&mut len_buf)?;
         let chunk_count = u32::from_le_bytes(len_buf) as usize;
+        if chunk_count > MAX_PROJECT_CHUNKS {
+            return Err(ProjectError::LimitExceeded("chunk count"));
+        }
 
         // Cap the capacity hint so a bogus count can't request a huge
         // eager allocation; the loop still reads the full declared count
@@ -1034,6 +1057,51 @@ mod tests {
         assert!(matches!(
             Project::load(&mut &bytes[..]),
             Err(ProjectError::UnsupportedVersion(0))
+        ));
+    }
+
+    /// One cap on both sides: a project at it saves and reopens, one chunk
+    /// past it is refused before a byte is written, and a file declaring
+    /// one past it is refused before any chunk is read.
+    #[test]
+    fn the_chunk_cap_holds_on_save_and_on_load() {
+        let rle = full_chunk_rle();
+        let cap = MAX_PROJECT_CHUNKS as i32;
+        let at_cap = Project {
+            chunks: (0..cap)
+                .map(|x| ChunkData {
+                    pos: ChunkPos::new(x, 0, 0),
+                    rle_data: rle.clone(),
+                })
+                .collect(),
+            ..Project::new()
+        };
+        let mut saved = Vec::new();
+        at_cap.save(&mut saved).expect("a project at the cap saves");
+        let reopened = Project::load(&mut &saved[..]).expect("and reopens");
+        assert_eq!(reopened.chunks.len(), MAX_PROJECT_CHUNKS);
+
+        let mut over = at_cap;
+        over.chunks.push(ChunkData {
+            pos: ChunkPos::new(-1, 0, 0),
+            rle_data: rle.clone(),
+        });
+        let mut written = Vec::new();
+        assert!(matches!(
+            over.save(&mut written),
+            Err(ProjectError::TooManyChunks { chunks, max })
+                if chunks == MAX_PROJECT_CHUNKS + 1 && max == MAX_PROJECT_CHUNKS
+        ));
+        assert!(
+            written.is_empty(),
+            "a refused save wrote {} bytes",
+            written.len()
+        );
+
+        let declared: Vec<RawChunk> = (0..=cap).map(|x| ((x, 0, 0), rle.clone())).collect();
+        assert!(matches!(
+            Project::load(&mut &raw_project(&declared)[..]),
+            Err(ProjectError::LimitExceeded("chunk count"))
         ));
     }
 

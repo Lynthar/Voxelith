@@ -661,6 +661,9 @@ const MAX_SCENE_VISITS: u32 = 1 << 20;
 /// claims a whole 32³ chunk (256 KiB), so a tiny file scattering models
 /// across distant translations could otherwise ask for gigabytes.
 const MAX_SCENE_CHUNKS: usize = 4096;
+// The walk can pass that budget by one model (a 256³ box straddles 9³
+// chunks) and the Y-up turn can double it; a project must still hold it.
+const _: () = assert!((MAX_SCENE_CHUNKS + 9 * 9 * 9) * 2 <= super::project::MAX_PROJECT_CHUNKS);
 /// Cap on voxels the walk may place. The other three see no work: a
 /// DAG replaying one model a million times into the same chunks passes
 /// all of them. 2^24 is a dense 256³ model, so one legal model fits.

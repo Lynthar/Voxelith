@@ -374,7 +374,9 @@ impl App {
             }
             Err(e) => {
                 log::error!("Failed to save project {}: {}", path.display(), e);
-                self.show_write_error("Save failed", &path, "save", &e, true);
+                // Too big a model is not a disk problem; don't send them to check one.
+                let disk_hint = !matches!(e, io::ProjectError::TooManyChunks { .. });
+                self.show_write_error("Save failed", &path, "save", &e, disk_hint);
                 self.ui.set_status(format!(
                     "Save failed: {} — your work is NOT saved",
                     file_label(&path)
@@ -1085,6 +1087,12 @@ fn describe_project_open_error(e: &io::ProjectError, path: &Path) -> (String, St
         io::ProjectError::TrailingData => (
             "extra data after the model (inconsistent file)".to_string(),
             "The file is damaged — try a backup or autosave copy.",
+        ),
+        // Only a save raises this; a load reports the same cap as `LimitExceeded`.
+        io::ProjectError::TooManyChunks { chunks, max } => (
+            format!("{chunks} chunks, more than the {max} a project can hold"),
+            "The file is corrupt (or not really a project) — try a backup or \
+             autosave copy.",
         ),
     };
     let short = format!("Open failed: {reason}");
