@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use glam::{Mat4, Quat, Vec3};
+use gltf::accessor::{DataType, Dimensions};
+use gltf::json::validation::Checked;
 
 use crate::core::Voxel;
 use crate::procgen::VoxelPatch;
@@ -25,7 +27,7 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
     // Parse structure first, decode pixels ourselves: `import_slice`
     // decodes every embedded image eagerly with nowhere to pass a
     // `Limits`, and a failed allocation aborts the editor.
-    let gltf::Gltf { document, blob } = gltf::Gltf::from_slice(bytes).context("Parsing GLB")?;
+    let (document, blob) = parse_glb(bytes)?;
     // `None` base path: any image or buffer referencing an external
     // file URI is refused rather than read off the local disk.
     let buffers = gltf::import_buffers(&document, None, blob).context("Reading GLB buffers")?;
@@ -93,10 +95,45 @@ pub fn voxelize_glb(bytes: &[u8], resolution: u32) -> Result<VoxelPatch> {
             "only part of this file was voxelized — see the log for which limit it hit".into(),
         );
     }
+    if limits.malformed {
+        patch.notes.push(
+            "part of this file has vertex data glTF does not allow; that part was skipped or \
+             imported without its colours"
+                .into(),
+        );
+    }
     Ok(patch)
 }
 
 // -------------------- glTF extraction --------------------
+
+/// Parse and validate with `gltf`, after checking the two values its parse
+/// uses before validating them — so a malformed file is an error here,
+/// never a panic inside the crate.
+fn parse_glb(bytes: &[u8]) -> Result<(gltf::Document, Option<Vec<u8>>)> {
+    // The GLB split subtracts the 12-byte header from the declared length
+    // before comparing the two, which underflows below 12.
+    let declared = bytes.get(8..12).and_then(|l| <[u8; 4]>::try_from(l).ok());
+    if bytes.starts_with(b"glTF") && declared.is_some_and(|l| u32::from_le_bytes(l) < 12) {
+        bail!("Parsing GLB: the header declares a length shorter than the header itself");
+    }
+    let gltf::Gltf { document, blob } =
+        gltf::Gltf::from_slice_without_validation(bytes).context("Parsing GLB")?;
+
+    // Validation indexes `accessors[POSITION]` before it checks that index.
+    let json = document.into_json();
+    let dangling = json
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .filter_map(|p| p.attributes.get(&Checked::Valid(gltf::Semantic::Positions)))
+        .any(|accessor| accessor.value() >= json.accessors.len());
+    if dangling {
+        bail!("Parsing GLB: a mesh's POSITION names an accessor the file does not have");
+    }
+    let document = gltf::Document::from_json(json).context("Parsing GLB")?;
+    Ok((document, blob))
+}
 
 struct Triangle {
     v0: Vec3,
@@ -143,6 +180,18 @@ fn decode_base_color_textures(
         if !wanted.contains(&index) {
             continue;
         }
+        // `Image::source` unwraps both fields; the spec requires the one
+        // that applies, gltf never checks, so a file without it panics there.
+        let json = &document.as_json().images[index];
+        let sourced = match json.buffer_view {
+            Some(_) => json.mime_type.is_some(),
+            None => json.uri.is_some(),
+        };
+        if !sourced {
+            log::warn!("Skipping texture {index}: the image names no mime type or URI");
+            skipped = true;
+            continue;
+        }
         let gltf::image::Source::View { view, .. } = image.source() else {
             // An external file URI: `import_buffers(None)` refuses those
             // too, and we're not about to read local files on behalf of
@@ -156,7 +205,8 @@ fn decode_base_color_textures(
             skipped = true;
             continue;
         };
-        let Some(encoded) = buffer.get(view.offset()..view.offset() + view.length()) else {
+        let end = view.offset().checked_add(view.length());
+        let Some(encoded) = end.and_then(|end| buffer.get(view.offset()..end)) else {
             log::warn!("Skipping texture {index}: view out of range");
             skipped = true;
             continue;
@@ -234,6 +284,9 @@ struct WalkLimits {
     /// itself as its child would overflow the stack.
     visited: std::collections::HashSet<usize>,
     exhausted: bool,
+    /// A primitive had an attribute layout the spec forbids or a
+    /// non-finite vertex, and lost that part or that attribute.
+    malformed: bool,
 }
 
 impl WalkLimits {
@@ -299,6 +352,65 @@ fn walk_node(
     }
 }
 
+/// Whether `accessor` has one of these layouts and every byte its reader
+/// will touch. gltf checks neither on parse: its readers `unreachable!()` on
+/// a forbidden layout and do their span arithmetic unchecked.
+fn readable(
+    accessor: &gltf::Accessor,
+    dims: &[Dimensions],
+    types: &[DataType],
+    buffers: &[gltf::buffer::Data],
+) -> bool {
+    if !dims.contains(&accessor.dimensions()) || !types.contains(&accessor.data_type()) {
+        return false;
+    }
+    let item = accessor.size();
+    let base = accessor
+        .view()
+        .is_none_or(|view| spans(&view, accessor.offset(), accessor.count(), item, buffers));
+    let sparse = accessor.sparse().is_none_or(|sparse| {
+        let (indices, values) = (sparse.indices(), sparse.values());
+        let index_size = indices.index_type().size();
+        spans(
+            &indices.view(),
+            indices.offset(),
+            sparse.count(),
+            index_size,
+            buffers,
+        ) && spans(
+            &values.view(),
+            values.offset(),
+            sparse.count(),
+            item,
+            buffers,
+        )
+    });
+    base && sparse
+}
+
+/// Whether `count` items of `item` bytes, one stride apart from `offset`,
+/// lie inside `view`, and `view` inside its buffer.
+fn spans(
+    view: &gltf::buffer::View,
+    offset: usize,
+    count: usize,
+    item: usize,
+    buffers: &[gltf::buffer::Data],
+) -> bool {
+    let stride = view.stride().unwrap_or(item);
+    let view_end = view.offset().checked_add(view.length());
+    let in_buffer = buffers
+        .get(view.buffer().index())
+        .zip(view_end)
+        .is_some_and(|(data, end)| end <= data.len());
+    let items_end = count
+        .checked_sub(1)
+        .and_then(|n| n.checked_mul(stride))
+        .and_then(|n| n.checked_add(offset))
+        .and_then(|n| n.checked_add(item));
+    in_buffer && stride >= item && items_end.is_some_and(|end| end <= view.length())
+}
+
 fn mat4_from_transform(t: gltf::scene::Transform) -> Mat4 {
     match t {
         gltf::scene::Transform::Matrix { matrix } => Mat4::from_cols_array_2d(&matrix),
@@ -333,6 +445,35 @@ fn extract_from_mesh(
             continue;
         }
 
+        // Positions and indices make the triangles, so a part without
+        // readable ones is dropped; unreadable colours or UVs are ignored.
+        let unorm_or_float = [DataType::U8, DataType::U16, DataType::F32];
+        let positions_ok = primitive
+            .get(&gltf::Semantic::Positions)
+            .is_some_and(|a| readable(&a, &[Dimensions::Vec3], &[DataType::F32], buffers));
+        let indices_ok = primitive.indices().is_none_or(|a| {
+            let types = [DataType::U8, DataType::U16, DataType::U32];
+            readable(&a, &[Dimensions::Scalar], &types, buffers)
+        });
+        let colors_ok = primitive.get(&gltf::Semantic::Colors(0)).is_none_or(|a| {
+            readable(
+                &a,
+                &[Dimensions::Vec3, Dimensions::Vec4],
+                &unorm_or_float,
+                buffers,
+            )
+        });
+        let uvs_ok = primitive
+            .get(&gltf::Semantic::TexCoords(0))
+            .is_none_or(|a| readable(&a, &[Dimensions::Vec2], &unorm_or_float, buffers));
+        if !(colors_ok && uvs_ok) {
+            limits.malformed = true;
+        }
+        if !(positions_ok && indices_ok) {
+            limits.malformed = true;
+            continue;
+        }
+
         // Budget the primitive before collecting it: the accessor
         // declares its counts up front, so an oversized one is refused
         // for two lookups instead of after a huge allocation.
@@ -360,11 +501,17 @@ fn extract_from_mesh(
         // Vertex colors are optional and, per the spec, an additional
         // linear multiplier — they multiply with the texture and factor
         // rather than replacing them.
-        let vertex_colors: Option<Vec<[f32; 4]>> =
-            reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
+        let vertex_colors: Option<Vec<[f32; 4]>> = if colors_ok {
+            reader.read_colors(0).map(|c| c.into_rgba_f32().collect())
+        } else {
+            None
+        };
 
-        let tex_coords: Option<Vec<[f32; 2]>> =
-            reader.read_tex_coords(0).map(|tc| tc.into_f32().collect());
+        let tex_coords: Option<Vec<[f32; 2]>> = if uvs_ok {
+            reader.read_tex_coords(0).map(|tc| tc.into_f32().collect())
+        } else {
+            None
+        };
 
         let material = primitive.material();
         let pbr = material.pbr_metallic_roughness();
@@ -403,10 +550,17 @@ fn extract_from_mesh(
             if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
                 continue;
             }
+            let (v0, v1, v2) = (world_pos(i0), world_pos(i1), world_pos(i2));
+            // A non-finite vertex has no cell; left in, it pins an axis of
+            // the bounding box at ±inf and the grid's cell math overflows.
+            if !(v0.is_finite() && v1.is_finite() && v2.is_finite()) {
+                limits.malformed = true;
+                continue;
+            }
             triangles.push(Triangle {
-                v0: world_pos(i0),
-                v1: world_pos(i1),
-                v2: world_pos(i2),
+                v0,
+                v1,
+                v2,
                 c0: color_at_vertex(i0),
                 c1: color_at_vertex(i1),
                 c2: color_at_vertex(i2),
@@ -502,8 +656,8 @@ fn rasterize_triangles(
     );
     let voxel_area = voxel_size * voxel_size;
     // An honest sample grid tops out near 2·`resolution` a side, since
-    // no triangle exceeds the box it sits in. The clamp matters because
-    // an overflowing `f32` area saturates on the cast rather than wraps.
+    // no triangle exceeds the box it sits in. The clamp matters because an
+    // overflowing `f32` area or edge length saturates on the cast.
     let max_grid = 4 * resolution as usize;
 
     for tri in triangles {
@@ -518,7 +672,7 @@ fn rasterize_triangles(
             .length()
             .max((tri.v2 - tri.v1).length())
             .max((tri.v0 - tri.v2).length());
-        let edge_n = (longest_edge / voxel_size).ceil() as usize + 1;
+        let edge_n = ((longest_edge / voxel_size).ceil() as usize).saturating_add(1);
 
         let grid_n = area_n.max(edge_n).min(max_grid);
         let grid_n_f = grid_n as f32;
@@ -734,6 +888,22 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Our own export carries `_TINTZONE`, and glTF allows any attribute
+    /// whose name starts with `_` — so the importer has to accept it.
+    #[test]
+    fn a_glb_carrying_a_custom_attribute_imports() {
+        let mut world = crate::core::World::new();
+        world.set_voxel(0, 0, 0, voxel(200, 20, 20));
+        world.set_voxel(3, 1, 0, voxel(20, 20, 200));
+        let path = std::env::temp_dir().join("voxelith_custom_attribute.glb");
+        crate::io::export_glb(&world, &[], &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let patch = voxelize_glb(&bytes, 8).expect("a spec-valid custom attribute is not an error");
+        assert!(!patch.voxels.is_empty());
+    }
+
     /// Two rows, red on top and blue below. glTF's v grows downward
     /// from a top-left origin, so v = 0 must land on red — every
     /// assertion here fails with the axis inverted.
@@ -866,26 +1036,235 @@ mod tests {
     /// a 112-byte file recurses until the stack runs out.
     #[test]
     fn a_self_referencing_node_is_pruned_rather_than_followed() {
-        let json = br#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"children":[0]}]}"#;
-        let mut chunk = json.to_vec();
-        while !chunk.len().is_multiple_of(4) {
-            chunk.push(b' ');
-        }
-        let mut glb = Vec::new();
-        glb.extend_from_slice(b"glTF");
-        glb.extend_from_slice(&2u32.to_le_bytes());
-        glb.extend_from_slice(&((12 + 8 + chunk.len()) as u32).to_le_bytes());
-        glb.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
-        glb.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
-        glb.extend_from_slice(&chunk);
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"children":[0]}]}"#;
 
         // The walk terminates; there is no geometry in it, so the
         // ordinary "nothing to voxelize" refusal is what comes back.
-        let error = voxelize_glb(&glb, 32).expect_err("this file has no triangles");
+        let error = voxelize_glb(&glb(json, &[]), 32).expect_err("this file has no triangles");
         assert!(
             error.to_string().contains("no triangle primitives"),
             "unexpected error: {error}"
         );
+    }
+
+    /// A GLB container around `json`, with a BIN chunk when `bin` is
+    /// non-empty. Both chunks are padded to 4 bytes as the format wants.
+    fn glb(json: &str, bin: &[u8]) -> Vec<u8> {
+        let mut json = json.as_bytes().to_vec();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut bin = bin.to_vec();
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let bin_chunk = if bin.is_empty() { 0 } else { 8 + bin.len() };
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&((12 + 8 + json.len() + bin_chunk) as u32).to_le_bytes());
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json);
+        if !bin.is_empty() {
+            out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+            out.extend_from_slice(b"BIN\0");
+            out.extend_from_slice(&bin);
+        }
+        out
+    }
+
+    /// The spec requires a `mimeType` on an image in a buffer view and a
+    /// `uri` otherwise; gltf checks neither, and `Image::source` unwraps both.
+    #[test]
+    fn an_image_missing_its_mime_type_or_uri_is_skipped() {
+        let json = r#"{"asset":{"version":"2.0"},
+            "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}},
+                         {"pbrMetallicRoughness":{"baseColorTexture":{"index":1}}}],
+            "textures":[{"source":0},{"source":1}],
+            "images":[{"bufferView":0},{}],
+            "bufferViews":[{"buffer":0,"byteLength":4}],
+            "buffers":[{"byteLength":4}]}"#;
+
+        let error = voxelize_glb(&glb(json, &[0; 4]), 8).expect_err("this file has no triangles");
+        assert!(
+            error.to_string().contains("no triangle primitives"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn an_image_view_past_the_address_space_is_skipped() {
+        let json = r#"{"asset":{"version":"2.0"},
+            "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}}],
+            "textures":[{"source":0}],
+            "images":[{"bufferView":0,"mimeType":"image/png"}],
+            "bufferViews":[{"buffer":0,"byteOffset":18446744073709551615,"byteLength":4}],
+            "buffers":[{"byteLength":4}]}"#;
+
+        let error = voxelize_glb(&glb(json, &[0; 4]), 8).expect_err("this file has no triangles");
+        assert!(
+            error.to_string().contains("no triangle primitives"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A unit quad built from `primitive`. Accessors 0–1 are a valid POSITION
+    /// and index list; 2–5 re-read it in layouts glTF forbids (BYTE colours, VEC3
+    /// UVs, FLOAT indices, VEC2 positions); 6 has NaN x; 7–9 point off their data.
+    fn quad_glb(primitive: &str) -> Vec<u8> {
+        let mut bin = Vec::new();
+        for p in [[0f32, 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]] {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        for i in [0u16, 1, 2, 0, 2, 3] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        for p in [
+            [f32::NAN, 0., 0.],
+            [f32::NAN, 0., 0.],
+            [f32::NAN, 1., 0.],
+            [f32::NAN, 1., 0.],
+        ] {
+            for c in p {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"meshes":[{{"primitives":[{primitive}]}}],
+            "accessors":[
+                {{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+                {{"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}},
+                {{"bufferView":0,"componentType":5120,"count":4,"type":"VEC3"}},
+                {{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"}},
+                {{"bufferView":0,"componentType":5126,"count":6,"type":"SCALAR"}},
+                {{"bufferView":0,"componentType":5126,"count":4,"type":"VEC2","min":[0,0,0],"max":[1,1,0]}},
+                {{"bufferView":2,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+                {{"bufferView":0,"componentType":5126,"count":0,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+                {{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0],
+                  "sparse":{{"count":0,"indices":{{"bufferView":1,"componentType":5123}},"values":{{"bufferView":0}}}}}},
+                {{"bufferView":0,"byteOffset":18446744073709551600,"componentType":5126,"count":4,"type":"VEC3",
+                  "min":[0,0,0],"max":[1,1,0]}}],
+            "bufferViews":[{{"buffer":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":12}},
+                           {{"buffer":0,"byteOffset":60,"byteLength":48}}],
+            "buffers":[{{"byteLength":108}}]}}"#
+        );
+        glb(&json, &bin)
+    }
+
+    #[test]
+    fn a_colour_or_uv_layout_gltf_forbids_is_ignored_with_a_note() {
+        for (what, primitive) in [
+            (
+                "BYTE colours",
+                r#"{"attributes":{"POSITION":0,"COLOR_0":2},"indices":1}"#,
+            ),
+            (
+                "VEC3 UVs",
+                r#"{"attributes":{"POSITION":0,"TEXCOORD_0":3},"indices":1}"#,
+            ),
+        ] {
+            let patch =
+                voxelize_glb(&quad_glb(primitive), 8).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+            assert!(
+                !patch.voxels.is_empty(),
+                "{what}: the geometry is fine and should import"
+            );
+            assert!(
+                patch
+                    .notes
+                    .iter()
+                    .any(|n| n.contains("glTF does not allow")),
+                "{what}: nothing tells the user, notes {:?}",
+                patch.notes
+            );
+        }
+    }
+
+    /// gltf subtracts the 12-byte header from the declared length before
+    /// it compares, so a declared length under 12 underflowed.
+    #[test]
+    fn a_glb_declaring_a_length_shorter_than_its_header_is_refused() {
+        let mut bytes = glb(r#"{"asset":{"version":"2.0"}}"#, &[]);
+        bytes[8..12].copy_from_slice(&8u32.to_le_bytes());
+        let error = voxelize_glb(&bytes, 8).expect_err("the header is malformed");
+        assert!(
+            format!("{error:#}").contains("length"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    /// gltf's own validation indexes `accessors[POSITION]` before it
+    /// checks the index exists, so this used to panic inside parsing.
+    #[test]
+    fn a_position_naming_a_missing_accessor_is_refused() {
+        let bytes = quad_glb(r#"{"attributes":{"POSITION":99},"indices":1}"#);
+        let error = voxelize_glb(&bytes, 8).expect_err("the file is malformed");
+        assert!(
+            format!("{error:#}").contains("POSITION"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    /// A NaN on one axis of every vertex left the bounding box at ±inf there,
+    /// and the grid's last-cell index overflowed on the way to `i32`.
+    #[test]
+    fn a_part_with_non_finite_positions_is_skipped() {
+        let nan_only = r#"{"attributes":{"POSITION":6},"indices":1}"#;
+        let error = voxelize_glb(&quad_glb(nan_only), 8).expect_err("nothing finite to voxelize");
+        assert!(
+            error.to_string().contains("no triangle primitives"),
+            "unexpected error: {error}"
+        );
+
+        let mixed = r#"{"attributes":{"POSITION":0},"indices":1},{"attributes":{"POSITION":6},"indices":1}"#;
+        let patch = voxelize_glb(&quad_glb(mixed), 8).expect("the finite part imports");
+        assert!(!patch.voxels.is_empty());
+        assert!(
+            patch
+                .notes
+                .iter()
+                .any(|n| n.contains("glTF does not allow")),
+            "nothing tells the user, notes {:?}",
+            patch.notes
+        );
+    }
+
+    /// gltf's readers compute `offset + stride × (count − 1) + size`
+    /// unchecked, so an empty or far-off accessor underflowed or overflowed.
+    #[test]
+    fn an_accessor_that_points_off_its_data_drops_the_part() {
+        for (what, accessor) in [
+            ("count 0", 7),
+            ("sparse count 0", 8),
+            ("offset past usize", 9),
+        ] {
+            let primitive = format!(r#"{{"attributes":{{"POSITION":{accessor}}},"indices":1}}"#);
+            let error = voxelize_glb(&quad_glb(&primitive), 8).expect_err(what);
+            assert!(
+                error.to_string().contains("no triangle primitives"),
+                "{what}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_position_or_index_layout_gltf_forbids_drops_the_part() {
+        for (what, primitive) in [
+            (
+                "FLOAT indices",
+                r#"{"attributes":{"POSITION":0},"indices":4}"#,
+            ),
+            ("VEC2 positions", r#"{"attributes":{"POSITION":5}}"#),
+        ] {
+            let error = voxelize_glb(&quad_glb(primitive), 8).expect_err(what);
+            assert!(
+                error.to_string().contains("no triangle primitives"),
+                "{what}: {error}"
+            );
+        }
     }
 
     /// Vertices around 2e10 overflow the `f32` cross product to
@@ -923,6 +1302,36 @@ mod tests {
             grid.len(),
             max_grid
         );
+    }
+
+    /// An edge near 2e19 squares past `f32::MAX` while the box around it
+    /// stays finite, so the edge term alone saturates the cast.
+    #[test]
+    fn a_triangle_whose_edge_length_overflows_samples_a_bounded_grid() {
+        let c = [255u8, 255, 255, 255];
+        let far = Vec3::new(2.0e19, 1.0, 0.0);
+        let tri = Triangle {
+            v0: Vec3::ZERO,
+            v1: Vec3::new(2.0e19, 0.0, 0.0),
+            v2: Vec3::new(0.0, 1.0, 0.0),
+            c0: c,
+            c1: c,
+            c2: c,
+        };
+        let resolution = 32u32;
+        assert!(
+            (tri.v1 - tri.v0).length().is_infinite(),
+            "precondition: this edge's length overflows f32"
+        );
+
+        let grid = rasterize_triangles(
+            &[tri],
+            Vec3::ZERO,
+            far,
+            far.x / resolution as f32,
+            resolution,
+        );
+        assert!(!grid.is_empty());
     }
 
     #[test]

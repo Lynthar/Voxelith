@@ -2,7 +2,7 @@
 //! every version reads it). v200 reading flattens the scene graph into
 //! one grid; material, layer, camera and render chunks are discarded.
 
-use crate::core::{Voxel, World};
+use crate::core::{Voxel, World, CHUNK_SIZE};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use thiserror::Error;
@@ -228,13 +228,12 @@ fn decode_rotation_byte(rot: u8) -> Option<[[i32; 3]; 3]> {
 /// Apply a 3×3 integer rotation matrix to a vector. Rotation
 /// matrices in this format are signed permutations, so the result
 /// is exact integer (no rounding).
-fn apply_rotation(m: [[i32; 3]; 3], v: (i32, i32, i32)) -> (i32, i32, i32) {
+fn apply_rotation(m: [[i32; 3]; 3], v: (i64, i64, i64)) -> (i64, i64, i64) {
     let arr = [v.0, v.1, v.2];
-    (
-        m[0][0] * arr[0] + m[0][1] * arr[1] + m[0][2] * arr[2],
-        m[1][0] * arr[0] + m[1][1] * arr[1] + m[1][2] * arr[2],
-        m[2][0] * arr[0] + m[2][1] * arr[1] + m[2][2] * arr[2],
-    )
+    let row = |r: [i32; 3]| {
+        i64::from(r[0]) * arr[0] + i64::from(r[1]) * arr[1] + i64::from(r[2]) * arr[2]
+    };
+    (row(m[0]), row(m[1]), row(m[2]))
 }
 
 /// 3×3 matrix multiplication (a × b, applied right-to-left so
@@ -546,7 +545,7 @@ impl VoxScene {
         &self,
         world: &mut World,
         node_id: i32,
-        translation: (i32, i32, i32),
+        translation: (i64, i64, i64),
         rotation: [[i32; 3]; 3],
         path: &mut std::collections::HashSet<i32>,
         depth: usize,
@@ -580,10 +579,15 @@ impl VoxScene {
                     translation: local_t,
                     rotation: local_r,
                 } => {
-                    // Apply parent rotation to local translation, then
-                    // add to parent translation. Rotation composes as
-                    // parent × local.
-                    let rotated_t = apply_rotation(rotation, *local_t);
+                    // Parent rotation applies to the local translation,
+                    // which then adds on; rotation composes parent × local.
+                    // `i64` holds MAX_SCENE_DEPTH levels of `i32` offsets.
+                    let local_t = (
+                        i64::from(local_t.0),
+                        i64::from(local_t.1),
+                        i64::from(local_t.2),
+                    );
+                    let rotated_t = apply_rotation(rotation, local_t);
                     let new_t = (
                         translation.0 + rotated_t.0,
                         translation.1 + rotated_t.1,
@@ -618,7 +622,18 @@ impl VoxScene {
                 SceneNode::Shape { model_id } => {
                     if let Some(model) = self.models.get(*model_id as usize) {
                         if limits.charge(model.voxels.len() as u64) {
-                            place_model(world, model, &self.palette, translation, rotation);
+                            let dropped =
+                                place_model(world, model, &self.palette, translation, rotation);
+                            if dropped > 0 {
+                                log::warn!(
+                                    "VOX: {dropped} voxels of model {model_id} land outside \
+                                     the coordinates a project can store; left out"
+                                );
+                                notes.add(
+                                    "part of the scene lies beyond the coordinates a project \
+                                     can store and was left out",
+                                );
+                            }
                             if world.chunk_count() > limits.max_chunks {
                                 limits.stop("scene expands to too much of the world");
                             }
@@ -744,8 +759,8 @@ fn rotate_world_z_up_to_y_up(src: &World) -> World {
 /// Map a model-space cell index through a signed-permutation rotation.
 /// A voxel is a cell, so a mirrored axis contributes `size-1-p`, not
 /// `-p` — the point formula shifts even-sized models one cell.
-fn rotate_cell(rotation: [[i32; 3]; 3], p: [i32; 3], size: [i32; 3]) -> (i32, i32, i32) {
-    let mut out = [0i32; 3];
+fn rotate_cell(rotation: [[i32; 3]; 3], p: [i64; 3], size: [i64; 3]) -> (i64, i64, i64) {
+    let mut out = [0i64; 3];
     for (row, out_axis) in out.iter_mut().enumerate() {
         // Exactly one column per row is non-zero (validated in
         // `decode_rotation_byte`); a zero row can only come from
@@ -765,31 +780,51 @@ fn rotate_cell(rotation: [[i32; 3]; 3], p: [i32; 3], size: [i32; 3]) -> (i32, i3
 
 /// Place one model into the world at `translation`, rotated by
 /// `rotation` around the model's pivot. Skips palette index 0
-/// (empty/transparent).
+/// (empty/transparent). Returns how many voxels landed outside
+/// [`storable`] and were left out.
 fn place_model(
     world: &mut World,
     model: &VoxModelData,
     palette: &[[u8; 4]; 256],
-    translation: (i32, i32, i32),
+    translation: (i64, i64, i64),
     rotation: [[i32; 3]; 3],
-) {
+) -> usize {
     let size = [
-        model.size.0 as i32,
-        model.size.1 as i32,
-        model.size.2 as i32,
+        i64::from(model.size.0),
+        i64::from(model.size.1),
+        i64::from(model.size.2),
     ];
+    let mut dropped = 0;
     for &(x, y, z, color_idx) in &model.voxels {
         if color_idx == 0 {
             continue;
         }
-        let rotated = rotate_cell(rotation, [x as i32, y as i32, z as i32], size);
-        let world_pos = (
-            translation.0 + rotated.0,
-            translation.1 + rotated.1,
-            translation.2 + rotated.2,
-        );
+        let rotated = rotate_cell(rotation, [x.into(), y.into(), z.into()], size);
+        let (Some(wx), Some(wy), Some(wz)) = (
+            storable(translation.0 + rotated.0),
+            storable(translation.1 + rotated.1),
+            storable(translation.2 + rotated.2),
+        ) else {
+            dropped += 1;
+            continue;
+        };
         let voxel = voxel_from_palette(palette[color_idx as usize]);
-        world.set_voxel(world_pos.0, world_pos.1, world_pos.2, voxel);
+        world.set_voxel(wx, wy, wz, voxel);
+    }
+    dropped
+}
+
+/// Cells a `.vxlt` can hold, per axis. A placement past this would save
+/// into a project that refuses to reopen, and at `i32::MIN` the Y-up
+/// turn's negation overflows.
+const MAX_PLACED_COORD: i64 = super::project::MAX_CHUNK_COORD as i64 * CHUNK_SIZE as i64;
+
+/// `v` as a world coordinate, or `None` past [`MAX_PLACED_COORD`].
+fn storable(v: i64) -> Option<i32> {
+    if (-MAX_PLACED_COORD..MAX_PLACED_COORD).contains(&v) {
+        i32::try_from(v).ok()
+    } else {
+        None
     }
 }
 
@@ -1415,7 +1450,7 @@ mod tests {
     }
 
     /// Every cell of a filled `size` box, run through `rotate_cell`.
-    fn rotated_box(rotation: [[i32; 3]; 3], size: [i32; 3]) -> HashSet<(i32, i32, i32)> {
+    fn rotated_box(rotation: [[i32; 3]; 3], size: [i64; 3]) -> HashSet<(i64, i64, i64)> {
         let mut out = HashSet::new();
         for x in 0..size[0] {
             for y in 0..size[1] {
@@ -2144,5 +2179,91 @@ mod tests {
             overflow >= 1,
             "expected at least one overflow color, got {overflow}"
         );
+    }
+
+    /// Four ways a file's numbers leave `i32` on the way to the world:
+    /// each used to panic under overflow checks and wrap in release.
+    #[test]
+    fn v200_placements_past_i32_are_left_out_with_a_note() {
+        let mut nested = build_unit_model(1);
+        nested.extend_from_slice(&build_rgba_chunk([255, 0, 0, 255]));
+        nested.extend_from_slice(&build_chunk(
+            b"nTRN",
+            &build_ntrn_content(0, 1, (2_000_000_000, 0, 0), None),
+        ));
+        nested.extend_from_slice(&build_chunk(b"nGRP", &build_ngrp_content(1, &[3])));
+        nested.extend_from_slice(&build_chunk(
+            b"nTRN",
+            &build_ntrn_content(3, 2, (2_000_000_000, 0, 0), None),
+        ));
+        nested.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(2, &[0])));
+
+        let cases = [
+            (
+                "translation plus model offset",
+                build_v200_placed(
+                    &build_model((3, 1, 1), &[(2, 0, 0, 1)]),
+                    (i32::MAX, 0, 0),
+                    None,
+                ),
+                false,
+            ),
+            ("nested translations", build_v200_file(&nested), false),
+            (
+                "SIZE past i32 on a mirrored axis",
+                build_v200_placed(
+                    &build_model((0x8000_0000, 1, 1), &[(0, 0, 0, 1)]),
+                    (0, 0, 0),
+                    Some(0x14),
+                ),
+                false,
+            ),
+            (
+                "a voxel at i32::MIN turned Y-up",
+                build_v200_placed(&build_unit_model(1), (0, i32::MIN, 0), None),
+                true,
+            ),
+        ];
+        for (what, file, convert_axes) in cases {
+            let import = import_vox(&mut file.as_slice(), convert_axes).unwrap();
+            assert_eq!(
+                solid_voxels(&import.world),
+                0,
+                "{what}: the voxel should be left out"
+            );
+            assert!(
+                import
+                    .notes
+                    .iter()
+                    .any(|n| n.contains("beyond the coordinates")),
+                "{what}: nothing tells the user, notes {:?}",
+                import.notes
+            );
+        }
+    }
+
+    /// The ceiling is the one `.vxlt` enforces on load: a voxel inside it
+    /// survives a save and reopen, one past it never enters the world.
+    #[test]
+    fn v200_placement_ceiling_is_what_a_project_can_reopen() {
+        let edge = MAX_PLACED_COORD as i32;
+        for x in [-edge, edge - 1] {
+            let file = build_v200_placed(&build_unit_model(1), (x, 0, 0), None);
+            let world = import_vox(&mut file.as_slice(), false).unwrap().world;
+            assert_eq!(solid_voxels(&world), 1, "x = {x} is inside the ceiling");
+
+            let mut saved = Vec::new();
+            crate::io::Project::from_world(&world)
+                .save(&mut saved)
+                .unwrap();
+            let reopened = crate::io::Project::load(&mut saved.as_slice())
+                .and_then(|p| p.to_world())
+                .unwrap_or_else(|e| panic!("x = {x}: the saved project will not reopen: {e}"));
+            assert_eq!(solid_voxels(&reopened), 1);
+        }
+
+        let file = build_v200_placed(&build_unit_model(1), (edge, 0, 0), None);
+        let world = import_vox(&mut file.as_slice(), false).unwrap().world;
+        assert_eq!(solid_voxels(&world), 0, "x = {edge} is past the ceiling");
     }
 }

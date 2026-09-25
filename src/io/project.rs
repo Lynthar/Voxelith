@@ -38,7 +38,7 @@ const MAX_RLE_BYTES: usize = CHUNK_VOLUME * 10;
 /// Ceiling on chunk coordinates read from a file, per axis. Cells are
 /// `chunk * 32 + 0..=31`, which overflows near `i32::MAX`; ±2^24 chunks
 /// leaves headroom for every AABB derived from one.
-const MAX_CHUNK_COORD: i32 = 1 << 24;
+pub(super) const MAX_CHUNK_COORD: i32 = 1 << 24;
 
 /// Errors that can occur when reading/writing project files
 #[derive(Debug, Error)]

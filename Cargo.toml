@@ -14,6 +14,11 @@ repository = "https://github.com/Lynthar/Voxelith"
 # `eval` needs 1.82 — so a headless build is not the cheaper case here.
 rust-version = "1.88"
 
+# The fuzz targets share this lockfile, so the parsers are fuzzed
+# against the dependency versions that ship.
+[workspace]
+members = ["fuzz"]
+
 [features]
 default = ["gui", "mcp"]
 # The interactive editor: window, GPU, egui panels, native file pickers.
@@ -115,11 +120,10 @@ rayon = "1.10"
 noise = "0.9"
 rand = "0.8"
 
-# Reading glTF: `io::voxelize` parses an incoming `.glb` so File ▸ Import
-# can turn a mesh into voxels. Export is unrelated and needs nothing from
-# here — `io::gltf` is this crate's own module and writes the format by
-# hand.
-gltf = "1"
+# Import only (`io::voxelize`); export is written by hand in `io::gltf`.
+# `extras` makes it accept `_`-prefixed attributes, our own `_TINTZONE`
+# included — without it such a file is refused whole.
+gltf = { version = "1", features = ["extras"] }
 
 # Async runtime. Owned by `mcp`, which is the only thing that needs one:
 # the stdio/HTTP servers, and — because `gui` implies `mcp-http` — the

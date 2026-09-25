@@ -1,0 +1,83 @@
+name: Fuzz
+
+# The three importers read files nobody here wrote. Each target runs a
+# minute from the committed seeds; a crash fails the job and its input is
+# uploaded, so it can be replayed with `cargo fuzz run <target> <file>`.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/fuzz.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/fuzz.yml"
+  # Weekly as well: a longer-lived corpus is not kept, so every run
+  # starts from the seeds and a different random walk.
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: vox
+            dict: -dict=fuzz/vox.dict
+          - target: glb
+            dict: -dict=fuzz/glb.dict
+          - target: vxlt
+            dict: ""
+    env:
+      TARGET: ${{ matrix.target }}
+      DICT: ${{ matrix.dict }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # libFuzzer and the sanitizer flags cargo-fuzz passes need nightly.
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+
+      - name: Build
+        run: cargo fuzz build "$TARGET"
+
+      - name: Fuzz for 60 s
+        run: |
+          mkdir -p "fuzz/corpus/$TARGET"
+          cargo fuzz run "$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -- \
+            $DICT -max_total_time=60 -rss_limit_mb=2048 -timeout=10
+
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
