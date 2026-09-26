@@ -775,17 +775,26 @@ mod tests {
         // HTTP, where the caller is whoever reached the port.
         let dir = scratch("confined");
         let server = server(&dir);
-        let outside = "../voxelith_mcp_confined_elsewhere.vxlt";
+        // Where an escape would land: the root's sibling, named per
+        // process and swept first, so a stray from another run can't
+        // fail this one and a fresh one is unmistakably ours.
+        let stray = format!(
+            "voxelith_mcp_confined_elsewhere_{}.vxlt",
+            std::process::id()
+        );
+        let landing = std::env::temp_dir().join(&stray);
+        let _ = std::fs::remove_file(&landing);
+        let outside = format!("../{stray}");
 
         for result in [
             server.open_project(Parameters(PathArgs {
-                path: outside.into(),
+                path: outside.clone(),
             })),
             server.save_project(Parameters(SaveArgs {
-                path: Some(outside.into()),
+                path: Some(outside.clone()),
             })),
             server.export(Parameters(PathArgs {
-                path: outside.into(),
+                path: outside.clone(),
             })),
         ] {
             let result = result.unwrap();
@@ -795,8 +804,9 @@ mod tests {
                 serde_json::json!("path_refused")
             );
         }
-        assert!(!dir.join("../voxelith_mcp_confined_elsewhere.vxlt").exists());
+        assert!(!landing.exists(), "an escape wrote {}", landing.display());
 
+        let _ = std::fs::remove_file(&landing);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -281,4 +281,105 @@ mod tests {
             "{line}"
         );
     }
+
+    /// The documented answers: an `Origin` is 403, a missing or wrong
+    /// token 401 — and a 401 carries `WWW-Authenticate` (RFC 9110 §15.5.2).
+    #[test]
+    fn each_denial_answers_with_its_documented_status() {
+        assert_eq!(
+            Denial::BrowserOrigin.into_response().status(),
+            StatusCode::FORBIDDEN
+        );
+        for denial in [Denial::MissingToken, Denial::BadToken] {
+            let response = denial.into_response();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{denial:?}");
+            let challenge = response
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok());
+            assert_eq!(challenge, Some("Bearer"), "{denial:?}");
+        }
+    }
+
+    /// The body is a JSON-RPC 2.0 error whose message names the fix the
+    /// setup line documents: the header to send, that the token changes
+    /// per restart, that an Origin is what was refused.
+    #[tokio::test]
+    async fn a_refusal_body_is_a_json_rpc_error_that_names_the_fix() {
+        for (denial, fix) in [
+            (Denial::BrowserOrigin, "Origin"),
+            (Denial::MissingToken, "Authorization: Bearer"),
+            (Denial::BadToken, "restart"),
+        ] {
+            let response = denial.into_response();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("a refusal body is small");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON body");
+            assert_eq!(body["jsonrpc"], "2.0", "{denial:?}");
+            assert!(body["error"]["code"].is_i64(), "{denial:?}: {body}");
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(fix),
+                "{denial:?} should mention {fix:?}: {message}"
+            );
+        }
+    }
+
+    fn status_of(address: std::net::SocketAddr, extra_headers: &str) -> u16 {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(address).expect("connect to the test server");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("set a read timeout");
+        write!(
+            stream,
+            "GET /probe HTTP/1.1\r\nHost: {address}\r\n{extra_headers}Connection: close\r\n\r\n"
+        )
+        .expect("write the request");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// `guarded` is the whole access control: a route behind it answers
+    /// 401 bare, 403 to a browser, and only the token gets through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guarded_puts_the_check_in_front_of_every_route() {
+        use axum::routing::get;
+
+        let app = guarded(
+            axum::Router::new().route("/probe", get(|| async { "ok" })),
+            token(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let address = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let probe = |headers: &'static str| {
+            tokio::task::spawn_blocking(move || status_of(address, headers))
+        };
+        assert_eq!(probe("").await.unwrap(), 401);
+        assert_eq!(
+            probe("Origin: https://evil.example\r\nAuthorization: Bearer s3cret-token\r\n")
+                .await
+                .unwrap(),
+            403
+        );
+        assert_eq!(
+            probe("Authorization: Bearer s3cret-token\r\n")
+                .await
+                .unwrap(),
+            200
+        );
+        server.abort();
+    }
 }
