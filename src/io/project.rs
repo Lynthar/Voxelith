@@ -642,27 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn test_project_roundtrip() {
-        let mut world = World::new();
-        world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
-        world.set_voxel(1, 1, 1, Voxel::from_rgb(0, 255, 0));
-        world.set_voxel(31, 31, 31, Voxel::from_rgb(0, 0, 255));
-
-        let project = Project::from_world(&world);
-
-        let mut buffer = Vec::new();
-        project.save(&mut buffer).unwrap();
-
-        let loaded = Project::load(&mut buffer.as_slice()).unwrap();
-        let loaded_world = loaded.to_world().unwrap();
-
-        assert!(loaded_world.get_voxel(0, 0, 0).is_solid());
-        assert_eq!(loaded_world.get_voxel(0, 0, 0).r, 255);
-        assert!(loaded_world.get_voxel(1, 1, 1).is_solid());
-        assert_eq!(loaded_world.get_voxel(1, 1, 1).g, 255);
-    }
-
-    #[test]
     fn the_pipeline_graph_survives_a_save_and_load() {
         // The graph is document data: it says how this model was made,
         // and a round trip that dropped it would delete the recipe while

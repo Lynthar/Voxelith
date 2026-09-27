@@ -579,13 +579,7 @@ impl Drop for RunningBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn batch() -> OpsBatch {
-        serde_json::from_str(
-            r#"{"version":1,"ops":[{"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":{"rgb":[1,2,3]}}]}"#,
-        )
-        .expect("test batch should parse")
-    }
+    use crate::agent_ops::tests::parse;
 
     fn status() -> BridgeStatus {
         BridgeStatus {
@@ -639,7 +633,10 @@ mod tests {
             std::thread::yield_now();
         });
 
-        let reply = handle.call(AgentRequest::ApplyOps(Box::new(batch()))).await;
+        let batch = parse(
+            r#"{"version":1,"ops":[{"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":{"rgb":[1,2,3]}}]}"#,
+        );
+        let reply = handle.call(AgentRequest::ApplyOps(Box::new(batch))).await;
         let refusal = reply.err().expect("a dropped call must refuse, not hang");
         assert_eq!(refusal.code, "editor_unavailable");
     }

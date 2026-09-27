@@ -654,6 +654,7 @@ pub async fn serve_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_ops::tests::parse;
     use crate::core::{Voxel, World};
     use crate::io;
 
@@ -687,7 +688,7 @@ mod tests {
     ]}"#;
 
     fn batch(json: &str) -> Parameters<OpsBatch> {
-        Parameters(serde_json::from_str(json).expect("test batch should parse"))
+        Parameters(parse(json))
     }
 
     #[test]

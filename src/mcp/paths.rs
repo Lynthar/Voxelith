@@ -181,10 +181,13 @@ mod tests {
         let tmp = scratch();
         let dir = tmp.path();
         let root = root(dir);
+        // Each lands in the root's parent, which exists: the refusal is
+        // `Outside`, the variant that tells the agent to stay in the root.
         for attempt in ["../outside.vxlt", "nested/../../outside.vxlt", ".."] {
+            let refused = root.resolve(attempt);
             assert!(
-                root.resolve(attempt).is_err(),
-                "{attempt} should not have resolved"
+                matches!(refused, Err(PathError::Outside { .. })),
+                "{attempt}: {refused:?}"
             );
         }
         // …while a `..` that stays inside is not the enemy.

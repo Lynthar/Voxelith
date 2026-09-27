@@ -863,13 +863,8 @@ fn check_region(region: Selection) -> Result<(), OpsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_ops::{
-        AgentSession, ApplyReport, OpsBatch, MAX_GRAPH_SOURCES, MAX_OPS_PER_BATCH,
-    };
-
-    fn parse(json: &str) -> OpsBatch {
-        serde_json::from_str(json).expect("test batch should parse")
-    }
+    use crate::agent_ops::tests::parse;
+    use crate::agent_ops::{AgentSession, ApplyReport, MAX_GRAPH_SOURCES, MAX_OPS_PER_BATCH};
 
     /// A document with nothing in it, borrowed for the scratch tests
     /// that only exercise the budget.

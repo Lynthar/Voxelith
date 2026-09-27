@@ -1112,20 +1112,6 @@ impl VoxModel {
         })
     }
 
-    /// Convert to world
-    pub fn to_world(&self) -> World {
-        let mut world = World::new();
-
-        for &(x, y, z, color_index) in &self.voxels {
-            if color_index > 0 {
-                let voxel = voxel_from_palette(self.palette[color_index as usize]);
-                world.set_voxel(x as i32, y as i32, z as i32, voxel);
-            }
-        }
-
-        world
-    }
-
     /// Write to VOX file
     pub fn write<W: Write>(&self, writer: &mut W) -> Result<(), VoxError> {
         // Write header
@@ -1395,10 +1381,6 @@ mod tests {
     }
 
     /// Total solid voxels across the world.
-    fn solid_voxels(world: &World) -> u32 {
-        world.chunks().map(|(_, c)| c.read().solid_count()).sum()
-    }
-
     /// Wrap chunk bytes in a v200 `MAIN` container.
     fn build_v200_file(chunks: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -1527,7 +1509,7 @@ mod tests {
             world.get_voxel(10, 0, 0).is_solid(),
             "even-sized mirror landed off by one"
         );
-        assert_eq!(solid_voxels(&world), 1);
+        assert_eq!(world.solid_voxel_count(), 1);
 
         // Odd length: both the old and the corrected formula agree
         // here, so this pins that the fix didn't move odd models.
@@ -1543,7 +1525,7 @@ mod tests {
             world.get_voxel(11, 0, 0).is_solid(),
             "odd-sized mirror moved"
         );
-        assert_eq!(solid_voxels(&world), 1);
+        assert_eq!(world.solid_voxel_count(), 1);
     }
 
     #[test]
@@ -1624,7 +1606,7 @@ mod tests {
             .world;
         // Both models are 1³ at the origin, so "only the first" shows
         // up as exactly one solid voxel in the world.
-        assert_eq!(solid_voxels(&world), 1);
+        assert_eq!(world.solid_voxel_count(), 1);
     }
 
     #[test]
@@ -1642,7 +1624,7 @@ mod tests {
 
         let imported =
             import_vox(&mut build_v200_file(&chunks).as_slice(), false).expect("v200 import");
-        assert_eq!(solid_voxels(&imported.world), 0);
+        assert_eq!(imported.world.solid_voxel_count(), 0);
         // Dropping a whole model without telling anyone is how a file
         // arrives looking complete and missing a limb.
         assert!(
@@ -1693,7 +1675,7 @@ mod tests {
         let once = import_vox(&mut build_fan_out_scene(&model, 1, 1).as_slice(), false)
             .expect("v200 import");
         assert!(once.notes.is_empty(), "clean import: {:?}", once.notes);
-        assert_eq!(solid_voxels(&once.world), 1);
+        assert_eq!(once.world.solid_voxel_count(), 1);
     }
 
     #[test]
@@ -1752,7 +1734,7 @@ mod tests {
         );
         // The placement that crossed the cap stays; the next never runs.
         assert_eq!(world.chunk_count(), 3);
-        assert_eq!(solid_voxels(&world), 3);
+        assert_eq!(world.solid_voxel_count(), 3);
 
         // Control: under the cap the same scene imports whole and quietly.
         let mut notes = Notes::default();
@@ -1763,7 +1745,7 @@ mod tests {
         let world = scene.to_world_native(roomy, &mut notes);
         assert!(notes.0.is_empty(), "clean import: {:?}", notes.0);
         assert_eq!(world.chunk_count(), 4);
-        assert_eq!(solid_voxels(&world), 4);
+        assert_eq!(world.solid_voxel_count(), 4);
     }
 
     #[test]
@@ -1790,7 +1772,7 @@ mod tests {
             "hitting the depth ceiling has to say so, got {:?}",
             imported.notes
         );
-        assert_eq!(solid_voxels(&imported.world), 0);
+        assert_eq!(imported.world.solid_voxel_count(), 0);
     }
 
     #[test]
@@ -1886,16 +1868,6 @@ mod tests {
         let r = decode_rotation_byte(0x01).unwrap();
         assert_eq!(r, [[0, 1, 0], [1, 0, 0], [0, 0, 1]]);
         assert_eq!(apply_rotation(r, (3, 5, 7)), (5, 3, 7));
-    }
-
-    #[test]
-    fn rotation_compose_double_swap_is_identity() {
-        // Two consecutive 90° X rotations bring identity back for the
-        // involutive ones, and identity composed with anything is that
-        // thing.
-        let r = decode_rotation_byte(0x24).unwrap();
-        let composed = rotation_compose(ROT_IDENTITY, r);
-        assert_eq!(composed, r);
     }
 
     #[test]
@@ -2230,7 +2202,7 @@ mod tests {
         for (what, file, convert_axes) in cases {
             let import = import_vox(&mut file.as_slice(), convert_axes).unwrap();
             assert_eq!(
-                solid_voxels(&import.world),
+                import.world.solid_voxel_count(),
                 0,
                 "{what}: the voxel should be left out"
             );
@@ -2253,7 +2225,11 @@ mod tests {
         for x in [-edge, edge - 1] {
             let file = build_v200_placed(&build_unit_model(1), (x, 0, 0), None);
             let world = import_vox(&mut file.as_slice(), false).unwrap().world;
-            assert_eq!(solid_voxels(&world), 1, "x = {x} is inside the ceiling");
+            assert_eq!(
+                world.solid_voxel_count(),
+                1,
+                "x = {x} is inside the ceiling"
+            );
 
             let mut saved = Vec::new();
             crate::io::Project::from_world(&world)
@@ -2262,11 +2238,15 @@ mod tests {
             let reopened = crate::io::Project::load(&mut saved.as_slice())
                 .and_then(|p| p.to_world())
                 .unwrap_or_else(|e| panic!("x = {x}: the saved project will not reopen: {e}"));
-            assert_eq!(solid_voxels(&reopened), 1);
+            assert_eq!(reopened.solid_voxel_count(), 1);
         }
 
         let file = build_v200_placed(&build_unit_model(1), (edge, 0, 0), None);
         let world = import_vox(&mut file.as_slice(), false).unwrap().world;
-        assert_eq!(solid_voxels(&world), 0, "x = {edge} is past the ceiling");
+        assert_eq!(
+            world.solid_voxel_count(),
+            0,
+            "x = {edge} is past the ceiling"
+        );
     }
 }

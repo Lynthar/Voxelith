@@ -541,13 +541,6 @@ mod tests {
         {"op":"box","min":[2,1,0],"max":[4,3,0],"voxel":"air"}
     ]}"#;
 
-    fn solid_voxels(world: &World) -> usize {
-        world
-            .chunks()
-            .map(|(_, chunk)| chunk.read().solid_count() as usize)
-            .sum()
-    }
-
     #[test]
     fn one_command_builds_a_model_saves_it_and_exports_a_glb() {
         // The P1 acceptance path end to end: an agent writes ops, gets a
@@ -591,7 +584,7 @@ mod tests {
 
         // The saved project must reopen with exactly what was reported.
         let (reloaded, _, _) = io::load_world_with_state(&project).unwrap();
-        assert_eq!(solid_voxels(&reloaded) as u64, report.voxel_count);
+        assert_eq!(reloaded.solid_voxel_count(), report.voxel_count);
     }
 
     #[test]
@@ -630,7 +623,7 @@ mod tests {
         .expect("the run should succeed");
 
         let (world, state, _) = io::load_world_with_state(&project).unwrap();
-        assert_eq!(solid_voxels(&world), 2, "the edit landed");
+        assert_eq!(world.solid_voxel_count(), 2, "the edit landed");
         assert_eq!(state.camera_position, [12.0, 34.0, 56.0]);
         assert_eq!(state.palette, vec![[9, 8, 7, 255]]);
         assert_eq!(state.brush_flags, 0b11);
@@ -672,7 +665,7 @@ mod tests {
         );
 
         let (world, _, _) = io::load_world_with_state(&project).unwrap();
-        assert_eq!(solid_voxels(&world), 0, "the file must be untouched");
+        assert_eq!(world.solid_voxel_count(), 0, "the file must be untouched");
     }
 
     #[test]

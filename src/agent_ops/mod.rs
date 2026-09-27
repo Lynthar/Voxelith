@@ -440,11 +440,11 @@ fn report_of(dry_run: bool, applied_ops: usize, outcome: &mut compile::Outcome) 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::World;
 
-    fn parse(json: &str) -> OpsBatch {
+    pub(crate) fn parse(json: &str) -> OpsBatch {
         serde_json::from_str(json).expect("test batch should parse")
     }
 

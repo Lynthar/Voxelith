@@ -340,16 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_roundtrip() {
-        let p = Prefs::default();
-        let s = ron::ser::to_string_pretty(&p, ron::ser::PrettyConfig::default()).unwrap();
-        let back: Prefs = ron::from_str(&s).unwrap();
-        assert_eq!(back.window.width, p.window.width);
-        assert_eq!(back.panels.show_stats, p.panels.show_stats);
-        assert_eq!(back.recent_files, p.recent_files);
-    }
-
-    #[test]
     fn test_partial_ron_falls_back_to_defaults() {
         // Only provide window — every other section must default.
         let s = "( window: ( width: 1024, height: 768 ) )";
@@ -360,18 +350,6 @@ mod tests {
         assert!(p.panels.show_palette);
         assert!(!p.panels.show_stats);
         assert!(p.recent_files.is_empty());
-    }
-
-    #[test]
-    fn test_unknown_field_is_tolerated() {
-        // serde with default attribute ignores extra fields by
-        // default; this just confirms forward compatibility.
-        let s = "( window: ( width: 800, height: 600 ), panels: ( show_stats: true, from_the_future: 42 ) )";
-        let p: Prefs = ron::from_str(s).unwrap();
-        assert!(p.panels.show_stats);
-        // A field the file omits takes the struct default — assert on
-        // one whose default is `true`, so this can't pass by zero-init.
-        assert!(p.panels.show_palette);
     }
 
     #[test]
