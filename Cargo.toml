@@ -138,6 +138,9 @@ tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros
 # carry.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 # Embeds assets/branding/voxelith.ico into the .exe as its resource icon
 # (Explorer, taskbar pins, shortcuts). The running window's icon is a
 # separate mechanism — `window_icon()` in src/app/handler.rs. Keyed to

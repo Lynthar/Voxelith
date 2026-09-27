@@ -167,7 +167,8 @@ mod tests {
     #[test]
     fn test_export_empty_world_produces_header_only() {
         let world = World::new();
-        let dir = std::env::temp_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("voxelith_empty_export.obj");
         let stats = export_obj(&world, &path).unwrap();
         assert_eq!(stats.triangle_count, 0);
@@ -180,7 +181,6 @@ mod tests {
         assert!(s.contains("# Voxelith OBJ export"));
         assert!(s.contains("o Voxelith"));
         assert!(!s.contains("\nf "));
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -191,7 +191,8 @@ mod tests {
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.clear_dirty_flags();
 
-        let dir = std::env::temp_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("voxelith_one_voxel.obj");
         let stats = export_obj(&world, &path).unwrap();
         assert_eq!(stats.vertex_count, 24);
@@ -207,7 +208,6 @@ mod tests {
         assert_eq!(v_lines, 24);
         assert_eq!(vn_lines, 24);
         assert_eq!(f_lines, 12);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -218,11 +218,11 @@ mod tests {
         world.set_voxel(5, 0, 0, Voxel::from_rgb(0, 0, 255));
         world.clear_dirty_flags();
 
-        let dir = std::env::temp_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("voxelith_two_voxels.obj");
         let stats = export_obj(&world, &path).unwrap();
         assert_eq!(stats.triangle_count, 24); // 2 × 12
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -235,11 +235,11 @@ mod tests {
         world.set_voxel(1, 0, 0, Voxel::from_rgb(0, 0, 255));
         world.clear_dirty_flags();
 
-        let dir = std::env::temp_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("voxelith_two_adjacent.obj");
         let stats = export_obj(&world, &path).unwrap();
         assert_eq!(stats.triangle_count, 20);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -253,11 +253,11 @@ mod tests {
         world.set_voxel(1, 0, 0, c);
         world.clear_dirty_flags();
 
-        let dir = std::env::temp_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("voxelith_two_adjacent_same.obj");
         let stats = export_obj(&world, &path).unwrap();
         assert_eq!(stats.triangle_count, 12);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -273,13 +273,13 @@ mod tests {
         }
         world.clear_dirty_flags();
 
-        let dir = std::env::temp_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("voxelith_3x3.obj");
         let stats = export_obj(&world, &path).unwrap();
 
         let mut s = String::new();
         File::open(&path).unwrap().read_to_string(&mut s).unwrap();
-        let _ = std::fs::remove_file(&path);
 
         for line in s.lines().filter(|l| l.starts_with("f ")) {
             // Format: `f a//a b//b c//c`. Parse the three indices.

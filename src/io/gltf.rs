@@ -626,7 +626,8 @@ mod tests {
     #[test]
     fn test_export_empty_world_produces_valid_glb_no_bin() {
         let world = World::new();
-        let path = std::env::temp_dir().join("voxelith_empty.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_empty.glb");
         let stats = export_glb(&world, &[], &path).unwrap();
         assert_eq!(stats.vertex_count, 0);
         assert_eq!(stats.triangle_count, 0);
@@ -643,8 +644,6 @@ mod tests {
             "empty scene must omit the `nodes` key, not write an empty array"
         );
         assert!(json["meshes"].is_null(), "no meshes for empty world");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -652,7 +651,8 @@ mod tests {
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.clear_dirty_flags();
-        let path = std::env::temp_dir().join("voxelith_single.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_single.glb");
         let stats = export_glb(&world, &[], &path).unwrap();
 
         // Single voxel: 6 quads, 24 verts, 12 tris (greedy can't merge).
@@ -688,8 +688,6 @@ mod tests {
             bin.len(),
             expected
         );
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -701,7 +699,8 @@ mod tests {
         world.set_voxel(0, 0, 0, Voxel::from_rgb(255, 0, 0));
         world.set_voxel(2, 1, 3, Voxel::from_rgb(0, 255, 0));
         world.clear_dirty_flags();
-        let path = std::env::temp_dir().join("voxelith_bounds.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_bounds.glb");
         export_glb(&world, &[], &path).unwrap();
 
         let (json_bytes, _) = read_glb(&path);
@@ -717,8 +716,6 @@ mod tests {
         assert_eq!(max[0].as_f64().unwrap(), 3.0);
         assert_eq!(max[1].as_f64().unwrap(), 2.0);
         assert_eq!(max[2].as_f64().unwrap(), 4.0);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -728,7 +725,8 @@ mod tests {
         // header) is 4-aligned.
         let mut world = World::new();
         world.set_voxel(5, 5, 5, Voxel::from_rgb(10, 20, 30));
-        let path = std::env::temp_dir().join("voxelith_align.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_align.glb");
         export_glb(&world, &[], &path).unwrap();
 
         let mut bytes = Vec::new();
@@ -739,8 +737,6 @@ mod tests {
             u32::from_le_bytes(bytes[20 + json_len..20 + json_len + 4].try_into().unwrap())
                 as usize;
         assert_eq!(bin_len % 4, 0, "BIN chunk must be 4-byte aligned");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -754,7 +750,8 @@ mod tests {
                 world.set_voxel(x, 0, z, Voxel::from_rgb(100, 100, 100));
             }
         }
-        let path = std::env::temp_dir().join("voxelith_views.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_views.glb");
         export_glb(&world, &[], &path).unwrap();
 
         let (json_bytes, bin) = read_glb(&path);
@@ -772,8 +769,6 @@ mod tests {
                 "view {view:?} extends past buffer end"
             );
         }
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -789,7 +784,8 @@ mod tests {
             }
         }
         world.clear_dirty_flags();
-        let path = std::env::temp_dir().join("voxelith_ao_bake.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_ao_bake.glb");
         export_glb(&world, &[], &path).unwrap();
 
         let (json_bytes, bin) = read_glb(&path);
@@ -815,8 +811,6 @@ mod tests {
             min_r >= 0.5 - 1e-6,
             "R darkened below the ambient floor: {min_r}"
         );
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -833,7 +827,8 @@ mod tests {
         world.set_voxel(10, 0, 0, metal);
         world.clear_dirty_flags();
 
-        let path = std::env::temp_dir().join("voxelith_materials.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_materials.glb");
         export_glb(&world, &[], &path).unwrap();
         let (json_bytes, _) = read_glb(&path);
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -866,8 +861,6 @@ mod tests {
                 && m["pbrMetallicRoughness"]["metallicFactor"].as_f64() == Some(0.0)
         });
         assert!(plain, "plain material must be non-metallic, non-emissive");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -884,7 +877,8 @@ mod tests {
         world.set_voxel(2, 0, 0, b);
         world.clear_dirty_flags();
 
-        let path = std::env::temp_dir().join("voxelith_tintzone.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_tintzone.glb");
         export_glb(&world, &[], &path).unwrap();
         let (json_bytes, bin) = read_glb(&path);
         let bin = bin.expect("non-empty world must have BIN chunk");
@@ -912,8 +906,6 @@ mod tests {
             }
         }
         assert!(seen1 && seen2, "both tint zones should be exported");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -930,7 +922,8 @@ mod tests {
         world.set_voxel(2, 0, 0, b);
         world.clear_dirty_flags();
 
-        let path = std::env::temp_dir().join("voxelith_texcoord_zone.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_texcoord_zone.glb");
         export_glb(&world, &[], &path).unwrap();
         let (json_bytes, bin) = read_glb(&path);
         let bin = bin.expect("non-empty world must have BIN chunk");
@@ -961,8 +954,6 @@ mod tests {
             }
         }
         assert!(seen1 && seen2, "both tint zones should reach TEXCOORD_0.x");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -976,7 +967,8 @@ mod tests {
             rotation: [0.0, 0.0, 0.0, 1.0],
         }];
 
-        let path = std::env::temp_dir().join("voxelith_socket_node.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_socket_node.glb");
         export_glb(&world, &sockets, &path).unwrap();
         let (json_bytes, _) = read_glb(&path);
         let json: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -999,8 +991,6 @@ mod tests {
         // The scene references both the mesh node and the socket node.
         let scene_nodes = json["scenes"][0]["nodes"].as_array().unwrap();
         assert_eq!(scene_nodes.len(), 2);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1014,7 +1004,8 @@ mod tests {
             rotation: [0.0, 0.0, 0.0, 1.0],
         }];
 
-        let path = std::env::temp_dir().join("voxelith_socket_only.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_socket_only.glb");
         export_glb(&world, &sockets, &path).unwrap();
         let (json_bytes, bin) = read_glb(&path);
         assert!(bin.is_none(), "no geometry → no BIN chunk");
@@ -1029,8 +1020,6 @@ mod tests {
         assert!(nodes[0].get("mesh").is_none());
         assert_eq!(nodes[0]["name"], "origin");
         assert_eq!(json["scenes"][0]["nodes"].as_array().unwrap().len(), 1);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1059,17 +1048,15 @@ mod tests {
         world.set_voxel(1, 0, 0, Voxel::from_rgb(50, 100, 200));
         world.clear_dirty_flags();
 
-        let p1 = std::env::temp_dir().join("voxelith_xform_plain.glb");
-        let p2 = std::env::temp_dir().join("voxelith_xform_identity.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let p1 = tmp.path().join("voxelith_xform_plain.glb");
+        let p2 = tmp.path().join("voxelith_xform_identity.glb");
         export_glb(&world, &[], &p1).unwrap();
         export_glb_with_transform(&world, &[], &p2, ExportTransform::default()).unwrap();
 
         let a = std::fs::read(&p1).unwrap();
         let b = std::fs::read(&p2).unwrap();
         assert_eq!(a, b, "identity transform must not change output bytes");
-
-        let _ = std::fs::remove_file(&p1);
-        let _ = std::fs::remove_file(&p2);
     }
 
     #[test]
@@ -1087,7 +1074,8 @@ mod tests {
         }
         world.clear_dirty_flags();
 
-        let path = std::env::temp_dir().join("voxelith_pivot.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_pivot.glb");
         let t = ExportTransform {
             pivot: Pivot::BaseCenter,
             up_axis: UpAxis::Y,
@@ -1118,7 +1106,5 @@ mod tests {
         // POSITION bounds untouched by the pivot (lossless).
         assert_eq!(json["accessors"][0]["min"][0].as_f64().unwrap(), 0.0);
         assert_eq!(json["accessors"][0]["max"][0].as_f64().unwrap(), 2.0);
-
-        let _ = std::fs::remove_file(&path);
     }
 }

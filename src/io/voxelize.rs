@@ -895,10 +895,10 @@ mod tests {
         let mut world = crate::core::World::new();
         world.set_voxel(0, 0, 0, voxel(200, 20, 20));
         world.set_voxel(3, 1, 0, voxel(20, 20, 200));
-        let path = std::env::temp_dir().join("voxelith_custom_attribute.glb");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("voxelith_custom_attribute.glb");
         crate::io::export_glb(&world, &[], &path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
 
         let patch = voxelize_glb(&bytes, 8).expect("a spec-valid custom attribute is not an error");
         assert!(!patch.voxels.is_empty());

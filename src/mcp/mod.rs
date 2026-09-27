@@ -657,13 +657,6 @@ mod tests {
     use crate::core::{Voxel, World};
     use crate::io;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voxelith_mcp_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn server(dir: &std::path::Path) -> VoxelithMcp {
         VoxelithMcp::new(Root::new(dir).unwrap(), Checkpoint::Off)
     }
@@ -702,8 +695,9 @@ mod tests {
         // The whole reason this exists next to the CLI: state is
         // resident, so a second batch builds on the first and undo
         // reaches back through both.
-        let dir = scratch("resident");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
 
         let first = body(&server.apply_ops(batch(HUT)).unwrap());
         assert_eq!(first["ok"], serde_json::json!(true));
@@ -721,8 +715,6 @@ mod tests {
         let undone = body(&server.undo().unwrap());
         assert_eq!(undone["stepped"], serde_json::json!(true));
         assert_eq!(undone["voxel_count"].as_u64().unwrap(), after_first);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -730,8 +722,9 @@ mod tests {
         // Over MCP a preview and a description can only be asked for in
         // one call, so `apply_ops` answers with both from the same
         // world. The session would report zero voxels beside hundreds.
-        let dir = scratch("dry_run");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         let dry = HUT.replace(r#""ops""#, r#""options":{"dry_run":true},"ops""#);
 
         let result = body(&server.apply_ops(batch(&dry)).unwrap());
@@ -747,14 +740,13 @@ mod tests {
             body(&server.describe().unwrap())["voxel_count"],
             serde_json::json!(0)
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_refused_batch_is_an_error_result_the_agent_can_read() {
-        let dir = scratch("refused");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         let result = server
             .apply_ops(batch(
                 r#"{"version":1,"ops":[{"op":"rotate","axis":"y","quarters":9}]}"#,
@@ -765,26 +757,20 @@ mod tests {
         assert_eq!(body["ok"], serde_json::json!(false));
         assert_eq!(body["error"]["code"], serde_json::json!("invalid_argument"));
         assert_eq!(body["error"]["op_index"], serde_json::json!(0));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_path_outside_the_root_is_refused_by_every_tool_that_takes_one() {
         // stdio makes this near-symbolic, but the same tool bodies serve
         // HTTP, where the caller is whoever reached the port.
-        let dir = scratch("confined");
+        let tmp = tempfile::tempdir().unwrap();
+        // The root sits one level down, so an escape would land in a
+        // directory this test owns: nothing else can put a file there.
+        let dir = tmp.path().join("root");
+        std::fs::create_dir(&dir).unwrap();
         let server = server(&dir);
-        // Where an escape would land: the root's sibling, named per
-        // process and swept first, so a stray from another run can't
-        // fail this one and a fresh one is unmistakably ours.
-        let stray = format!(
-            "voxelith_mcp_confined_elsewhere_{}.vxlt",
-            std::process::id()
-        );
-        let landing = std::env::temp_dir().join(&stray);
-        let _ = std::fs::remove_file(&landing);
-        let outside = format!("../{stray}");
+        let landing = tmp.path().join("elsewhere.vxlt");
+        let outside = "../elsewhere.vxlt".to_string();
 
         for result in [
             server.open_project(Parameters(PathArgs {
@@ -805,14 +791,12 @@ mod tests {
             );
         }
         assert!(!landing.exists(), "an escape wrote {}", landing.display());
-
-        let _ = std::fs::remove_file(&landing);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn open_edit_save_round_trips_and_keeps_the_artists_workspace() {
-        let dir = scratch("round_trip");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgb(1, 2, 3));
@@ -823,7 +807,7 @@ mod tests {
         };
         io::save_world_with_state(&world, state, Default::default(), &project).unwrap();
 
-        let server = server(&dir);
+        let server = server(dir);
         let opened = body(
             &server
                 .open_project(Parameters(PathArgs {
@@ -850,14 +834,13 @@ mod tests {
             "camera preserved"
         );
         assert_eq!(state.palette, vec![[9, 8, 7, 255]], "palette preserved");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn saving_a_document_that_has_no_path_says_what_to_do() {
-        let dir = scratch("no_path");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         server.apply_ops(batch(HUT)).unwrap();
         let result = server
             .save_project(Parameters(SaveArgs { path: None }))
@@ -867,8 +850,6 @@ mod tests {
             body(&result)["error"]["code"],
             serde_json::json!("no_project_path")
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -876,7 +857,8 @@ mod tests {
         // The point of the feature: the file keeps up with the agent
         // without the agent remembering to save. Undo counts as an edit,
         // so the file goes back with the session rather than ahead.
-        let dir = scratch("checkpoint");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
         io::save_world_with_state(
             &World::new(),
@@ -886,7 +868,7 @@ mod tests {
         )
         .unwrap();
 
-        let server = checkpointing_server(&dir);
+        let server = checkpointing_server(dir);
         server
             .open_project(Parameters(PathArgs {
                 path: "scene.vxlt".into(),
@@ -911,15 +893,14 @@ mod tests {
         let spent = body(&server.undo().unwrap());
         assert_eq!(spent["stepped"], serde_json::json!(false));
         assert!(spent.get("checkpoint").is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_dry_run_writes_nothing_even_with_check_pointing_on() {
         // The world didn't change, so the file must not be rewritten —
         // otherwise "preview this" makes the human's editor reload.
-        let dir = scratch("checkpoint_dry");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
         io::save_world_with_state(
             &World::new(),
@@ -929,7 +910,7 @@ mod tests {
         )
         .unwrap();
 
-        let server = checkpointing_server(&dir);
+        let server = checkpointing_server(dir);
         server
             .open_project(Parameters(PathArgs {
                 path: "scene.vxlt".into(),
@@ -941,8 +922,6 @@ mod tests {
         assert!(result["report"]["voxel_count"].as_u64().unwrap() > 0);
         assert!(result.get("checkpoint").is_none());
         assert_eq!(voxels_on_disk(&project), 0);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -950,8 +929,9 @@ mod tests {
         // Silence here would read as "check-pointed" to an agent that
         // asked for check-pointing, and the human would sit watching a
         // file nobody is writing.
-        let dir = scratch("checkpoint_no_path");
-        let server = checkpointing_server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = checkpointing_server(dir);
 
         let applied = body(&server.apply_ops(batch(HUT)).unwrap());
         assert_eq!(
@@ -964,13 +944,12 @@ mod tests {
             .as_str()
             .expect("a reason the agent can act on")
             .contains("save_project"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn without_the_flag_nothing_is_written_and_the_answer_stays_quiet() {
-        let dir = scratch("checkpoint_off");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
         io::save_world_with_state(
             &World::new(),
@@ -980,7 +959,7 @@ mod tests {
         )
         .unwrap();
 
-        let server = server(&dir);
+        let server = server(dir);
         server
             .open_project(Parameters(PathArgs {
                 path: "scene.vxlt".into(),
@@ -997,8 +976,6 @@ mod tests {
             0,
             "the file is the agent's to save"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1006,8 +983,9 @@ mod tests {
         // The agent's eye. A picture alone can show that the door is too
         // high; the framing beside it is what turns that into "by one
         // cell", so the two travel together.
-        let dir = scratch("render");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         server.apply_ops(batch(HUT)).unwrap();
 
         let result = server
@@ -1043,8 +1021,6 @@ mod tests {
                 .expect("the payload must be base64");
             assert_eq!(&bytes[1..4], b"PNG", "and it must actually be a PNG");
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1052,8 +1028,9 @@ mod tests {
         // The default has to be the view that shows all three dimensions
         // — an agent that just says "show me" should not get a
         // projection that hides a whole axis.
-        let dir = scratch("render_default");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         server.apply_ops(batch(HUT)).unwrap();
 
         let result = server
@@ -1070,14 +1047,13 @@ mod tests {
         assert_eq!(caption["view"], serde_json::json!("iso"));
         assert_eq!(caption["size"], serde_json::json!(view::DEFAULT_SIZE));
         assert_eq!(caption["empty"], serde_json::json!(false));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_document_renders_but_says_it_was_empty() {
-        let dir = scratch("render_empty");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         let result = server
             .render_views(Parameters(RenderArgs {
                 views: Vec::new(),
@@ -1090,14 +1066,13 @@ mod tests {
         };
         assert_eq!(caption["empty"], serde_json::json!(true));
         assert!(caption["framing"]["bounds"].is_null());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_impossible_size_is_refused_with_a_readable_reason() {
-        let dir = scratch("render_size");
-        let server = server(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let server = server(dir);
         let result = server
             .render_views(Parameters(RenderArgs {
                 views: Vec::new(),
@@ -1109,8 +1084,6 @@ mod tests {
             body(&result)["error"]["code"],
             serde_json::json!("invalid_size")
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

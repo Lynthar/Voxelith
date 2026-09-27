@@ -822,12 +822,10 @@ mod tests {
             p.display().to_string().replace('\\', "\\\\")
         }
 
-        let dir = std::env::temp_dir().join("voxelith_bake_it");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("cube.vxlt");
-        let out = dir.join("cube.glb");
-        let spec_path = dir.join("spec.json");
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("cube.vxlt");
+        let out = dir.path().join("cube.glb");
+        let spec_path = dir.path().join("spec.json");
 
         let mut world = World::new();
         for x in 0..2 {
@@ -863,7 +861,5 @@ mod tests {
         );
         assert!(outcome.reports[0].triangles > 0);
         assert!(!outcome.any_failed());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

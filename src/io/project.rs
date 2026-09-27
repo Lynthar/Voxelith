@@ -795,10 +795,8 @@ mod tests {
     /// `.vxlt` is no less external than a `.vox`.
     #[test]
     fn a_solid_voxel_arrives_opaque_whatever_the_file_said() {
-        let dir = std::env::temp_dir().join("voxelith_alpha_normalize");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("proj.vxlt");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj.vxlt");
 
         let mut world = World::new();
         world.set_voxel(0, 0, 0, Voxel::from_rgba(10, 20, 30, 0));
@@ -812,8 +810,6 @@ mod tests {
         // be fully transparent, and normalizing it would make every
         // empty cell a solid black one.
         assert!(loaded.get_voxel(2, 0, 0).is_air());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -880,10 +876,8 @@ mod tests {
         // The roundtrip tests serialize into memory, so they never
         // exercise the real file path. This drives it: load back,
         // replace an existing file, and leave no `.tmp` behind.
-        let dir = std::env::temp_dir().join("voxelith_atomic_save");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("proj.vxlt");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj.vxlt");
         // What the helper writes — the temp name carries the pid so two
         // processes saving the same project can't share (and truncate)
         // one temp file.
@@ -926,8 +920,6 @@ mod tests {
         );
         assert_eq!(loaded2.get_voxel(5, 5, 5).g, 255);
         assert!(!tmp.exists(), "temp file left behind after overwrite");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     type RawChunk = ((i32, i32, i32), Vec<u8>);
@@ -1110,10 +1102,8 @@ mod tests {
         // Open → save must not reset identity. The host loads the
         // metadata, holds it, and hands it back; `modified_at` alone
         // moves.
-        let dir = std::env::temp_dir().join("voxelith_metadata_carry");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("proj.vxlt");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proj.vxlt");
 
         // A project with distinctive metadata, written directly.
         let mut world = World::new();
@@ -1139,8 +1129,6 @@ mod tests {
             loaded.metadata.modified_at > 1_600_000_000,
             "modified_at is the one field a save should move"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

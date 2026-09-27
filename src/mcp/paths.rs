@@ -136,12 +136,11 @@ impl Root {
 mod tests {
     use super::*;
 
-    /// Each test gets its own tree — the suite runs in parallel.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voxelith_root_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("nested")).unwrap();
-        std::fs::write(dir.join("there.vxlt"), b"x").unwrap();
+    /// A root holding `nested/` and `there.vxlt`, in a directory of its own.
+    fn scratch() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("there.vxlt"), b"x").unwrap();
         dir
     }
 
@@ -151,27 +150,27 @@ mod tests {
 
     #[test]
     fn a_relative_path_hangs_off_the_root() {
-        let dir = scratch("relative");
-        let root = root(&dir);
+        let tmp = scratch();
+        let dir = tmp.path();
+        let root = root(dir);
         assert_eq!(
             root.resolve("there.vxlt").unwrap(),
             dir.canonicalize().unwrap().join("there.vxlt")
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_file_that_does_not_exist_yet_is_fine_if_its_directory_does() {
         // The save case. Refusing it would mean an agent could only ever
         // overwrite files someone else had already made.
-        let dir = scratch("save_target");
-        let root = root(&dir);
+        let tmp = scratch();
+        let dir = tmp.path();
+        let root = root(dir);
         assert!(root.resolve("nested/new.vxlt").is_ok());
         assert!(matches!(
             root.resolve("no/such/dir/new.vxlt"),
             Err(PathError::NoDirectory { .. })
         ));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -179,8 +178,9 @@ mod tests {
         // The whole point: `..` is resolved and *then* tested, so it
         // can't be spelled around — `nested/../../x` leaves the root
         // even though no single component looks suspicious.
-        let dir = scratch("escape");
-        let root = root(&dir);
+        let tmp = scratch();
+        let dir = tmp.path();
+        let root = root(dir);
         for attempt in ["../outside.vxlt", "nested/../../outside.vxlt", ".."] {
             assert!(
                 root.resolve(attempt).is_err(),
@@ -189,50 +189,49 @@ mod tests {
         }
         // …while a `..` that stays inside is not the enemy.
         assert!(root.resolve("nested/../there.vxlt").is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_absolute_path_is_judged_by_where_it_lands() {
-        let dir = scratch("absolute");
-        let root = root(&dir);
+        let tmp = scratch();
+        let dir = tmp.path();
+        let root = root(dir);
         let inside = dir.join("there.vxlt");
         assert!(root.resolve(inside.to_str().unwrap()).is_ok());
 
-        let outside = std::env::temp_dir().join("voxelith_root_absolute_elsewhere.vxlt");
+        let outside = dir.parent().unwrap().join("elsewhere.vxlt");
         assert!(matches!(
             root.resolve(outside.to_str().unwrap()),
             Err(PathError::Outside { .. })
         ));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_path_says_so_rather_than_resolving_to_the_root() {
-        let dir = scratch("empty");
-        let root = root(&dir);
+        let tmp = scratch();
+        let dir = tmp.path();
+        let root = root(dir);
         assert!(matches!(root.resolve(""), Err(PathError::Empty)));
         assert!(matches!(root.resolve("   "), Err(PathError::Empty)));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_refusal_names_the_root_so_it_can_be_acted_on() {
-        let dir = scratch("message");
-        let root = root(&dir);
+        let tmp = scratch();
+        let dir = tmp.path();
+        let root = root(dir);
         let message = root.resolve("../outside.vxlt").unwrap_err().to_string();
         assert!(message.contains("--root"), "got: {message}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_shown_path_carries_no_verbatim_prefix() {
         // What an agent reads back and may well paste into the next
         // call. `\\?\C:\…` is correct and unreadable.
-        let dir = scratch("display");
-        let shown = display(&root(&dir).resolve("there.vxlt").unwrap());
+        let tmp = scratch();
+        let dir = tmp.path();
+        let shown = display(&root(dir).resolve("there.vxlt").unwrap());
         assert!(!shown.contains(r"\\?\"), "got: {shown}");
         assert!(shown.ends_with("there.vxlt"), "got: {shown}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

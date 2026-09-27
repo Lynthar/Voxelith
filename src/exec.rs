@@ -529,14 +529,6 @@ mod tests {
     use super::*;
     use crate::core::{Voxel, World};
 
-    /// Each test gets its own directory — the suite runs in parallel.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("voxelith_exec_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn write_ops(dir: &Path, json: &str) -> PathBuf {
         let path = dir.join("ops.json");
         std::fs::write(&path, json).unwrap();
@@ -560,12 +552,13 @@ mod tests {
     fn one_command_builds_a_model_saves_it_and_exports_a_glb() {
         // The P1 acceptance path end to end: an agent writes ops, gets a
         // project it can reopen and an asset an engine can import.
-        let dir = scratch("build_save_export");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("hut.vxlt");
         let asset = dir.join("hut.glb");
 
         let outcome = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             output: Some(project.clone()),
             export: Some(asset.clone()),
             describe: true,
@@ -599,15 +592,14 @@ mod tests {
         // The saved project must reopen with exactly what was reported.
         let (reloaded, _, _) = io::load_world_with_state(&project).unwrap();
         assert_eq!(solid_voxels(&reloaded) as u64, report.voxel_count);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn editing_someone_elses_project_leaves_their_workspace_alone() {
         // Camera, palette and brush belong to whoever was using the
         // editor. An agent adding a voxel must not reset them.
-        let dir = scratch("preserves_state");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
 
         let mut world = World::new();
@@ -628,7 +620,7 @@ mod tests {
 
         run_exec(&ExecRequest {
             ops: Some(write_ops(
-                &dir,
+                dir,
                 r#"{"version":1,"ops":[{"op":"box","min":[5,0,0],"max":[5,0,0],"voxel":{"rgb":[4,5,6]}}]}"#,
             )),
             input: Some(project.clone()),
@@ -649,13 +641,12 @@ mod tests {
             "sockets survive a headless round trip"
         );
         assert_eq!(state.sockets[0].name, "muzzle");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_dry_run_reports_without_touching_the_project() {
-        let dir = scratch("dry_run");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
         io::save_world_with_state(
             &World::new(),
@@ -666,7 +657,7 @@ mod tests {
         .unwrap();
 
         let outcome = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             input: Some(project.clone()),
             force_dry_run: true,
             ..Default::default()
@@ -682,15 +673,14 @@ mod tests {
 
         let (world, _, _) = io::load_world_with_state(&project).unwrap();
         assert_eq!(solid_voxels(&world), 0, "the file must be untouched");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn asking_for_a_dry_run_and_an_output_is_refused_rather_than_half_honored() {
-        let dir = scratch("dry_run_conflict");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let error = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             output: Some(dir.join("out.vxlt")),
             force_dry_run: true,
             ..Default::default()
@@ -698,17 +688,16 @@ mod tests {
         .expect_err("the combination is contradictory");
         assert_eq!(error.code, "dry_run_with_output");
         assert!(!dir.join("out.vxlt").exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_refused_batch_names_the_op_and_writes_nothing() {
-        let dir = scratch("bad_op");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("out.vxlt");
         let error = run_exec(&ExecRequest {
             ops: Some(write_ops(
-                &dir,
+                dir,
                 r#"{"version":1,"ops":[
                     {"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":{"rgb":[1,2,3]}},
                     {"op":"rotate","axis":"y","quarters":9}
@@ -729,13 +718,12 @@ mod tests {
         let envelope: serde_json::Value = serde_json::from_str(&error.to_json()).unwrap();
         assert_eq!(envelope["ok"], serde_json::json!(false));
         assert_eq!(envelope["error"]["op_index"], serde_json::json!(1));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn malformed_input_is_reported_by_kind() {
-        let dir = scratch("malformed");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         std::fs::write(dir.join("bad.json"), "{ not json").unwrap();
         let error = run_exec(&ExecRequest {
             ops: Some(dir.join("bad.json")),
@@ -758,23 +746,20 @@ mod tests {
         })
         .expect_err("there is no such project");
         assert_eq!(error.code, "input_unreadable");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_unknown_export_extension_is_refused_with_the_list() {
-        let dir = scratch("bad_export");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let error = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             export: Some(dir.join("hut.fbx")),
             ..Default::default()
         })
         .expect_err("fbx is not an export format");
         assert_eq!(error.code, "unsupported_export_format");
         assert!(error.message.contains(".glb"), "got: {}", error.message);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `--in x --out x --export y` is the documented editing loop, so a
@@ -782,11 +767,12 @@ mod tests {
     /// saying nothing was written — the ops are not idempotent.
     #[test]
     fn a_refused_export_leaves_the_project_file_untouched() {
-        let dir = scratch("export_then_save");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("hut.vxlt");
 
         run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             output: Some(project.clone()),
             ..Default::default()
         })
@@ -801,7 +787,7 @@ mod tests {
             ),
         ] {
             let ops = write_ops(
-                &dir,
+                dir,
                 r#"{"version":1,"ops":[{"op":"mirror_copy","axis":"x","region":{"min":[0,0,0],"max":[6,4,6]}}]}"#,
             );
             let error = run_exec(&ExecRequest {
@@ -818,13 +804,12 @@ mod tests {
                 error.code
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn inspect_reads_a_project_without_writing_to_it() {
-        let dir = scratch("inspect");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let project = dir.join("scene.vxlt");
         let mut world = World::new();
         for x in 0..3 {
@@ -854,8 +839,6 @@ mod tests {
         );
         assert_eq!(slice[1], "###", "three voxels in a row");
         assert_eq!(std::fs::read(&project).unwrap(), before, "file untouched");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -863,10 +846,11 @@ mod tests {
         // Ordering, not just the code: the batch below would fail on its
         // own, and what comes back must still be the slice's complaint,
         // because one invocation is the whole session.
-        let dir = scratch("bad_slice");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let error = run_exec(&ExecRequest {
             ops: Some(write_ops(
-                &dir,
+                dir,
                 r#"{"version":1,"ops":[{"op":"rotate","axis":"y","quarters":9}]}"#,
             )),
             output: Some(dir.join("out.vxlt")),
@@ -876,8 +860,6 @@ mod tests {
         .expect_err("the slice request must be JSON");
         assert_eq!(error.code, "invalid_slice");
         assert!(!dir.join("out.vxlt").exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -885,9 +867,10 @@ mod tests {
         // The report and the description have to be two views of one
         // model. A dry run commits nothing, so describing the *session*
         // put "0 voxels" next to a report of 186 in the same envelope.
-        let dir = scratch("dry_run_describe");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let outcome = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             describe: true,
             slice: Some(r#"{"axis":"y","index":0}"#.into()),
             force_dry_run: true,
@@ -904,15 +887,14 @@ mod tests {
         // The slice shows the floor the batch would lay down, not the
         // empty world it left alone.
         assert_eq!(outcome.slice.as_ref().unwrap()[1], "#######");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_success_envelope_is_flat_and_marked_ok() {
-        let dir = scratch("envelope");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let outcome = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, HUT)),
+            ops: Some(write_ops(dir, HUT)),
             describe: true,
             ..Default::default()
         })
@@ -927,8 +909,6 @@ mod tests {
         assert!(envelope.get("saved").is_none());
         assert!(envelope.get("exported").is_none());
         assert!(envelope.get("error").is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -957,24 +937,24 @@ mod tests {
         let id = first["id"].as_str().unwrap().to_string();
         assert!(first["default_params"].is_object());
 
-        let dir = scratch("catalog");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let ops = format!(
             r#"{{"version":1,"ops":[{{"op":"generate","generator":"{id}","params":{}}}]}}"#,
             first["default_params"]
         );
         let outcome = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, &ops)),
+            ops: Some(write_ops(dir, &ops)),
             ..Default::default()
         })
         .unwrap_or_else(|e| panic!("{id} rejected its own advertised params: {e}"));
         assert!(outcome.report.unwrap().changed_voxels > 0);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn exporting_vox_reports_palette_loss_instead_of_hiding_it() {
-        let dir = scratch("vox_export");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         // 300 distinct colors don't fit .vox's 255 palette slots. Kept
         // in a compact block — .vox tops out at 256 cells per axis.
         let entries: Vec<String> = (0..300)
@@ -995,7 +975,7 @@ mod tests {
         );
         let asset = dir.join("model.vox");
         let outcome = run_exec(&ExecRequest {
-            ops: Some(write_ops(&dir, &ops)),
+            ops: Some(write_ops(dir, &ops)),
             export: Some(asset.clone()),
             ..Default::default()
         })
@@ -1009,7 +989,5 @@ mod tests {
             "a lossy export must say so, got: {:?}",
             exported.notes
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
