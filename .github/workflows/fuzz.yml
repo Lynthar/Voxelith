@@ -49,6 +49,10 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       DICT: ${{ matrix.dict }}
+      # cargo-fuzz defaults --target to the triple it was built for, and the
+      # prebuilt Linux binary install-action fetches is musl, which ASan
+      # cannot link against. Name the glibc triple on every cargo fuzz call.
+      TRIPLE: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
@@ -67,12 +71,13 @@ jobs:
           key: fuzz-${{ matrix.target }}
 
       - name: Build
-        run: cargo fuzz build "$TARGET"
+        run: cargo fuzz build --target "$TRIPLE" "$TARGET"
 
       - name: Fuzz for 60 s
         run: |
           mkdir -p "fuzz/corpus/$TARGET"
-          cargo fuzz run "$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -- \
+          cargo fuzz run --target "$TRIPLE" "$TARGET" \
+            "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -- \
             $DICT -max_total_time=60 -rss_limit_mb=2048 -timeout=10
 
       - name: Upload the crashing input
