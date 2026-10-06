@@ -279,3 +279,9 @@ opt-level = 3  # Full optimization for dependencies
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The profile `cargo mutants` builds with: the test profile without the
+# debug info each of its thousand mutant builds would otherwise pay for.
+[profile.mutants]
+inherits = "test"
+debug = "none"

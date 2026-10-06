@@ -1,0 +1,5 @@
+# Settings every `cargo mutants` run shares. The files (`-f`) and the
+# feature flags differ per run, so they stay on the command line.
+gitignore = true
+cap_lints = true
+profile = "mutants"

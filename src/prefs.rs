@@ -84,6 +84,9 @@ pub struct Prefs {
     pub last_export_dir: Option<PathBuf>,
     /// Directory of the last successful `.vox` import, same rationale.
     pub last_import_dir: Option<PathBuf>,
+    /// The agent bridge's "Ask me first". A bool, not `Approval`, so a
+    /// mode added later can't make an older build reject the whole file.
+    pub agent_review: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,10 +183,14 @@ impl Prefs {
     /// Load prefs from the standard location. Any failure (missing
     /// file, parse error, missing config dir) returns `Default`.
     pub fn load() -> Self {
-        let Some(path) = Self::config_path() else {
-            return Self::default();
-        };
-        let data = match std::fs::read_to_string(&path) {
+        match Self::config_path() {
+            Some(path) => Self::load_from(&path),
+            None => Self::default(),
+        }
+    }
+
+    fn load_from(path: &Path) -> Self {
+        let data = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Self::default();
@@ -212,7 +219,7 @@ impl Prefs {
                 // overwritten on exit: a `.corrupt` file the user can
                 // inspect beats silently destroying the evidence.
                 let quarantine = path.with_extension("ron.corrupt");
-                if let Err(rename_err) = std::fs::rename(&path, &quarantine) {
+                if let Err(rename_err) = std::fs::rename(path, &quarantine) {
                     log::warn!(
                         "Could not set the corrupt prefs aside at {}: {}",
                         quarantine.display(),
@@ -235,6 +242,10 @@ impl Prefs {
                 "no config directory available on this platform",
             ));
         };
+        self.save_to(&path)
+    }
+
+    fn save_to(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -353,6 +364,43 @@ mod tests {
         assert!(p.panels.show_palette);
         assert!(!p.panels.show_stats);
         assert!(p.recent_files.is_empty());
+    }
+
+    #[test]
+    fn a_missing_prefs_file_is_the_defaults_and_stays_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.ron");
+        let p = Prefs::load_from(&path);
+        assert!(!p.agent_review);
+        assert_eq!(p.editor.selected_tool, 0);
+        assert!(!path.exists(), "loading must not create the file");
+    }
+
+    #[test]
+    fn a_corrupt_prefs_file_is_set_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.ron");
+        std::fs::write(&path, "(window: (width: ").unwrap();
+        let p = Prefs::load_from(&path);
+        assert!(!p.agent_review);
+        assert!(!path.exists(), "the broken file must move out of the way");
+        let kept = std::fs::read_to_string(dir.path().join("prefs.ron.corrupt")).unwrap();
+        assert_eq!(kept, "(window: (width: ");
+    }
+
+    #[test]
+    fn the_agent_approval_choice_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voxelith").join("prefs.ron");
+        let p = Prefs {
+            agent_review: true,
+            ..Prefs::default()
+        };
+        p.save_to(&path).unwrap();
+        assert!(Prefs::load_from(&path).agent_review);
+        // A file from before the setting existed reads as "apply directly".
+        std::fs::write(&path, "(window: (width: 800, height: 600))").unwrap();
+        assert!(!Prefs::load_from(&path).agent_review);
     }
 
     #[test]

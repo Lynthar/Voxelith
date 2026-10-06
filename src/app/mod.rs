@@ -30,6 +30,7 @@ use voxelith::{
         box_voxels, cylinder_voxels, line_voxels, sphere_voxels, BrushTool, Clipboard, Editor,
         EditorTool, RaycastHit, Selection, SymmetryAxes, Tool,
     },
+    mcp::bridge::Approval,
     mesh::{patch_to_mesh, GreedyMesher, Mesher},
     prefs::{EditorPrefs, Prefs, WindowPrefs},
     procgen::PipelineGraph,
@@ -345,7 +346,11 @@ impl App {
             last_grid_size,
             last_grid_spacing,
             preview: PreviewState::new(),
-            agent: AgentBridgeState::new(),
+            agent: AgentBridgeState::new(if prefs.agent_review {
+                Approval::Review
+            } else {
+                Approval::Auto
+            }),
             last_brush_preview_key: None,
             last_selection_box: None,
             last_ghost_delta: None,
@@ -416,6 +421,7 @@ impl App {
             brush_flags: self.editor.brush_color.flags,
             brush_tint_zone: self.editor.brush_color.tint_zone(),
         };
+        self.prefs.agent_review = self.agent.approval == Approval::Review;
         if let Some(window) = &self.window {
             // `inner_size()` is physical pixels and `WindowPrefs` is
             // logical, matching the restore path. Without the

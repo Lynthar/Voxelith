@@ -52,6 +52,9 @@ pub(super) struct Scratch {
     /// Chunks the session already had, so the cap counts only what this
     /// batch allocates.
     base_chunks: usize,
+    /// `MAX_NEW_CHUNKS`, except in the test that lowers it: reaching the
+    /// real cap takes 2,049 chunks, half a gibibyte.
+    max_new_chunks: usize,
     cells: u64,
     notes: Vec<String>,
     /// The document's graph as the batch found it. `graph_edit` starts
@@ -85,6 +88,7 @@ impl Scratch {
             changes: HashMap::new(),
             selection: input.selection,
             base_chunks: input.world.chunk_count(),
+            max_new_chunks: MAX_NEW_CHUNKS,
             cells: 0,
             notes: Vec::new(),
             base_graph: input.graph.clone(),
@@ -306,13 +310,14 @@ impl Scratch {
         if !self
             .world
             .has_chunk(ChunkPos::from_world_pos(pos.0, pos.1, pos.2))
-            && self.world.chunk_count() >= self.base_chunks + MAX_NEW_CHUNKS
+            && self.world.chunk_count() >= self.base_chunks + self.max_new_chunks
         {
             return Err(OpsError::new(
                 ErrorCode::WorldTooLarge,
                 format!(
-                    "this batch would allocate more than {MAX_NEW_CHUNKS} new chunks (32³ voxels each); \
-                     build closer together or split the work across batches"
+                    "this batch would allocate more than {} new chunks (32³ voxels each); \
+                     build closer together or split the work across batches",
+                    self.max_new_chunks
                 ),
             ));
         }
@@ -1888,6 +1893,37 @@ mod tests {
         assert_eq!(
             scratch.charge(1).unwrap_err().code,
             ErrorCode::CellBudgetExceeded
+        );
+    }
+
+    #[test]
+    fn the_new_chunk_cap_counts_only_chunks_this_batch_allocates() {
+        // The check is the production one; only the cap is lowered.
+        let mut before = World::new();
+        before.set_voxel(0, 0, 0, Voxel::from_rgb(9, 9, 9));
+        let graph = PipelineGraph::default();
+        let mut scratch = Scratch::new(empty_document(&before, &graph));
+        scratch.max_new_chunks = 2;
+        let voxel = Voxel::from_rgb(1, 2, 3);
+        // The chunk the document already had is free, and so is reuse.
+        scratch.write((1, 0, 0), voxel, WriteMode::Replace).unwrap();
+        scratch
+            .write((32, 0, 0), voxel, WriteMode::Replace)
+            .unwrap();
+        scratch
+            .write((64, 0, 0), voxel, WriteMode::Replace)
+            .unwrap();
+        scratch
+            .write((65, 0, 0), voxel, WriteMode::Replace)
+            .unwrap();
+        let error = scratch
+            .write((96, 0, 0), voxel, WriteMode::Replace)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::WorldTooLarge);
+        assert!(
+            error.message.contains("more than 2 new chunks"),
+            "{}",
+            error.message
         );
     }
 

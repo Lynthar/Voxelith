@@ -93,11 +93,11 @@ pub(super) struct AgentBridgeState {
 }
 
 impl AgentBridgeState {
-    pub fn new() -> Self {
+    pub fn new(approval: Approval) -> Self {
         Self {
             receiver: None,
             server: None,
-            approval: Approval::default(),
+            approval,
             pending: None,
             applied: 0,
         }

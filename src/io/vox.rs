@@ -479,22 +479,14 @@ impl VoxScene {
         })
     }
 
-    /// Flatten the scene graph into a `World`, then rotate Z-up to Y-up
-    /// when `convert_axes`. Flattening runs in MagicaVoxel's own space
-    /// so the per-node rotations compose correctly.
+    /// Flatten the scene graph into a `World`, turning each placed cell
+    /// Z-up to Y-up when `convert_axes` so the budgets count the world
+    /// the caller gets. No `nTRN` nodes → everything at the origin.
     pub fn to_world(&self, convert_axes: bool, notes: &mut Notes) -> World {
-        let native = self.to_world_native(FlattenLimits::default(), notes);
-        if convert_axes {
-            rotate_world_z_up_to_y_up(&native)
-        } else {
-            native
-        }
+        self.flatten(convert_axes, FlattenLimits::default(), notes)
     }
 
-    /// Flatten the scene graph in MagicaVoxel's native Z-up space,
-    /// accumulating transforms from the root and rotating each model
-    /// around its own center. No `nTRN` nodes → everything at the origin.
-    fn to_world_native(&self, mut limits: FlattenLimits, notes: &mut Notes) -> World {
+    fn flatten(&self, convert_axes: bool, mut limits: FlattenLimits, notes: &mut Notes) -> World {
         let mut world = World::new();
         if !self.nodes.is_empty() && !self.nodes.contains_key(&0) {
             log::warn!(
@@ -513,7 +505,10 @@ impl VoxScene {
                         continue;
                     }
                     let voxel = voxel_from_palette(self.palette[color_idx as usize]);
-                    world.set_voxel(x as i32, y as i32, z as i32, voxel);
+                    let p = (i64::from(x), i64::from(y), i64::from(z));
+                    if let Some((wx, wy, wz)) = world_cell(p, convert_axes) {
+                        world.set_voxel(wx, wy, wz, voxel);
+                    }
                 }
             }
             return world;
@@ -530,6 +525,7 @@ impl VoxScene {
             0,
             &mut limits,
             notes,
+            convert_axes,
         );
         if limits.exhausted {
             // The log line says which limit; this is the half the person
@@ -551,6 +547,7 @@ impl VoxScene {
         depth: usize,
         limits: &mut FlattenLimits,
         notes: &mut Notes,
+        convert_axes: bool,
     ) {
         if limits.spent() {
             return;
@@ -603,6 +600,7 @@ impl VoxScene {
                         depth + 1,
                         limits,
                         notes,
+                        convert_axes,
                     );
                 }
                 SceneNode::Group { children } => {
@@ -616,14 +614,21 @@ impl VoxScene {
                             depth + 1,
                             limits,
                             notes,
+                            convert_axes,
                         );
                     }
                 }
                 SceneNode::Shape { model_id } => {
                     if let Some(model) = self.models.get(*model_id as usize) {
                         if limits.charge(model.voxels.len() as u64) {
-                            let dropped =
-                                place_model(world, model, &self.palette, translation, rotation);
+                            let dropped = place_model(
+                                world,
+                                model,
+                                &self.palette,
+                                translation,
+                                rotation,
+                                convert_axes,
+                            );
                             if dropped > 0 {
                                 log::warn!(
                                     "VOX: {dropped} voxels of model {model_id} land outside \
@@ -662,8 +667,8 @@ const MAX_SCENE_VISITS: u32 = 1 << 20;
 /// across distant translations could otherwise ask for gigabytes.
 const MAX_SCENE_CHUNKS: usize = 4096;
 // The walk can pass that budget by one model (a 256³ box straddles 9³
-// chunks) and the Y-up turn can double it; a project must still hold it.
-const _: () = assert!((MAX_SCENE_CHUNKS + 9 * 9 * 9) * 2 <= super::project::MAX_PROJECT_CHUNKS);
+// chunks); a project must still hold it.
+const _: () = assert!(MAX_SCENE_CHUNKS + 9 * 9 * 9 <= super::project::MAX_PROJECT_CHUNKS);
 /// Cap on voxels the walk may place. The other three see no work: a
 /// DAG replaying one model a million times into the same chunks passes
 /// all of them. 2^24 is a dense 256³ model, so one legal model fits.
@@ -724,39 +729,15 @@ impl FlattenLimits {
 /// right-handed -90° turn about X, `(x, y, z) -> (x, z, -y)`. A
 /// rotation, not a mirror, so chirality survives.
 #[inline]
-fn mv_to_voxelith(p: (i32, i32, i32)) -> (i32, i32, i32) {
+fn mv_to_voxelith<T: std::ops::Neg<Output = T>>(p: (T, T, T)) -> (T, T, T) {
     (p.0, p.2, -p.1)
 }
 
 /// Inverse of [`mv_to_voxelith`]: Voxelith (Y-up) back to MagicaVoxel
 /// (Z-up), a right-handed +90° about X, `(x, y, z) -> (x, -z, y)`.
 #[inline]
-fn voxelith_to_mv(p: (i32, i32, i32)) -> (i32, i32, i32) {
+fn voxelith_to_mv<T: std::ops::Neg<Output = T>>(p: (T, T, T)) -> (T, T, T) {
     (p.0, -p.2, p.1)
-}
-
-/// Rotate every solid voxel of `src` from Z-up into Y-up space,
-/// returning a fresh world. Applied once on import, after the scene
-/// graph is flattened.
-fn rotate_world_z_up_to_y_up(src: &World) -> World {
-    let mut out = World::new();
-    for chunk_pos in src.sorted_chunk_positions() {
-        let Some(chunk_lock) = src.get_chunk(chunk_pos) else {
-            continue;
-        };
-        let chunk = chunk_lock.read();
-        let (ox, oy, oz) = chunk_pos.world_origin();
-        for (local_pos, voxel) in chunk.iter_solid() {
-            let p = (
-                ox + local_pos.x as i32,
-                oy + local_pos.y as i32,
-                oz + local_pos.z as i32,
-            );
-            let (nx, ny, nz) = mv_to_voxelith(p);
-            out.set_voxel(nx, ny, nz, *voxel);
-        }
-    }
-    out
 }
 
 /// Map a model-space cell index through a signed-permutation rotation.
@@ -781,16 +762,16 @@ fn rotate_cell(rotation: [[i32; 3]; 3], p: [i64; 3], size: [i64; 3]) -> (i64, i6
     (out[0], out[1], out[2])
 }
 
-/// Place one model into the world at `translation`, rotated by
-/// `rotation` around the model's pivot. Skips palette index 0
-/// (empty/transparent). Returns how many voxels landed outside
-/// [`storable`] and were left out.
+/// Place `model` at `translation`, rotated about its pivot and turned
+/// Y-up when `convert_axes`, skipping palette index 0. Returns how many
+/// voxels landed outside [`storable`] and were left out.
 fn place_model(
     world: &mut World,
     model: &VoxModelData,
     palette: &[[u8; 4]; 256],
     translation: (i64, i64, i64),
     rotation: [[i32; 3]; 3],
+    convert_axes: bool,
 ) -> usize {
     let size = [
         i64::from(model.size.0),
@@ -803,11 +784,12 @@ fn place_model(
             continue;
         }
         let rotated = rotate_cell(rotation, [x.into(), y.into(), z.into()], size);
-        let (Some(wx), Some(wy), Some(wz)) = (
-            storable(translation.0 + rotated.0),
-            storable(translation.1 + rotated.1),
-            storable(translation.2 + rotated.2),
-        ) else {
+        let placed = (
+            translation.0 + rotated.0,
+            translation.1 + rotated.1,
+            translation.2 + rotated.2,
+        );
+        let Some((wx, wy, wz)) = world_cell(placed, convert_axes) else {
             dropped += 1;
             continue;
         };
@@ -818,8 +800,7 @@ fn place_model(
 }
 
 /// Cells a `.vxlt` can hold, per axis. A placement past this would save
-/// into a project that refuses to reopen, and at `i32::MIN` the Y-up
-/// turn's negation overflows.
+/// into a project that refuses to reopen.
 const MAX_PLACED_COORD: i64 = super::project::MAX_CHUNK_COORD as i64 * CHUNK_SIZE as i64;
 
 /// `v` as a world coordinate, or `None` past [`MAX_PLACED_COORD`].
@@ -829,6 +810,13 @@ fn storable(v: i64) -> Option<i32> {
     } else {
         None
     }
+}
+
+/// A MagicaVoxel-space cell as the world cell it lands in, turned Y-up
+/// when `convert_axes`. Checked after the turn, which negates an axis.
+fn world_cell(p: (i64, i64, i64), convert_axes: bool) -> Option<(i32, i32, i32)> {
+    let (x, y, z) = if convert_axes { mv_to_voxelith(p) } else { p };
+    Some((storable(x)?, storable(y)?, storable(z)?))
 }
 
 /// Parse an `nTRN` frame's `_t` value ("x y z"). All three components
@@ -1698,9 +1686,14 @@ mod tests {
     /// One unit model under `n` sibling transforms 64 cells apart along
     /// x, so every placement claims a chunk of its own.
     fn build_scattered_scene(n: i32) -> Vec<u8> {
+        build_scattered_scene_of(&build_unit_model(1), n, 0)
+    }
+
+    /// `n` copies of `model`, 64 cells apart along X at height `y`.
+    fn build_scattered_scene_of(model: &[u8], n: i32, y: i32) -> Vec<u8> {
         let shape_id = n + 2;
         let transforms: Vec<i32> = (2..shape_id).collect();
-        let mut chunks = build_unit_model(1);
+        let mut chunks = model.to_vec();
         chunks.extend_from_slice(&build_chunk(
             b"nTRN",
             &build_ntrn_content(0, 1, (0, 0, 0), None),
@@ -1709,7 +1702,7 @@ mod tests {
         for id in transforms {
             chunks.extend_from_slice(&build_chunk(
                 b"nTRN",
-                &build_ntrn_content(id, shape_id, ((id - 2) * 64, 0, 0), None),
+                &build_ntrn_content(id, shape_id, ((id - 2) * 64, y, 0), None),
             ));
         }
         chunks.extend_from_slice(&build_chunk(b"nSHP", &build_nshp_content(shape_id, &[0])));
@@ -1726,7 +1719,7 @@ mod tests {
             max_chunks: 2,
             ..FlattenLimits::default()
         };
-        let world = scene.to_world_native(lowered, &mut notes);
+        let world = scene.flatten(false, lowered, &mut notes);
         let notes = notes.into_vec();
         assert!(
             was_truncated(&notes),
@@ -1742,10 +1735,37 @@ mod tests {
             max_chunks: 4,
             ..FlattenLimits::default()
         };
-        let world = scene.to_world_native(roomy, &mut notes);
+        let world = scene.flatten(false, roomy, &mut notes);
         assert!(notes.0.is_empty(), "clean import: {:?}", notes.0);
         assert_eq!(world.chunk_count(), 4);
         assert_eq!(world.solid_voxel_count(), 4);
+    }
+
+    #[test]
+    fn the_chunk_budget_counts_the_world_after_the_y_up_turn() {
+        // Each copy fills one Z-up chunk but two once Y is negated, so a
+        // budget counted before the turn would let twice as much through.
+        let model = build_model((1, 2, 1), &[(0, 0, 0, 1), (0, 1, 0, 1)]);
+        let file = build_scattered_scene_of(&model, 3, 1);
+        let mut notes = Notes::default();
+        let scene = VoxScene::read(&mut file.as_slice(), &mut notes).expect("v200 read");
+        let lowered = || FlattenLimits {
+            max_chunks: 2,
+            ..FlattenLimits::default()
+        };
+
+        let turned = scene.flatten(true, lowered(), &mut notes);
+        let notes = notes.into_vec();
+        assert!(was_truncated(&notes), "got {notes:?}");
+        assert_eq!(turned.chunk_count(), 4);
+        assert_eq!(turned.solid_voxel_count(), 4);
+
+        // Control: unturned, one chunk per copy, so the third crosses it.
+        let mut notes = Notes::default();
+        let native = scene.flatten(false, lowered(), &mut notes);
+        let notes = notes.into_vec();
+        assert!(was_truncated(&notes), "got {notes:?}");
+        assert_eq!(native.chunk_count(), 3);
     }
 
     #[test]

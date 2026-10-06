@@ -678,6 +678,207 @@ mod tests {
         assert!(call.abandoned(), "a call nobody awaits is abandoned");
     }
 
+    /// Stands in for the editor's frame loop, backed by a headless
+    /// session: answers `calls` requests the way `App` does, then stops.
+    /// It also stops once the server is gone, or a failed test would hang.
+    fn fake_editor(mut receiver: BridgeReceiver, calls: usize) -> tokio::task::JoinHandle<()> {
+        use tokio::sync::mpsc::error::TryRecvError;
+        tokio::task::spawn_blocking(move || {
+            let mut session = crate::agent_ops::AgentSession::new();
+            let mut served = 0;
+            while served < calls {
+                let call = match receiver.calls.try_recv() {
+                    Ok(call) => call,
+                    Err(TryRecvError::Empty) => {
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    Err(TryRecvError::Disconnected) => return,
+                };
+                let reply = answer(&mut session, &call.request);
+                call.answer(reply);
+                served += 1;
+            }
+        })
+    }
+
+    fn answer(session: &mut crate::agent_ops::AgentSession, request: &AgentRequest) -> AgentReply {
+        let status = |session: &crate::agent_ops::AgentSession| BridgeStatus {
+            path: None,
+            voxel_count: session.world.solid_voxel_count(),
+            undo_depth: session.history.undo_count(),
+            redo_depth: session.history.redo_count(),
+            unsaved_changes: false,
+            approval: Approval::Auto,
+        };
+        Ok(match request {
+            AgentRequest::ApplyOps(batch) => {
+                let report = session.apply_ops(batch)?;
+                Answer::Applied(Box::new(Applied {
+                    status: status(session),
+                    report,
+                    description: session.describe(),
+                    review: Reviewed::Auto,
+                }))
+            }
+            AgentRequest::Describe => Answer::Described(Box::new(Described {
+                status: status(session),
+                description: session.describe(),
+            })),
+            AgentRequest::Slice(request) => Answer::Sliced(Box::new(Sliced {
+                slice: session.slice(request)?.lines().map(String::from).collect(),
+                status: status(session),
+            })),
+            AgentRequest::RenderViews { views, size } => Answer::Views(Box::new(Views {
+                views: views
+                    .iter()
+                    .map(|&kind| view::render(&session.world, kind, *size).unwrap())
+                    .collect(),
+                status: status(session),
+            })),
+            AgentRequest::Undo | AgentRequest::Redo => {
+                let stepped = if matches!(request, AgentRequest::Undo) {
+                    session.undo()
+                } else {
+                    session.redo()
+                };
+                Answer::Stepped(Box::new(Stepped {
+                    stepped,
+                    status: status(session),
+                }))
+            }
+        })
+    }
+
+    fn body(result: &CallToolResult) -> serde_json::Value {
+        match result.content.first() {
+            Some(ContentBlock::Text(text)) => serde_json::from_str(&text.text).unwrap(),
+            other => panic!("expected a text block first, got {other:?}"),
+        }
+    }
+
+    fn args<T: serde::de::DeserializeOwned>(json: &str) -> Parameters<T> {
+        Parameters(serde_json::from_str(json).unwrap())
+    }
+
+    const CUBE: &str =
+        r#"{"version":1,"ops":[{"op":"box","min":[0,0,0],"max":[1,1,1],"voxel":{"rgb":[1,2,3]}}]}"#;
+
+    #[tokio::test]
+    async fn every_editor_tool_reaches_the_editor_and_answers_with_its_state() {
+        let (handle, receiver) = channel();
+        let editor = fake_editor(receiver, 6);
+        let server = BridgeMcp::new(handle);
+
+        let applied = body(&server.apply_ops(Parameters(parse(CUBE))).await.unwrap());
+        assert_eq!(applied["ok"], serde_json::json!(true));
+        assert_eq!(applied["voxel_count"], serde_json::json!(8));
+        assert_eq!(applied["report"]["applied_ops"], serde_json::json!(1));
+        assert_eq!(applied["description"]["voxel_count"], serde_json::json!(8));
+        assert_eq!(applied["review"], serde_json::json!("auto"));
+
+        let described = body(&server.describe().await.unwrap());
+        assert_eq!(
+            described["description"]["voxel_count"],
+            serde_json::json!(8)
+        );
+        assert_eq!(described["undo_depth"], serde_json::json!(1));
+
+        let sliced = body(&server.slice(args(r#"{"index":0}"#)).await.unwrap());
+        assert!(sliced["slice"].as_array().unwrap().len() > 1, "{sliced}");
+
+        let undone = body(&server.undo().await.unwrap());
+        assert_eq!(undone["stepped"], serde_json::json!(true));
+        assert_eq!(undone["voxel_count"], serde_json::json!(0));
+        let redone = body(&server.redo().await.unwrap());
+        assert_eq!(redone["stepped"], serde_json::json!(true));
+        assert_eq!(redone["voxel_count"], serde_json::json!(8));
+
+        let rendered = server
+            .render_views(args(r#"{"views":["front","top"],"size":32}"#))
+            .await
+            .unwrap();
+        // The status, then a caption and an image per view.
+        assert_eq!(rendered.content.len(), 5);
+        assert_eq!(body(&rendered)["voxel_count"], serde_json::json!(8));
+        assert!(
+            matches!(&rendered.content[2], ContentBlock::Image(image) if image.mime_type == "image/png")
+        );
+        editor.await.expect("the editor side should not panic");
+    }
+
+    #[tokio::test]
+    async fn an_editor_refusal_is_an_error_result_with_its_code() {
+        let (handle, receiver) = channel();
+        let editor = fake_editor(receiver, 1);
+        let server = BridgeMcp::new(handle);
+        let result = server
+            .apply_ops(Parameters(parse(
+                r#"{"version":1,"ops":[{"op":"rotate","axis":"y","quarters":9}]}"#,
+            )))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            body(&result)["error"]["code"],
+            serde_json::json!("invalid_argument")
+        );
+        editor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_wrong_kind_of_answer_is_an_internal_error() {
+        let (handle, mut receiver) = channel();
+        let editor = tokio::task::spawn_blocking(move || loop {
+            if let Some(call) = receiver.try_recv() {
+                call.answer(Ok(Answer::Stepped(Box::new(Stepped {
+                    stepped: false,
+                    status: status(),
+                }))));
+                return;
+            }
+            std::thread::yield_now();
+        });
+        assert!(BridgeMcp::new(handle).describe().await.is_err());
+        editor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_render_ceiling_is_checked_before_the_editor_is_asked() {
+        let (handle, mut receiver) = channel();
+        let server = BridgeMcp::new(handle);
+        let over = server
+            .render_views(args(&format!(r#"{{"size":{}}}"#, BRIDGE_MAX_SIZE + 1)))
+            .await
+            .unwrap();
+        assert_eq!(over.is_error, Some(true));
+        assert_eq!(
+            body(&over)["error"]["code"],
+            serde_json::json!("invalid_size")
+        );
+        assert!(
+            receiver.try_recv().is_none(),
+            "a refused size must not queue a render"
+        );
+
+        let editor = fake_editor(receiver, 1);
+        let at = server
+            .render_views(args(&format!(r#"{{"size":{BRIDGE_MAX_SIZE}}}"#)))
+            .await
+            .unwrap();
+        assert_eq!(at.is_error, Some(false));
+        editor.await.unwrap();
+    }
+
+    #[test]
+    fn listing_generators_needs_no_editor() {
+        let (handle, receiver) = channel();
+        drop(receiver);
+        let listed = body(&BridgeMcp::new(handle).list_generators().unwrap());
+        assert!(!listed["generators"].as_array().unwrap().is_empty());
+        assert!(listed["graph_template"].is_object());
+    }
+
     /// The status block rides along with every answer, so it has to
     /// serialize flat into the answer rather than as a nested object an
     /// agent has to dig through.
