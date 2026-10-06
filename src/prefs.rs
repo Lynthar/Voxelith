@@ -286,7 +286,10 @@ mod tests {
         let s = ron::ser::to_string_pretty(&p, ron::ser::PrettyConfig::default()).unwrap();
         assert!(s.contains("selected_tool: 10,"), "{s}");
         let back: Prefs = ron::from_str(&s).unwrap();
-        assert_eq!(Tool::from_index(back.editor.selected_tool), Tool::Socket);
+        assert_eq!(
+            Tool::from_index(usize::from(back.editor.selected_tool)),
+            Tool::Socket
+        );
     }
 
     /// A graph written by a build that kept graphs in prefs must survive

@@ -298,7 +298,7 @@ impl App {
             .brush_color
             .set_tint_zone(prefs.editor.brush_tint_zone);
         editor.brush_size = prefs.editor.brush_size.max(1);
-        editor.current_tool = Tool::from_index(prefs.editor.selected_tool);
+        editor.current_tool = Tool::from_index(usize::from(prefs.editor.selected_tool));
         editor.symmetry = SymmetryAxes {
             x: prefs.editor.symmetry[0],
             y: prefs.editor.symmetry[1],

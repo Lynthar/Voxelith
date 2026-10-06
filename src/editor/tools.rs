@@ -96,11 +96,8 @@ impl Tool {
 
     /// The tool a stored index names. Out of range falls back to
     /// `Place`, so a file from a newer build still opens.
-    pub fn from_index(index: u8) -> Tool {
-        Self::ALL
-            .get(usize::from(index))
-            .copied()
-            .unwrap_or(Tool::Place)
+    pub fn from_index(index: usize) -> Tool {
+        Self::ALL.get(index).copied().unwrap_or(Tool::Place)
     }
 
     /// Whether this tool uses click-anchor / drag-extent semantics.
@@ -478,11 +475,12 @@ mod tests {
         // variant and must stay at 10 or old files open the wrong tool.
         for (i, tool) in Tool::ALL.iter().enumerate() {
             assert_eq!(usize::from(tool.index()), i, "{tool:?}");
-            assert_eq!(Tool::from_index(tool.index()), *tool);
+            assert_eq!(Tool::from_index(i), *tool);
         }
         assert_eq!(Tool::Socket.index(), 10);
         assert_eq!(Tool::from_index(11), Tool::Place);
-        assert_eq!(Tool::from_index(u8::MAX), Tool::Place);
+        // 266 is Socket in its low byte: a wide index must not wrap.
+        assert_eq!(Tool::from_index(266), Tool::Place);
     }
 
     #[test]

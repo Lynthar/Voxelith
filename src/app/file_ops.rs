@@ -250,7 +250,7 @@ impl App {
             .iter()
             .map(|&c| super::brush_from_stored(c))
             .collect();
-        self.editor.current_tool = Tool::from_index(state.selected_tool as u8);
+        self.editor.current_tool = Tool::from_index(state.selected_tool);
 
         // View state — Open only, and only when the pose is usable
         // (`camera_from_state` refuses the degenerate ones old files

@@ -479,7 +479,7 @@ fn make_item(src: PathBuf, out: PathBuf, p: &ParsedSettings) -> ResolvedItem {
 
 fn parse_shard(s: &str) -> Result<(usize, usize), BakeError> {
     let bad = || BakeError::Spec(format!("invalid --shard '{s}' (expected i/n, e.g. 0/4)"));
-    let (i, n) = s.split_once('/').ok_or_else(&bad)?;
+    let (i, n) = s.split_once('/').ok_or_else(bad)?;
     let i: usize = i.trim().parse().map_err(|_| bad())?;
     let n: usize = n.trim().parse().map_err(|_| bad())?;
     if n == 0 || i >= n {
