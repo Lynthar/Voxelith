@@ -123,9 +123,7 @@ impl ResolvedItem {
             vertices: 0,
             chunks: 0,
             sockets: 0,
-            color_model: "Per-vertex RGBA; AO baked into RGB; faction tint-zone \
-                          in _TINTZONE + TEXCOORD_0.x"
-                .to_string(),
+            color_model: ExportFormat::Glb.color_model(self.smoothing).to_string(),
             optimize: "none".to_string(),
             bytes_raw: 0,
             bytes_final: 0,

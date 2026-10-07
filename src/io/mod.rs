@@ -166,6 +166,22 @@ impl ExportFormat {
         }
     }
 
+    /// How the file carries color, for the export reports. A smooth
+    /// surface has no AO and every tint zone is 0; `.vox` ignores `surface`.
+    pub fn color_model(self, surface: Surface) -> &'static str {
+        let smooth = surface != Surface::Blocky;
+        match (self, smooth) {
+            (ExportFormat::Glb, false) => {
+                "Per-vertex RGBA; AO baked into RGB; faction tint-zone in \
+                 _TINTZONE + TEXCOORD_0.x"
+            }
+            (ExportFormat::Glb, true) => "Per-vertex RGBA; no AO or tint zones when smooth",
+            (ExportFormat::Obj, false) => "Per-vertex RGB; AO baked in",
+            (ExportFormat::Obj, true) => "Per-vertex RGB; no AO when smooth",
+            (ExportFormat::Vox, _) => "254-color palette",
+        }
+    }
+
     /// `name (.ext)`: the dialog's radio label and the reports'
     /// `format` field.
     pub fn label(self) -> String {

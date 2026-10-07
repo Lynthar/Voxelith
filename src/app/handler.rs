@@ -46,7 +46,8 @@ impl ApplicationHandler for App {
             // The prefs entry can outlive the display it was sized on,
             // so check it against the monitor first. `primary_monitor`
             // is the best guess — the window doesn't exist yet.
-            let (w, h) = match event_loop.primary_monitor() {
+            let monitor = event_loop.primary_monitor();
+            let (w, h) = match &monitor {
                 Some(monitor) => {
                     let logical: winit::dpi::LogicalSize<u32> =
                         monitor.size().to_logical(monitor.scale_factor());
@@ -74,6 +75,18 @@ impl ApplicationHandler for App {
                     return;
                 }
             };
+            // Centered by its outer frame, which only exists now: left to
+            // the OS cascade offset, a window that fit still ran under the
+            // taskbar.
+            if let Some(monitor) = &monitor {
+                let outer = window.outer_size();
+                let (x, y) = super::centered_on_monitor(
+                    (outer.width, outer.height),
+                    (monitor.size().width, monitor.size().height),
+                    (monitor.position().x, monitor.position().y),
+                );
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
             self.init(window);
             // Kick the first frame: the scheduler re-arms itself, but
             // the chain has to start somewhere, and macOS delivers no

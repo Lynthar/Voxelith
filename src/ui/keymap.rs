@@ -245,6 +245,19 @@ pub static CHORDS: &[ChordSpec] = &[
     },
 ];
 
+/// The label of the first chord that fires `action`, for a menu or
+/// tooltip to show instead of spelling the binding out a second time.
+///
+/// # Panics
+/// If no chord fires `action`; a test pins every action the UI asks for.
+pub fn chord_label_for(action: &UiAction) -> &'static str {
+    CHORDS
+        .iter()
+        .find(|c| (c.make)() == *action)
+        .map(|c| c.chord_label)
+        .expect("the UI only labels actions that have a chord")
+}
+
 /// The chord bound to `key` with the given shift state, if any.
 pub fn find_chord(key: KeyCode, shift: bool) -> Option<&'static ChordSpec> {
     CHORDS
@@ -255,6 +268,27 @@ pub fn find_chord(key: KeyCode, shift: bool) -> Option<&'static ChordSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_action_the_ui_labels_has_a_chord() {
+        // The menus and Inspector tooltips in `ui/mod.rs` ask for these.
+        for action in [
+            UiAction::Undo,
+            UiAction::Redo,
+            UiAction::CutSelection,
+            UiAction::CopySelection,
+            UiAction::PasteClipboard { at_cursor: false },
+            UiAction::PasteClipboard { at_cursor: true },
+            UiAction::SelectAllSolid,
+            UiAction::Deselect,
+        ] {
+            let label = chord_label_for(&action);
+            let fired = CHORDS.iter().find(|c| c.chord_label == label).unwrap();
+            assert_eq!((fired.make)(), action, "{label}");
+        }
+        // Two chords redo; the first row is the one shown.
+        assert_eq!(chord_label_for(&UiAction::Redo), "Ctrl+Shift+Z");
+    }
 
     #[test]
     fn every_chord_is_reachable() {

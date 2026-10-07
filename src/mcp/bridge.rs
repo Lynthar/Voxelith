@@ -14,7 +14,7 @@ use crate::agent_ops::{ApplyReport, Description, OpsBatch, OpsError, SliceReques
 use crate::exec::ExecError;
 use crate::view;
 
-use super::{answered, refused, RenderArgs, Rendered};
+use super::{answered, refused, Generators, RenderArgs, Rendered};
 
 /// Loopback port the editor offers by default. Not the headless
 /// server's 8080, so running both at once doesn't clash.
@@ -319,10 +319,7 @@ impl BridgeMcp {
     fn list_generators(&self) -> Result<CallToolResult, McpError> {
         // The registry is static data, so this one needs nothing from
         // the editor and doesn't queue a call for it.
-        answered(Generators {
-            generators: crate::agent_ops::generator_infos(),
-            graph_template: crate::agent_ops::graph_template(),
-        })
+        answered(Generators::current())
     }
 
     #[tool(
@@ -448,15 +445,6 @@ impl BridgeMcp {
             Err(refusal) => refused(&refusal.into()),
         }
     }
-}
-
-#[derive(Serialize)]
-struct Generators {
-    generators: Vec<crate::agent_ops::GeneratorInfo>,
-    /// A working pipeline graph to copy — the only place the graph
-    /// format is spelled out, since the `graph` op's schema keeps it an
-    /// opaque object rather than costing every turn nine definitions.
-    graph_template: serde_json::Value,
 }
 
 #[tool_handler(router = self.tool_router)]

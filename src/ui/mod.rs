@@ -324,7 +324,10 @@ impl Ui {
                 ui.label("Shown in the viewport, not applied yet.");
                 if ui
                     .button("Apply")
-                    .on_hover_text("Commit it. One Ctrl+Z takes the whole batch back out")
+                    .on_hover_text(format!(
+                        "Commit it. One {} takes the whole batch back out",
+                        keymap::chord_label_for(&UiAction::Undo)
+                    ))
                     .clicked()
                 {
                     self.state.request(UiAction::AgentAccept);
@@ -444,11 +447,12 @@ impl Ui {
                 ui.label(egui::RichText::new("When an agent sends a batch").strong());
                 let mut approval = agent.approval;
                 ui.radio_value(&mut approval, Approval::Auto, Approval::Auto.label())
-                    .on_hover_text(
-                        "It lands as it arrives and you watch it happen. Ctrl+Z takes any \
+                    .on_hover_text(format!(
+                        "It lands as it arrives and you watch it happen. {} takes any \
                          step back out — an agent's edits go on your undo stack, not a \
                          separate one.",
-                    );
+                        keymap::chord_label_for(&UiAction::Undo)
+                    ));
                 ui.radio_value(&mut approval, Approval::Review, Approval::Review.label())
                     .on_hover_text(
                         "It goes up as translucent geometry and the agent waits until you \
@@ -844,73 +848,35 @@ impl Ui {
                 });
 
                 ui.menu_button("Edit", |ui| {
-                    let undo_text = if editor.can_undo() {
-                        "Undo  Ctrl+Z"
-                    } else {
-                        "Undo"
-                    };
-                    if ui
-                        .add_enabled(editor.can_undo(), egui::Button::new(undo_text))
-                        .clicked()
-                    {
-                        self.state.request(UiAction::Undo);
-                        ui.close_menu();
-                    }
-                    let redo_text = if editor.can_redo() {
-                        "Redo  Ctrl+Y"
-                    } else {
-                        "Redo"
-                    };
-                    if ui
-                        .add_enabled(editor.can_redo(), egui::Button::new(redo_text))
-                        .clicked()
-                    {
-                        self.state.request(UiAction::Redo);
-                        ui.close_menu();
-                    }
-                    ui.separator();
                     let has_sel = editor.selection.is_some();
                     let can_paste = self.has_clipboard;
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Cut  Ctrl+X"))
-                        .clicked()
-                    {
-                        self.state.request(UiAction::CutSelection);
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Copy  Ctrl+C"))
-                        .clicked()
-                    {
-                        self.state.request(UiAction::CopySelection);
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(can_paste, egui::Button::new("Paste  Ctrl+V"))
-                        .clicked()
-                    {
-                        self.state
-                            .request(UiAction::PasteClipboard { at_cursor: false });
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Delete  Del"))
-                        .clicked()
-                    {
-                        self.state.request(UiAction::DeleteSelection);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Select All  Ctrl+A").clicked() {
-                        self.state.request(UiAction::SelectAllSolid);
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(has_sel, egui::Button::new("Deselect  Esc"))
-                        .clicked()
-                    {
-                        self.state.request(UiAction::Deselect);
-                        ui.close_menu();
+                    // Chorded items take their label from the keymap; Del and
+                    // Esc are plain keys with no row there.
+                    let items = [
+                        ("Undo", UiAction::Undo, editor.can_undo(), None),
+                        ("Redo", UiAction::Redo, editor.can_redo(), None),
+                        ("Cut", UiAction::CutSelection, has_sel, None),
+                        ("Copy", UiAction::CopySelection, has_sel, None),
+                        (
+                            "Paste",
+                            UiAction::PasteClipboard { at_cursor: false },
+                            can_paste,
+                            None,
+                        ),
+                        ("Delete", UiAction::DeleteSelection, has_sel, Some("Del")),
+                        ("Select All", UiAction::SelectAllSolid, true, None),
+                        ("Deselect", UiAction::Deselect, has_sel, Some("Esc")),
+                    ];
+                    for (i, (text, action, enabled, key)) in items.into_iter().enumerate() {
+                        if matches!(i, 2 | 6) {
+                            ui.separator();
+                        }
+                        let shortcut = key.unwrap_or_else(|| keymap::chord_label_for(&action));
+                        let button = egui::Button::new(text).shortcut_text(shortcut);
+                        if ui.add_enabled(enabled, button).clicked() {
+                            self.state.request(action);
+                            ui.close_menu();
+                        }
                     }
                     ui.separator();
                     if ui.button("Clear All").clicked() {
@@ -1385,14 +1351,20 @@ impl Ui {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(has_sel, egui::Button::new("Copy"))
-                .on_hover_text("Ctrl+C — copy non-air voxels into the clipboard")
+                .on_hover_text(format!(
+                    "{} — copy non-air voxels into the clipboard",
+                    keymap::chord_label_for(&UiAction::CopySelection)
+                ))
                 .clicked()
             {
                 self.state.request(UiAction::CopySelection);
             }
             if ui
                 .add_enabled(has_sel, egui::Button::new("Cut"))
-                .on_hover_text("Ctrl+X — copy then clear in one undoable Command")
+                .on_hover_text(format!(
+                    "{} — copy then clear in one undoable Command",
+                    keymap::chord_label_for(&UiAction::CutSelection)
+                ))
                 .clicked()
             {
                 self.state.request(UiAction::CutSelection);
@@ -1400,10 +1372,12 @@ impl Ui {
             let can_paste = self.has_clipboard;
             if ui
                 .add_enabled(can_paste, egui::Button::new("Paste"))
-                .on_hover_text(
-                    "Ctrl+V — paste at selection origin (or cursor cell if no \
-                             selection). Ctrl+Shift+V always pastes at cursor.",
-                )
+                .on_hover_text(format!(
+                    "{} — paste at selection origin (or cursor cell if no \
+                     selection). {} always pastes at cursor.",
+                    keymap::chord_label_for(&UiAction::PasteClipboard { at_cursor: false }),
+                    keymap::chord_label_for(&UiAction::PasteClipboard { at_cursor: true })
+                ))
                 .clicked()
             {
                 self.state
@@ -1420,14 +1394,20 @@ impl Ui {
             }
             if ui
                 .button("Select All")
-                .on_hover_text("Ctrl+A — select the AABB of every non-air voxel")
+                .on_hover_text(format!(
+                    "{} — select the AABB of every non-air voxel",
+                    keymap::chord_label_for(&UiAction::SelectAllSolid)
+                ))
                 .clicked()
             {
                 self.state.request(UiAction::SelectAllSolid);
             }
             if ui
                 .add_enabled(has_sel, egui::Button::new("Deselect"))
-                .on_hover_text("Esc / Ctrl+D — clear the active selection")
+                .on_hover_text(format!(
+                    "Esc / {} — clear the active selection",
+                    keymap::chord_label_for(&UiAction::Deselect)
+                ))
                 .clicked()
             {
                 // Through the action even though this panel holds

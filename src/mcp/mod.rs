@@ -312,10 +312,7 @@ impl VoxelithMcp {
                        format is defined."
     )]
     fn list_generators(&self) -> Result<CallToolResult, McpError> {
-        answered(Generators {
-            generators: crate::agent_ops::generator_infos(),
-            graph_template: crate::agent_ops::graph_template(),
-        })
+        answered(Generators::current())
     }
 
     #[tool(
@@ -546,6 +543,7 @@ struct Described {
     description: Description,
 }
 
+/// The `list_generators` answer, shared by both servers.
 #[derive(Serialize)]
 struct Generators {
     generators: Vec<crate::agent_ops::GeneratorInfo>,
@@ -553,6 +551,15 @@ struct Generators {
     /// format is spelled out, since the `graph` op's schema keeps it an
     /// opaque object rather than costing every turn nine definitions.
     graph_template: serde_json::Value,
+}
+
+impl Generators {
+    fn current() -> Self {
+        Self {
+            generators: crate::agent_ops::generator_infos(),
+            graph_template: crate::agent_ops::graph_template(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -664,6 +671,17 @@ mod tests {
 
     fn checkpointing_server(dir: &std::path::Path) -> VoxelithMcp {
         VoxelithMcp::new(Root::new(dir).unwrap(), Checkpoint::AfterEveryEdit)
+    }
+
+    #[test]
+    fn the_export_tool_names_every_format() {
+        // The description is a literal the format table can't feed.
+        let tool = VoxelithMcp::export_tool_attr();
+        let description = tool.description.unwrap_or_default();
+        for format in io::ExportFormat::ALL {
+            let ext = format!(".{}", format.extension());
+            assert!(description.contains(&ext), "{ext} missing: {description}");
+        }
     }
 
     /// How many voxels the `.vxlt` on disk holds — what a human with

@@ -71,9 +71,8 @@ pub const MAX_GRAPH_EDITS: usize = 64;
 pub const MAX_NEW_CHUNKS: usize = 2048;
 
 /// Machine-readable failure reason. Agents branch on this; humans read
-/// the message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// the message. Serialized as [`ErrorCode::as_str`], its one spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     /// `version` isn't one this build speaks.
     UnsupportedVersion,
@@ -108,6 +107,12 @@ pub enum ErrorCode {
     GraphTooLarge,
     /// A requested slice is bigger than the ASCII view supports.
     SliceTooLarge,
+}
+
+impl Serialize for ErrorCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 impl ErrorCode {
@@ -446,6 +451,14 @@ pub(crate) mod tests {
 
     pub(crate) fn parse(json: &str) -> OpsBatch {
         serde_json::from_str(json).expect("test batch should parse")
+    }
+
+    #[test]
+    fn an_error_code_serializes_as_its_wire_string() {
+        let error = OpsError::new(ErrorCode::CoordinateOutOfRange, "far away").at(3);
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["code"], serde_json::json!("coordinate_out_of_range"));
+        assert_eq!(json["op_index"], serde_json::json!(3));
     }
 
     /// Two ops, the second reading the first's output — enough that a

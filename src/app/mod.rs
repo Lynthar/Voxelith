@@ -1214,32 +1214,74 @@ impl Default for App {
     }
 }
 
-/// Shrink a restored window size the monitor can't display — a size
-/// saved on a 4K dock otherwise hangs its status bar off a laptop
-/// screen. Sizes that already fit are returned untouched.
+/// Shrink a restored size to 85% of the monitor, which leaves room for
+/// the title bar and taskbar the size doesn't count. Smaller sizes are
+/// returned untouched, so save → restore converges.
 fn fit_window_to_monitor((w, h): (u32, u32), (mon_w, mon_h): (u32, u32)) -> (u32, u32) {
-    if mon_w == 0 || mon_h == 0 || (w <= mon_w && h <= mon_h) {
+    let room = |max: u32| (f64::from(max) * 0.85) as u32;
+    if mon_w == 0 || mon_h == 0 || (w <= room(mon_w) && h <= room(mon_h)) {
         return (w, h);
     }
-    let fit = |v: u32, max: u32| v.min((max as f64 * 0.9) as u32).max(1);
-    (fit(w, mon_w), fit(h, mon_h))
+    (w.min(room(mon_w)).max(1), h.min(room(mon_h)).max(1))
+}
+
+/// Top-left that centers `size` on a monitor at `origin` of `monitor`
+/// size, all in physical pixels.
+fn centered_on_monitor(size: (u32, u32), monitor: (u32, u32), origin: (i32, i32)) -> (i32, i32) {
+    let offset = |win: u32, mon: u32| (i64::from(mon) - i64::from(win)).max(0) / 2;
+    (
+        origin.0.saturating_add(offset(size.0, monitor.0) as i32),
+        origin.1.saturating_add(offset(size.1, monitor.1) as i32),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fit_window_to_monitor;
+    use super::{centered_on_monitor, fit_window_to_monitor};
 
     #[test]
     fn a_size_that_fits_is_left_alone() {
-        // Including the exact-fit case: a maximized window saves its
-        // full inner size, and it must survive round-trips unchanged.
         assert_eq!(
             fit_window_to_monitor((1280, 720), (1920, 1080)),
             (1280, 720)
         );
         assert_eq!(
+            fit_window_to_monitor((1632, 918), (1920, 1080)),
+            (1632, 918)
+        );
+    }
+
+    #[test]
+    fn a_full_monitor_size_leaves_room_for_the_frame_and_taskbar() {
+        // A maximized window saves its full inner size; restored as-is,
+        // its title bar and bottom edge end up off the work area.
+        assert_eq!(
             fit_window_to_monitor((1920, 1080), (1920, 1080)),
-            (1920, 1080)
+            (1632, 918)
+        );
+        // The case that was seen: 1474x1076 on a 2194x1234 (175% 4K)
+        // screen, whose taskbar starts at 1186.
+        assert_eq!(
+            fit_window_to_monitor((1474, 1076), (2194, 1234)),
+            (1474, 1048)
+        );
+    }
+
+    #[test]
+    fn a_window_is_centered_on_its_monitor() {
+        assert_eq!(
+            centered_on_monitor((1632, 950), (1920, 1080), (0, 0)),
+            (144, 65)
+        );
+        // A secondary monitor left of the primary has a negative origin.
+        assert_eq!(
+            centered_on_monitor((1000, 800), (1920, 1080), (-1920, 0)),
+            (-1460, 140)
+        );
+        // Bigger than the monitor: pinned to its corner, never past it.
+        assert_eq!(
+            centered_on_monitor((4000, 3000), (1920, 1080), (0, 0)),
+            (0, 0)
         );
     }
 
@@ -1247,7 +1289,7 @@ mod tests {
     fn a_size_from_a_bigger_display_is_brought_back_on_screen() {
         let (w, h) = fit_window_to_monitor((3840, 2160), (1920, 1080));
         assert!(w < 1920 && h < 1080, "got {w}x{h}");
-        assert_eq!((w, h), (1728, 972));
+        assert_eq!((w, h), (1632, 918));
     }
 
     #[test]
@@ -1256,7 +1298,7 @@ mod tests {
         // just clip the offending axis.
         assert_eq!(
             fit_window_to_monitor((1920, 2160), (1920, 1080)),
-            (1728, 972)
+            (1632, 918)
         );
     }
 

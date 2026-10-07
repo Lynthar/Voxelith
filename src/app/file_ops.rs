@@ -773,7 +773,7 @@ impl App {
                             triangles: Some(stats.triangle_count),
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
-                            color_model: "Per-vertex RGBA".into(),
+                            color_model: ExportFormat::Obj.color_model(surface).into(),
                             ..Default::default()
                         },
                     );
@@ -832,7 +832,7 @@ impl App {
                             triangles: Some(stats.triangle_count),
                             vertices: Some(stats.vertex_count),
                             chunks: Some(stats.chunk_count),
-                            color_model: "Per-vertex RGBA".into(),
+                            color_model: ExportFormat::Glb.color_model(surface).into(),
                             notes: socket_note(sockets.len()),
                             ..Default::default()
                         },
@@ -883,7 +883,7 @@ impl App {
                         path,
                         ExportReport {
                             format: ExportFormat::Vox.label(),
-                            color_model: "254-color palette".into(),
+                            color_model: ExportFormat::Vox.color_model(io::Surface::Blocky).into(),
                             notes,
                             ..Default::default()
                         },

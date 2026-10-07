@@ -574,6 +574,27 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
+    fn a_smooth_surface_carries_no_ao_and_no_tint_zone() {
+        // The export reports say so (`ExportFormat::color_model`); a
+        // change here has to change what they tell the user too.
+        let mut world = World::new();
+        let mut voxel = crate::core::Voxel::from_rgb(200, 10, 10);
+        voxel.set_tint_zone(2);
+        // Solid enough that the blur of the heavy pass doesn't dissolve it.
+        for (x, y, z) in (0..64).map(|i| (i % 4, i / 4 % 4, i / 16)) {
+            world.set_voxel(x, y, z, voxel);
+        }
+        for smooth in [false, true] {
+            let mesh = mesh_world_smoothed(&world, smooth).expect("scene is small");
+            assert!(!mesh.is_empty());
+            assert!(mesh
+                .vertices
+                .iter()
+                .all(|v| v.ao == 1.0 && v.tint_zone == 0.0));
+        }
+    }
+
+    #[test]
     fn test_empty_world_no_geometry() {
         let world = World::new();
         let mesh = mesh_world_smoothed(&world, true).expect("scene is small");

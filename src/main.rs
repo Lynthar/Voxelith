@@ -423,3 +423,24 @@ fn run_editor(agent_port: Option<u16>) -> Result<(), winit::error::EventLoopErro
     event_loop.run_app(&mut app)?;
     app.startup_error.take().map_or(Ok(()), |e| Err(e.into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_export_help_names_every_format() {
+        // The doc comment is a literal the format table can't feed.
+        let cli = super::Cli::command();
+        let exec = cli.find_subcommand("exec").expect("exec subcommand");
+        let export = exec
+            .get_arguments()
+            .find(|a| a.get_id() == "export")
+            .expect("--export flag");
+        let help = export.get_help().expect("--export has help").to_string();
+        for format in voxelith::io::ExportFormat::ALL {
+            let ext = format!(".{}", format.extension());
+            assert!(help.contains(&ext), "{ext} missing: {help}");
+        }
+    }
+}

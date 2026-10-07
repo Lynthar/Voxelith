@@ -21,8 +21,8 @@ pub struct ExecRequest {
     pub input: Option<PathBuf>,
     /// `.vxlt` to write afterwards.
     pub output: Option<PathBuf>,
-    /// Mesh export target; the format comes from the extension
-    /// (`.glb` / `.obj` / `.vox`).
+    /// Mesh export target; the extension picks one of
+    /// [`crate::io::ExportFormat::ALL`].
     pub export: Option<PathBuf>,
     pub describe: bool,
     /// A `agent_ops::SliceRequest` as JSON.
